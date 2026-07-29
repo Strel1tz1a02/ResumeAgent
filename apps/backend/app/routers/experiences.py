@@ -14,6 +14,8 @@ from app.schemas.experiences import (
     ExperienceListResponse,
     ExperienceUpdate,
 )
+from app.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
+from app.services.evidence_service import EvidenceService
 from app.services.experience_import_service import ExperienceImportService
 from app.services.experience_service import (
     ExperienceConflictError,
@@ -84,5 +86,56 @@ async def patch_experience(
     """Apply a manual edit and recompute persisted completeness."""
     try:
         return await ExperienceService(session).patch(experience_id, request)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post(
+    "/{experience_id}/evidence",
+    response_model=ExperienceDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_evidence(
+    experience_id: int, request: EvidenceCreate, session: Session
+) -> ExperienceDetail:
+    """Append one owned evidence fact and return the refreshed experience detail."""
+    try:
+        return await EvidenceService(session).create(experience_id, request)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.patch("/{experience_id}/evidence/{evidence_id}", response_model=ExperienceDetail)
+async def patch_evidence(
+    experience_id: int,
+    evidence_id: int,
+    request: EvidenceUpdate,
+    session: Session,
+) -> ExperienceDetail:
+    """Edit an evidence fact only through its owning experience."""
+    try:
+        return await EvidenceService(session).patch(experience_id, evidence_id, request)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.delete("/{experience_id}/evidence/{evidence_id}", response_model=ExperienceDetail)
+async def delete_evidence(experience_id: int, evidence_id: int, session: Session) -> ExperienceDetail:
+    """Delete an owned evidence fact and remove its JSON reference atomically."""
+    try:
+        return await EvidenceService(session).delete(experience_id, evidence_id)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.put("/{experience_id}/evidence-order", response_model=ExperienceDetail)
+async def reorder_evidence(
+    experience_id: int,
+    request: EvidenceReorder,
+    session: Session,
+) -> ExperienceDetail:
+    """Persist a client order only when it is a permutation of the current evidence IDs."""
+    try:
+        return await EvidenceService(session).reorder(experience_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)

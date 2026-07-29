@@ -7,8 +7,11 @@ import pytest
 
 from app.database import Database
 from app.main import app
+from app.repositories.evidence_repository import EvidenceRepository
+from app.repositories.experience_repository import ExperienceRepository
 from app.repositories.experience_repository import ExperienceStaleWriteError
 from app.schemas.experiences import ExperienceCreate, ExperienceUpdate
+from app.services.evidence_service import EvidenceService
 from app.services.experience_service import ExperienceConflictError, ExperienceService
 
 
@@ -104,6 +107,202 @@ async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
     assert detail.json()["experience_id"] == experience_id
     assert detail.json()["evidence_items"] == []
     assert "action" in detail.json()["missing_dimensions"]
+
+
+async def test_create_evidence_appends_it_and_returns_expanded_experience(isolated_db) -> None:
+    """Dropping the JSON reference after inserting evidence would hide a valid fact from clients."""
+    async with _client() as client:
+        created = await client.post(
+            "/api/v1/experiences",
+            json={"kind": "project", "title": "Evidence API"},
+        )
+        experience_id = created.json()["experience_id"]
+        evidence = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={"action": "Built route", "result": "Returned expanded detail", "metrics": "1 API"},
+        )
+
+    assert evidence.status_code == 201
+    payload = evidence.json()
+    assert len(payload["evidence_ids"]) == 1
+    assert payload["evidence_items"] == [
+        {
+            "id": payload["evidence_ids"][0],
+            "action": "Built route",
+            "result": "Returned expanded detail",
+            "metrics": "1 API",
+            "created_at": payload["evidence_items"][0]["created_at"],
+            "updated_at": payload["evidence_items"][0]["updated_at"],
+        }
+    ]
+
+
+async def test_patch_evidence_requires_ownership_and_hides_cross_experience_rows(isolated_db) -> None:
+    """Removing the JSON-membership check would let one experience edit another's evidence."""
+    async with _client() as client:
+        first = await client.post("/api/v1/experiences", json={"title": "First"})
+        second = await client.post("/api/v1/experiences", json={"title": "Second"})
+        first_id = first.json()["experience_id"]
+        second_id = second.json()["experience_id"]
+        evidence = await client.post(
+            f"/api/v1/experiences/{first_id}/evidence", json={"action": "Original"}
+        )
+        evidence_id = evidence.json()["evidence_ids"][0]
+        denied = await client.patch(
+            f"/api/v1/experiences/{second_id}/evidence/{evidence_id}",
+            json={"action": "Stolen"},
+        )
+        updated = await client.patch(
+            f"/api/v1/experiences/{first_id}/evidence/{evidence_id}",
+            json={"action": "Corrected", "result": "Saved"},
+        )
+
+    assert denied.status_code == 404
+    assert updated.status_code == 200
+    assert updated.json()["evidence_items"][0]["action"] == "Corrected"
+    assert updated.json()["evidence_items"][0]["result"] == "Saved"
+
+
+async def test_delete_evidence_removes_row_and_json_reference_atomically(isolated_db) -> None:
+    """Leaving either the evidence row or its reference behind creates inconsistent detail responses."""
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json={"title": "Delete proof"})
+        experience_id = experience.json()["experience_id"]
+        created = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Disposable"}
+        )
+        evidence_id = created.json()["evidence_ids"][0]
+        deleted = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["evidence_ids"] == []
+    assert deleted.json()["evidence_items"] == []
+    async with isolated_db.session() as session:
+        assert await EvidenceRepository(session).get(evidence_id) is None
+
+
+async def test_reorder_evidence_requires_exact_unique_id_set_and_preserves_requested_order(isolated_db) -> None:
+    """Accepting a partial, extra, or duplicated order would silently drop or duplicate evidence."""
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json={"title": "Order proof"})
+        experience_id = experience.json()["experience_id"]
+        first = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "First"}
+        )
+        first_id = first.json()["evidence_ids"][0]
+        second = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Second"}
+        )
+        second_id = second.json()["evidence_ids"][1]
+        missing = await client.put(
+            f"/api/v1/experiences/{experience_id}/evidence-order", json={"evidence_ids": [first_id]}
+        )
+        duplicate = await client.put(
+            f"/api/v1/experiences/{experience_id}/evidence-order",
+            json={"evidence_ids": [first_id, first_id]},
+        )
+        extra = await client.put(
+            f"/api/v1/experiences/{experience_id}/evidence-order",
+            json={"evidence_ids": [first_id, second_id, 99999]},
+        )
+        reordered = await client.put(
+            f"/api/v1/experiences/{experience_id}/evidence-order",
+            json={"evidence_ids": [second_id, first_id]},
+        )
+
+    assert [response.status_code for response in (missing, duplicate, extra)] == [422, 422, 422]
+    assert reordered.status_code == 200
+    assert reordered.json()["evidence_ids"] == [second_id, first_id]
+    assert [item["id"] for item in reordered.json()["evidence_items"]] == [second_id, first_id]
+
+
+async def test_evidence_mutations_recompute_completeness_and_downgrade_ready_experiences(isolated_db) -> None:
+    """Skipping recomputation or ready-to-draft downgrade would advertise an incomplete record as ready."""
+    create_payload = {
+        "kind": "project",
+        "title": "Complete enough",
+        "organization": "Kestrel",
+        "role": "Engineer",
+        "start_date": "2026-01",
+        "is_current": True,
+        "background": "Built a useful product.",
+    }
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json=create_payload)
+        experience_id = experience.json()["experience_id"]
+        enriched = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={"action": "Delivered", "result": "Released", "metrics": "40% faster"},
+        )
+        evidence_id = enriched.json()["evidence_ids"][0]
+
+    assert enriched.json()["completeness"] == 100
+    async with isolated_db.session() as session:
+        await ExperienceRepository(session).set_status(experience_id, "ready")
+        await session.commit()
+
+    async with _client() as client:
+        reduced = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+
+    assert reduced.status_code == 200
+    assert reduced.json()["completeness"] == 55
+    assert reduced.json()["status"] == "draft"
+
+
+async def test_failed_evidence_delete_rolls_back_reference_and_row(isolated_db) -> None:
+    """A failure after detaching evidence must not commit a dangling row or a missing reference."""
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json={"title": "Rollback proof"})
+        experience_id = experience.json()["experience_id"]
+        created = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Must survive"}
+        )
+        evidence_id = created.json()["evidence_ids"][0]
+
+    with patch(
+        "app.services.evidence_service.EvidenceRepository.delete",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("forced delete failure"),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        ) as client:
+            failed = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+
+    assert failed.status_code == 500
+    async with isolated_db.session() as session:
+        stored_experience = await ExperienceRepository(session).get(experience_id)
+        stored_evidence = await EvidenceRepository(session).get(evidence_id)
+    assert stored_experience is not None
+    assert stored_experience.evidence_ids == [evidence_id]
+    assert stored_evidence is not None
+    assert stored_evidence.action == "Must survive"
+
+
+async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, monkeypatch) -> None:
+    """Leaking a stale repository write would turn an ordinary concurrent edit into a 500."""
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json={"title": "Stale proof"})
+        experience_id = experience.json()["experience_id"]
+        created = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Original"}
+        )
+        evidence_id = created.json()["evidence_ids"][0]
+
+    async with isolated_db.session() as session:
+        service = EvidenceService(session)
+
+        async def stale_claim(*_args, **_kwargs):
+            raise ExperienceStaleWriteError("stale experience update")
+
+        monkeypatch.setattr(service._experiences, "set_evidence_ids_if_current", stale_claim)
+        with pytest.raises(ExperienceConflictError):
+            await service.patch(evidence_id=evidence_id, experience_id=experience_id, request=ExperienceUpdate())
+
+    async with isolated_db.session() as session:
+        stored_evidence = await EvidenceRepository(session).get(evidence_id)
+    assert stored_evidence is not None
+    assert stored_evidence.action == "Original"
 
 
 async def test_missing_and_server_owned_fields_are_rejected(isolated_db) -> None:

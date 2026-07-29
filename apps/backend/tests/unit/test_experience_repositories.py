@@ -258,6 +258,44 @@ async def test_all_experience_mutations_advance_updated_at_under_a_fixed_clock(
         await database.close()
 
 
+async def test_conditional_evidence_reference_update_rejects_stale_version(tmp_path) -> None:
+    """A stale evidence append must not overwrite a newer ordered JSON reference set."""
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            experiences = ExperienceRepository(session)
+            evidence = EvidenceRepository(session)
+            item = await experiences.create(ExperienceItem(kind="project", title="Concurrent evidence"))
+            first = await evidence.create(EvidenceItem(action="First"))
+            second = await evidence.create(EvidenceItem(action="Second"))
+            experience_id = item.experience_id
+            observed_updated_at = item.updated_at
+            await session.commit()
+
+        async with database.session() as session:
+            experiences = ExperienceRepository(session)
+            winner = await experiences.set_evidence_ids_if_current(
+                experience_id, observed_updated_at, [first.id]
+            )
+            await session.commit()
+            assert winner.evidence_ids == [first.id]
+
+        async with database.session() as session:
+            experiences = ExperienceRepository(session)
+            with pytest.raises(ExperienceStaleWriteError, match="stale"):
+                await experiences.set_evidence_ids_if_current(
+                    experience_id, observed_updated_at, [second.id]
+                )
+            await session.rollback()
+
+        async with database.session() as session:
+            stored = await ExperienceRepository(session).get(experience_id)
+            assert stored is not None
+            assert stored.evidence_ids == [first.id]
+    finally:
+        await database.close()
+
+
 async def test_experience_system_setters_validate_and_persist_lifecycle_state(tmp_path) -> None:
     """Completeness and status changes must use narrow repository methods with valid values."""
     database = Database(db_path=tmp_path / "experience.db")

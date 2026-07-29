@@ -199,6 +199,57 @@ class ExperienceRepository:
         await self._session.flush()
         return item
 
+    async def set_evidence_ids_if_current(
+        self,
+        experience_id: int,
+        observed_updated_at: str,
+        evidence_ids: list[int],
+    ) -> ExperienceItem:
+        """Atomically replace evidence references only while the observed version is current."""
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidence_ids must not contain duplicates")
+        item = await self.get(experience_id)
+        if item is None:
+            raise ValueError(f"experience {experience_id} does not exist")
+
+        evidence_rows = await self._session.scalars(
+            select(EvidenceItem).where(EvidenceItem.id.in_(evidence_ids))
+        )
+        found_ids = {row.id for row in evidence_rows}
+        missing_ids = set(evidence_ids) - found_ids
+        if missing_ids:
+            raise ValueError(f"evidence does not exist: {sorted(missing_ids)}")
+
+        all_experiences = await self._session.scalars(select(ExperienceItem))
+        for other in all_experiences:
+            if other.experience_id == experience_id:
+                continue
+            shared_ids = set(evidence_ids).intersection(other.evidence_ids or [])
+            if shared_ids:
+                raise ValueError(
+                    f"evidence {sorted(shared_ids)} already belongs to experience "
+                    f"{other.experience_id}"
+                )
+
+        result = await self._session.execute(
+            update(ExperienceItem)
+            .where(
+                ExperienceItem.experience_id == experience_id,
+                ExperienceItem.updated_at == observed_updated_at,
+            )
+            .values(
+                evidence_ids=list(evidence_ids),
+                updated_at=_next_updated_at(observed_updated_at),
+            )
+        )
+        if result.rowcount != 1:
+            raise ExperienceStaleWriteError(
+                f"stale experience update for {experience_id}: the record has changed since it was read"
+            )
+        await self._session.flush()
+        await self._session.refresh(item)
+        return item
+
     async def set_completeness(
         self, experience_id: int, completeness: int
     ) -> ExperienceItem:
