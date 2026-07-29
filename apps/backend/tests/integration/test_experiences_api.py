@@ -7,6 +7,7 @@ import pytest
 
 from app.database import Database
 from app.main import app
+from app.models import Resume
 from app.repositories import evidence_repository as evidence_repository_module
 from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository
@@ -537,3 +538,160 @@ async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalcula
             assert stored.updated_at > frozen_time
     finally:
         await database.close()
+
+
+async def test_mark_ready_rejects_incomplete_record_with_current_guidance(isolated_db) -> None:
+    """Removing readiness validation would let incomplete drafts be advertised as ready."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Incomplete"})
+        experience_id = created.json()["experience_id"]
+        ready = await client.post(f"/api/v1/experiences/{experience_id}/mark-ready")
+
+    assert ready.status_code == 409
+    assert ready.json() == {
+        "completeness": 10,
+        "missing_dimensions": [
+            "organization",
+            "role",
+            "dates",
+            "background",
+            "action",
+            "result",
+            "metrics",
+        ],
+    }
+    async with _client() as client:
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+    assert stored.json()["status"] == "draft"
+
+
+async def test_mark_ready_promotes_complete_draft_and_manual_edit_downgrades_it(isolated_db) -> None:
+    """Skipping the readiness transition or its below-threshold downgrade leaves stale ready state."""
+    payload = {
+        "kind": "project",
+        "title": "Ready project",
+        "organization": "Campus Lab",
+        "role": "Engineer",
+        "start_date": "2026-01",
+        "is_current": True,
+        "background": "Built the matching service.",
+    }
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json=payload)
+        experience_id = created.json()["experience_id"]
+        enriched = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={"action": "Built APIs", "result": "Released", "metrics": "40% faster"},
+        )
+        ready = await client.post(f"/api/v1/experiences/{experience_id}/mark-ready")
+        reduced = await client.patch(
+            f"/api/v1/experiences/{experience_id}",
+            json={
+                "organization": None,
+                "role": None,
+                "start_date": None,
+                "background": None,
+            },
+        )
+
+    assert enriched.json()["completeness"] == 100
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+    assert reduced.status_code == 200
+    assert reduced.json()["completeness"] == 55
+    assert reduced.json()["status"] == "draft"
+
+
+async def test_archive_restore_and_list_filters_keep_lifecycle_views_separate(isolated_db) -> None:
+    """A lifecycle filter regression could surface archived records in the active library."""
+    async with _client() as client:
+        first = await client.post(
+            "/api/v1/experiences",
+            json={
+                "kind": "project",
+                "title": "Alpha",
+                "organization": "Campus Lab",
+                "role": "Engineer",
+                "start_date": "2026-01",
+                "is_current": True,
+                "background": "Built the archive test project.",
+                "tags": ["Python"],
+            },
+        )
+        second = await client.post(
+            "/api/v1/experiences",
+            json={"kind": "work", "title": "Bravo", "organization": "Acme"},
+        )
+        first_id = first.json()["experience_id"]
+        second_id = second.json()["experience_id"]
+        await client.post(
+            f"/api/v1/experiences/{first_id}/evidence",
+            json={"action": "Built it", "result": "Released", "metrics": "1 launch"},
+        )
+        marked_ready = await client.post(f"/api/v1/experiences/{first_id}/mark-ready")
+        archived = await client.post(f"/api/v1/experiences/{first_id}/archive")
+        active = await client.get("/api/v1/experiences")
+        archived_list = await client.get("/api/v1/experiences", params={"status": "archived"})
+        search = await client.get(
+            "/api/v1/experiences",
+            params={"q": "python", "kind": "project", "status": "archived"},
+        )
+        ascending = await client.get(
+            "/api/v1/experiences", params={"status": "archived", "sort": "created_at_asc"}
+        )
+        restored = await client.post(f"/api/v1/experiences/{first_id}/restore")
+
+    assert marked_ready.json()["status"] == "ready"
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+    assert archived.json()["archived_at"] is not None
+    assert active.json()["total"] == 1
+    assert active.json()["items"][0]["experience_id"] == second_id
+    assert archived_list.json()["items"][0]["experience_id"] == first_id
+    assert search.json()["items"][0]["experience_id"] == first_id
+    assert ascending.json()["items"][0]["experience_id"] == first_id
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "draft"
+    assert restored.json()["archived_at"] is None
+
+
+async def test_permanent_delete_requires_archive_and_preserves_unrelated_rows(isolated_db) -> None:
+    """Deleting before archive or touching unrelated evidence/resumes would violate deletion safety."""
+    async with isolated_db.session() as session:
+        session.add(
+            Resume(
+                resume_id="seeded-resume",
+                content="Seeded resume remains independent.",
+                content_type="md",
+            )
+        )
+        await session.commit()
+
+    async with _client() as client:
+        target = await client.post("/api/v1/experiences", json={"title": "Delete me"})
+        other = await client.post("/api/v1/experiences", json={"title": "Keep me"})
+        target_id = target.json()["experience_id"]
+        other_id = other.json()["experience_id"]
+        target_evidence = await client.post(
+            f"/api/v1/experiences/{target_id}/evidence", json={"action": "Disposable"}
+        )
+        other_evidence = await client.post(
+            f"/api/v1/experiences/{other_id}/evidence", json={"action": "Keep evidence"}
+        )
+        target_evidence_id = target_evidence.json()["evidence_ids"][0]
+        other_evidence_id = other_evidence.json()["evidence_ids"][0]
+        impact = await client.get(f"/api/v1/experiences/{target_id}/deletion-impact")
+        rejected = await client.delete(f"/api/v1/experiences/{target_id}/permanent")
+        await client.post(f"/api/v1/experiences/{target_id}/archive")
+        deleted = await client.delete(f"/api/v1/experiences/{target_id}/permanent")
+
+    assert impact.status_code == 200
+    assert impact.json() == {"affected_matches": [], "affected_resumes": []}
+    assert rejected.status_code == 409
+    assert deleted.status_code == 204
+    async with isolated_db.session() as session:
+        assert await ExperienceRepository(session).get(target_id) is None
+        assert await EvidenceRepository(session).get(target_evidence_id) is None
+        assert await ExperienceRepository(session).get(other_id) is not None
+        assert await EvidenceRepository(session).get(other_evidence_id) is not None
+        assert await session.get(Resume, "seeded-resume") is not None

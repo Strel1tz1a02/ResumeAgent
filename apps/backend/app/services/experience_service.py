@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,6 +11,7 @@ from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository, ExperienceStaleWriteError
 from app.schemas.evidence_items import EvidenceRead
 from app.schemas.experiences import (
+    DeletionImpactResponse,
     ExperienceCreate,
     ExperienceDetail,
     ExperienceListQuery,
@@ -18,7 +19,10 @@ from app.schemas.experiences import (
     ExperienceRead,
     ExperienceUpdate,
 )
-from app.services.experience_completeness_service import calculate_completeness
+from app.services.experience_completeness_service import (
+    READY_COMPLETENESS_THRESHOLD,
+    calculate_completeness,
+)
 
 _NON_NULLABLE_UPDATE_FIELDS = frozenset(
     {"kind", "title", "is_current", "raw_input", "technologies", "tags"}
@@ -35,6 +39,15 @@ class ExperienceNotFoundError(ExperienceDomainError):
 
 class ExperienceConflictError(ExperienceDomainError):
     """Raised when an otherwise valid mutation conflicts with stored state."""
+
+
+class ExperienceReadyConflictError(ExperienceConflictError):
+    """Raised when a draft does not yet meet the readiness threshold."""
+
+    def __init__(self, completeness: int, missing_dimensions: list[str]) -> None:
+        super().__init__("Experience is not complete enough to mark ready")
+        self.completeness = completeness
+        self.missing_dimensions = missing_dimensions
 
 
 class ExperienceValidationError(ExperienceDomainError):
@@ -98,6 +111,7 @@ class ExperienceService:
             fields["kind"] = request.kind.value
 
         try:
+            await self._experiences.acquire_ownership_write_lock()
             existing = await self._get_or_raise(experience_id)
             observed_updated_at = existing.updated_at
             self._reject_null_non_nullable_fields(fields)
@@ -119,6 +133,96 @@ class ExperienceService:
         except ExperienceDomainError:
             await self._session.rollback()
             raise
+
+    async def mark_ready(self, experience_id: int) -> ExperienceDetail:
+        """Promote a sufficiently complete active record to ready in one write transaction."""
+        try:
+            await self._experiences.acquire_ownership_write_lock()
+            item = await self._get_or_raise(experience_id)
+            if item.status == "archived":
+                raise ExperienceConflictError(
+                    f"Experience {experience_id} is archived; restore it before marking ready"
+                )
+            guidance = await self._guidance(item)
+            if guidance.completeness < READY_COMPLETENESS_THRESHOLD:
+                raise ExperienceReadyConflictError(
+                    guidance.completeness, guidance.missing_dimensions
+                )
+            updated = await self._experiences.set_status(experience_id, "ready")
+            detail = await self._detail(updated)
+            await self._session.commit()
+            return detail
+        except ExperienceDomainError:
+            await self._session.rollback()
+            raise
+        except ValueError as error:
+            await self._session.rollback()
+            raise ExperienceValidationError(str(error)) from error
+        except Exception:
+            await self._session.rollback()
+            raise
+
+    async def archive(self, experience_id: int) -> ExperienceDetail:
+        """Archive a record as the reversible normal-delete lifecycle action."""
+        return await self._transition_status(experience_id, "archived")
+
+    async def restore(self, experience_id: int) -> ExperienceDetail:
+        """Restore an archived record as a draft regardless of its former readiness."""
+        return await self._transition_status(experience_id, "draft")
+
+    async def deletion_impact(self, experience_id: int) -> DeletionImpactResponse:
+        """Return the stable deletion-review shape without consulting future match/resume links."""
+        await self._get_or_raise(experience_id)
+        return DeletionImpactResponse(affected_matches=[], affected_resumes=[])
+
+    async def permanently_delete(self, experience_id: int) -> None:
+        """Irreversibly delete an archived record and only its currently owned evidence."""
+        try:
+            await self._experiences.acquire_ownership_write_lock()
+            item = await self._get_or_raise(experience_id)
+            if item.status != "archived":
+                raise ExperienceConflictError(
+                    f"Experience {experience_id} must be archived before permanent deletion"
+                )
+            owned_evidence_ids = list(item.evidence_ids or [])
+            deleted = await self._experiences.delete(experience_id)
+            if not deleted:
+                raise ExperienceNotFoundError(f"Experience {experience_id} was not found")
+            for evidence_id in owned_evidence_ids:
+                await self._evidence.delete(evidence_id)
+            await self._session.commit()
+        except ExperienceDomainError:
+            await self._session.rollback()
+            raise
+        except ValueError as error:
+            await self._session.rollback()
+            raise ExperienceValidationError(str(error)) from error
+        except Exception:
+            await self._session.rollback()
+            raise
+
+    async def _transition_status(
+        self,
+        experience_id: int,
+        target_status: Literal["draft", "ready", "archived"],
+    ) -> ExperienceDetail:
+        """Serialize lifecycle writes so a stale action cannot silently overwrite another action."""
+        try:
+            await self._experiences.acquire_ownership_write_lock()
+            await self._get_or_raise(experience_id)
+            updated = await self._experiences.set_status(experience_id, target_status)
+            detail = await self._detail(updated)
+            await self._session.commit()
+            return detail
+        except ExperienceDomainError:
+            await self._session.rollback()
+            raise
+        except ValueError as error:
+            await self._session.rollback()
+            raise ExperienceValidationError(str(error)) from error
+        except Exception:
+            await self._session.rollback()
+            raise
         except ValueError as error:
             await self._session.rollback()
             raise ExperienceValidationError(str(error)) from error
@@ -135,17 +239,27 @@ class ExperienceService:
     async def _recalculate_completeness(self, item: ExperienceItem) -> None:
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
         result = calculate_completeness(item, evidence_items)
-        await self._experiences.set_completeness(item.experience_id, result.completeness)
+        updated = await self._experiences.set_completeness(item.experience_id, result.completeness)
+        if updated.status == "ready" and result.completeness < READY_COMPLETENESS_THRESHOLD:
+            await self._experiences.set_status(item.experience_id, "draft")
 
     async def _detail(self, item: ExperienceItem) -> ExperienceDetail:
-        evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        guidance = calculate_completeness(item, evidence_items)
+        evidence_items, guidance = await self._evidence_and_guidance(item)
         return ExperienceDetail(
             **self._read(item).model_dump(),
             evidence_items=[self._evidence_read(evidence) for evidence in evidence_items],
             missing_dimensions=guidance.missing_dimensions,
             suggested_questions=guidance.suggested_questions,
         )
+
+    async def _guidance(self, item: ExperienceItem):
+        """Calculate live completeness without trusting a potentially stale persisted score."""
+        _, guidance = await self._evidence_and_guidance(item)
+        return guidance
+
+    async def _evidence_and_guidance(self, item: ExperienceItem):
+        evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
+        return evidence_items, calculate_completeness(item, evidence_items)
 
     @staticmethod
     def _validate_merged_dates(item: ExperienceItem, fields: dict[str, Any]) -> None:

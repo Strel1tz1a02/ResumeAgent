@@ -2,17 +2,20 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.repositories.session import get_repository_session
 from app.schemas.experiences import (
+    DeletionImpactResponse,
     ExperienceCreate,
     ExperienceDetail,
     ExperienceImportTextRequest,
     ExperienceListQuery,
     ExperienceListResponse,
     ExperienceUpdate,
+    ReadyConflictResponse,
 )
 from app.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
 from app.services.evidence_service import EvidenceService
@@ -20,6 +23,7 @@ from app.services.experience_import_service import ExperienceImportService
 from app.services.experience_service import (
     ExperienceConflictError,
     ExperienceNotFoundError,
+    ExperienceReadyConflictError,
     ExperienceService,
     ExperienceValidationError,
 )
@@ -86,6 +90,60 @@ async def patch_experience(
     """Apply a manual edit and recompute persisted completeness."""
     try:
         return await ExperienceService(session).patch(experience_id, request)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post("/{experience_id}/mark-ready", response_model=ExperienceDetail)
+async def mark_ready(experience_id: int, session: Session) -> ExperienceDetail:
+    """Mark a complete active experience ready for later resume use."""
+    try:
+        return await ExperienceService(session).mark_ready(experience_id)
+    except ExperienceReadyConflictError as error:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ReadyConflictResponse(
+                completeness=error.completeness,
+                missing_dimensions=error.missing_dimensions,
+            ).model_dump(),
+        )
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post("/{experience_id}/archive", response_model=ExperienceDetail)
+async def archive_experience(experience_id: int, session: Session) -> ExperienceDetail:
+    """Archive an experience as its reversible normal-delete action."""
+    try:
+        return await ExperienceService(session).archive(experience_id)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post("/{experience_id}/restore", response_model=ExperienceDetail)
+async def restore_experience(experience_id: int, session: Session) -> ExperienceDetail:
+    """Restore an archived experience to draft state."""
+    try:
+        return await ExperienceService(session).restore(experience_id)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.get("/{experience_id}/deletion-impact", response_model=DeletionImpactResponse)
+async def deletion_impact(experience_id: int, session: Session) -> DeletionImpactResponse:
+    """Preview the stable impact shape for a pending permanent deletion."""
+    try:
+        return await ExperienceService(session).deletion_impact(experience_id)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.delete("/{experience_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+async def permanently_delete_experience(experience_id: int, session: Session) -> Response:
+    """Irreversibly delete an archived experience after its impact has been reviewed."""
+    try:
+        await ExperienceService(session).permanently_delete(experience_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)
 
