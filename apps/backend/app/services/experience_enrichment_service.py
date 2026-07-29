@@ -73,15 +73,71 @@ _NEGATION_BRIDGE_WORDS = frozenset(
         "soy", "sou", "suis", "the", "un", "una", "um", "uma", "was",
     }
 )
-_CURRENT_PHRASES = (
-    "current", "currently", "present", "ongoing", "still", "actualmente", "en curso", "actuellement",
-    "en cours", "atualmente", "em andamento", "现在", "目前", "至今", "仍在", "在职",
-    "現在", "継続中", "在職中",
+_CJK_GOVERNING_NEGATION_RE = re.compile(
+    r"(?:\u4e0d\u662f|\u5e76\u975e|\u4e0d\u518d(?:\u662f|\u62c5\u4efb)?|"
+    r"\u4ece\u672a(?:\u62c5\u4efb)?|\u6ca1\u6709(?:\u62c5\u4efb)?|"
+    r"\u672a(?:\u62c5\u4efb)?|\u4e00\u5ea6\u3082|\u672a\u7ecf\u9a8c)$"
 )
-_ENDED_PHRASES = (
-    "ended", "finished", "completed", "no longer", "not current", "ya no", "terminó",
-    "finalizó", "terminé", "terminée", "plus", "não mais", "terminou", "encerrado",
-    "已结束", "不再", "已离职", "終了", "退職",
+_PROVENANCE_NEGATION_PREFIXES = (
+    "not", "no", "never", "without", "no longer", "did not", "was not", "is not",
+    "are not", "were not", "do not", "does not", "can not", "have not", "has not",
+    "had not", "sin", "nunca", "ya no", "pas", "jamais", "sans", "ne plus",
+    "n\u00e3o", "n\u00e3o mais", "sem",
+)
+_PROVENANCE_BRIDGE_WORDS = _NEGATION_BRIDGE_WORDS | frozenset(
+    {
+        "assigned", "at", "by", "can", "could", "did", "do", "does", "for", "from",
+        "had", "has", "have", "in", "led", "of", "on", "served", "serve", "serving",
+        "to", "with", "will", "work", "worked", "working", "would",
+    }
+)
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r"(?:[.!?;\u3002\uff01\uff1f\uff1b]+|"
+    r"\b(?:but|however|instead|pero|sin\s+embargo|cependant|pourtant|mas|por\u00e9m)\b|"
+    r"\u4f46\u662f|\u7136\u800c|\u4e0d\u8fc7|\u3057\u304b\u3057|\u305f\u3060\u3057)",
+    re.IGNORECASE,
+)
+_APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
+_CONTRACTIONS = {
+    "aren't": "are not", "can't": "can not", "couldn't": "could not",
+    "didn't": "did not", "doesn't": "does not", "don't": "do not",
+    "hadn't": "had not", "hasn't": "has not", "haven't": "have not",
+    "isn't": "is not", "mightn't": "might not", "mustn't": "must not",
+    "needn't": "need not", "shouldn't": "should not", "wasn't": "was not",
+    "weren't": "were not", "won't": "will not", "wouldn't": "would not",
+}
+_CONTRACTION_RE = re.compile(
+    rf"\b(?:{'|'.join(re.escape(value) for value in _CONTRACTIONS)})\b", re.IGNORECASE
+)
+_CURRENT_STATUS_PATTERNS = (
+    r"\b(?:currently|still)\s+(?:work\w*|employ\w*|serv\w*|in\s+(?:this|the)\s+(?:role|job))\b",
+    r"\b(?:role|job|employment|project|internship)\s+(?:is\s+)?(?:ongoing|current)\b",
+    r"\b(?:work\w*|employ\w*|serv\w*|role|job|employment|project|internship).{0,48}\bto\s+present\b",
+    r"\b(?:actualmente|en\s+curso).{0,48}\b(?:trabaj\w*|emple\w*|puesto|rol|proyecto|pr\u00e1ctica)\b",
+    r"\b(?:trabaj\w*|emple\w*|puesto|rol|proyecto|pr\u00e1ctica).{0,48}\b(?:actualmente|en\s+curso)\b",
+    r"\b(?:actuellement|en\s+cours).{0,48}\b(?:travaill\w*|emploi|poste|r\u00f4le|projet|stage)\b",
+    r"\b(?:travaill\w*|emploi|poste|r\u00f4le|projet|stage).{0,48}\b(?:actuellement|en\s+cours)\b",
+    r"\b(?:atualmente|em\s+andamento).{0,48}\b(?:trabalh\w*|empreg\w*|cargo|fun\u00e7\u00e3o|projeto|est\u00e1gio)\b",
+    r"\b(?:trabalh\w*|empreg\w*|cargo|fun\u00e7\u00e3o|projeto|est\u00e1gio).{0,48}\b(?:atualmente|em\s+andamento)\b",
+    r"(?:\u76ee\u524d|\u73b0\u5728|\u81f3\u4eca|\u4ecd\u5728|\u5728\u804c).{0,12}(?:\u5de5\u4f5c|\u4efb\u804c|\u62c5\u4efb|\u9879\u76ee|\u5b9e\u4e60|\u804c\u4f4d)",
+    r"(?:\u5de5\u4f5c|\u4efb\u804c|\u62c5\u4efb|\u9879\u76ee|\u5b9e\u4e60|\u804c\u4f4d).{0,12}(?:\u76ee\u524d|\u73b0\u5728|\u81f3\u4eca|\u4ecd\u5728|\u5728\u804c)",
+    r"(?:\u73fe\u5728|\u7d99\u7d9a\u4e2d|\u5728\u8077\u4e2d).{0,16}(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3)",
+    r"(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3).{0,16}(?:\u73fe\u5728|\u7d99\u7d9a\u4e2d|\u5728\u8077\u4e2d)",
+)
+_ENDED_STATUS_PATTERNS = (
+    r"\b(?:no\s+longer|not\s+currently).{0,48}\b(?:work\w*|employ\w*|serv\w*|role|job)\b",
+    r"\b(?:role|job|employment|project|internship)\s+(?:has\s+)?(?:ended|finished|completed)\b",
+    r"\b(?:left|resigned)\s+(?:from\s+)?(?:the\s+|my\s+)?(?:role|job|company|employment)\b",
+    r"\b(?:ya\s+no|no\s+actualmente).{0,48}\b(?:trabaj\w*|emple\w*|puesto|rol|proyecto|pr\u00e1ctica)\b",
+    r"\b(?:puesto|rol|emple\w*|proyecto|pr\u00e1ctica).{0,48}\b(?:termin\w*|finaliz\w*|acab\w*)\b",
+    r"\bne\s+.{0,24}\b(?:travaill\w*|emploi|poste|r\u00f4le|projet|stage)\b.{0,24}\bplus\b",
+    r"\b(?:poste|r\u00f4le|emploi|projet|stage).{0,48}\b(?:termin\w*|fini\w*|achev\w*)\b",
+    r"\bn\u00e3o\s+.{0,24}\b(?:trabalh\w*|empreg\w*|cargo|fun\u00e7\u00e3o|projeto|est\u00e1gio)\b.{0,24}\bmais\b",
+    r"\b(?:cargo|fun\u00e7\u00e3o|empreg\w*|projeto|est\u00e1gio).{0,48}\b(?:termin\w*|encerrad\w*)\b",
+    r"(?:\u5df2\u7ed3\u675f|\u4e0d\u518d|\u5df2\u79bb\u804c|\u6ca1\u6709).{0,12}(?:\u5de5\u4f5c|\u4efb\u804c|\u62c5\u4efb|\u9879\u76ee|\u5b9e\u4e60|\u804c\u4f4d|\u516c\u53f8)",
+    r"(?:\u5de5\u4f5c|\u4efb\u804c|\u62c5\u4efb|\u9879\u76ee|\u5b9e\u4e60|\u804c\u4f4d|\u516c\u53f8).{0,12}(?:\u5df2\u7ed3\u675f|\u4e0d\u518d|\u5df2\u79bb\u804c)",
+    r"(?:\u7d42\u4e86|\u9000\u8077|\u3082\u3046.{0,8}\u306a\u3044).{0,16}(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3)",
+    r"(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3).{0,16}(?:\u7d42\u4e86|\u9000\u8077|\u3082\u3046.{0,8}\u306a\u3044)",
 )
 _FALLBACK_QUESTIONS = {
     "identity": "What concise title best describes this experience?",
@@ -120,27 +176,42 @@ def _sanitize_prompt_value(value: Any) -> Any:
 
 def _normalize_relation_text(value: str) -> str:
     """Normalize Unicode and separators while preserving exact word relationships."""
-    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = unicodedata.normalize("NFKC", value).casefold().translate(_APOSTROPHE_TRANSLATION)
+    normalized = _CONTRACTION_RE.sub(lambda match: _CONTRACTIONS[match.group(0)], normalized)
     return " ".join("".join(char if char.isalnum() else " " for char in normalized).split())
+
+
+def _normalized_relation_clauses(value: str) -> list[str]:
+    """Split source at sentence and contrast boundaries before matching a relation."""
+    normalized = unicodedata.normalize("NFKC", value).casefold().translate(_APOSTROPHE_TRANSLATION)
+    normalized = _CONTRACTION_RE.sub(lambda match: _CONTRACTIONS[match.group(0)], normalized)
+    return [
+        normalized_clause
+        for clause in _CLAUSE_BOUNDARY_RE.split(normalized)
+        if (normalized_clause := _normalize_relation_text(clause))
+    ]
 
 
 def _match_is_negated(source: str, start: int, end: int, *, cjk: bool) -> bool:
     """Reject a phrase whose immediately governing prefix negates the asserted relation."""
     prefix = source[:start].rstrip()
     if cjk:
-        return prefix.endswith(_CJK_NEGATION_PREFIXES) or source[end:].lstrip().startswith(
+        return bool(_CJK_GOVERNING_NEGATION_RE.search(prefix)) or source[end:].lstrip().startswith(
             _CJK_NEGATION_FOLLOWING
         )
-    words = _WORD_RE.findall(prefix)[-5:]
+    words = _WORD_RE.findall(prefix)[-10:]
     joined = " ".join(words)
     if "not only" in joined:
         return False
-    for marker in _NEGATION_PREFIXES:
+    for marker in _PROVENANCE_NEGATION_PREFIXES:
         marker_words = marker.split()
         for index in range(len(words) - len(marker_words) + 1):
             if words[index : index + len(marker_words)] != marker_words:
                 continue
-            if all(word in _NEGATION_BRIDGE_WORDS for word in words[index + len(marker_words) :]):
+            if all(
+                word in _PROVENANCE_BRIDGE_WORDS
+                for word in words[index + len(marker_words) :]
+            ):
                 return True
     return False
 
@@ -150,37 +221,35 @@ def _is_supported_value(value: str, source: str, current_value: str | None = Non
     normalized_value = _normalize_relation_text(value)
     if current_value is not None and normalized_value == _normalize_relation_text(current_value):
         return True
-    normalized_source = _normalize_relation_text(source)
     if not normalized_value:
         return False
     cjk = bool(_CJK_RE.search(normalized_value))
-    if cjk:
-        start = normalized_source.find(normalized_value)
-        return start >= 0 and not _match_is_negated(
-            normalized_source, start, start + len(normalized_value), cjk=True
-        )
     pattern = re.compile(rf"(?<!\w){re.escape(normalized_value)}(?!\w)")
-    for match in pattern.finditer(normalized_source):
-        if not _match_is_negated(normalized_source, match.start(), match.end(), cjk=False):
-            return True
-    return False
-
-
-def _has_status_phrase(source: str, phrases: tuple[str, ...]) -> bool:
-    """Find one explicit, affirmative localized lifecycle phrase in user-provided text."""
-    normalized_source = _normalize_relation_text(source)
-    for phrase in phrases:
-        normalized_phrase = _normalize_relation_text(phrase)
-        if _CJK_RE.search(normalized_phrase):
-            start = normalized_source.find(normalized_phrase)
+    for normalized_clause in _normalized_relation_clauses(source):
+        if cjk:
+            start = normalized_clause.find(normalized_value)
             if start >= 0 and not _match_is_negated(
-                normalized_source, start, start + len(normalized_phrase), cjk=True
+                normalized_clause, start, start + len(normalized_value), cjk=True
             ):
                 return True
             continue
-        pattern = re.compile(rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)")
-        for match in pattern.finditer(normalized_source):
-            if not _match_is_negated(normalized_source, match.start(), match.end(), cjk=False):
+        for match in pattern.finditer(normalized_clause):
+            if not _match_is_negated(normalized_clause, match.start(), match.end(), cjk=False):
+                return True
+    return False
+
+
+def _has_contextual_status_evidence(source: str, is_current: bool) -> bool:
+    """Require lifecycle wording to be tied to employment, role, or project context."""
+    patterns = _CURRENT_STATUS_PATTERNS if is_current else _ENDED_STATUS_PATTERNS
+    for normalized_clause in _normalized_relation_clauses(source):
+        cjk = bool(_CJK_RE.search(normalized_clause))
+        for expression in patterns:
+            for match in re.finditer(expression, normalized_clause):
+                if is_current and _match_is_negated(
+                    normalized_clause, match.start(), match.end(), cjk=cjk
+                ):
+                    continue
                 return True
     return False
 
@@ -340,8 +409,8 @@ class ExperienceEnrichmentService:
                     raise InvalidEnrichmentPatch("Enrichment patch contains factual content not supported by raw input or answer")
             if "is_current" in experience_updates.model_fields_set:
                 is_current = experience_updates.is_current
-                if is_current != current.is_current and not _has_status_phrase(
-                    source, _CURRENT_PHRASES if is_current else _ENDED_PHRASES
+                if is_current != current.is_current and not _has_contextual_status_evidence(
+                    source, is_current
                 ):
                     raise InvalidEnrichmentPatch(
                         "Enrichment patch contains factual content not supported by raw input or answer"

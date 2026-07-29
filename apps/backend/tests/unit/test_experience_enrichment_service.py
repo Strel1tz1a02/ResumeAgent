@@ -469,3 +469,114 @@ async def test_answer_rejects_recombined_negated_and_ambiguous_facts_atomically(
     assert stored.role is None
     assert stored.is_current is False
     assert stored.evidence_items == []
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        "I wasn't the project lead.",
+        "I did not serve as project lead.",
+        "I never worked as project lead.",
+        "\u6211\u4e0d\u518d\u62c5\u4efb\u9879\u76ee\u8d1f\u8d23\u4eba\u3002",
+        "\u6211\u4ece\u672a\u62c5\u4efb\u9879\u76ee\u8d1f\u8d23\u4eba\u3002",
+    ],
+)
+async def test_answer_rejects_contracted_and_bridge_negated_role_facts_atomically(
+    isolated_db, raw_input
+) -> None:
+    """Negation must govern a matched role through contractions and bridge verbs."""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Original", raw_input=raw_input)
+        )
+        service = ExperienceEnrichmentService(session)
+        role = "\u9879\u76ee\u8d1f\u8d23\u4eba" if "\u9879" in raw_input else "project lead"
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"role": role}}),
+        ):
+            with pytest.raises(InvalidEnrichmentPatch, match="supported"):
+                await service.apply_answer(created.experience_id, "role", raw_input)
+        stored = await service.get_detail(created.experience_id)
+
+    assert stored.role is None
+    assert stored.evidence_items == []
+
+
+async def test_answer_accepts_affirmed_fact_after_contrastive_negated_clause(isolated_db) -> None:
+    """A negation in an earlier contrastive clause must not poison a later affirmation."""
+    raw_input = "I was not assigned as project lead, but I was engineering manager."
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Original", raw_input=raw_input)
+        )
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"role": "engineering manager"}}),
+        ):
+            updated = await ExperienceEnrichmentService(session).apply_answer(
+                created.experience_id, "role", raw_input
+            )
+
+    assert updated.role == "engineering manager"
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "answer", "expected_current"),
+    [
+        ("I am currently working in this role at Acme.", "I am still employed in this role.", True),
+        ("I have worked in this role from 2024-01 to present.", "to present", True),
+        ("Je travaille actuellement dans ce r\u00f4le.", "Je travaille actuellement dans ce r\u00f4le.", True),
+        ("\u6211\u76ee\u524d\u4ecd\u5728\u62c5\u4efb\u8be5\u9879\u76ee\u8d1f\u8d23\u4eba\u3002", "\u6211\u76ee\u524d\u4ecd\u5728\u62c5\u4efb\u8be5\u9879\u76ee\u8d1f\u8d23\u4eba\u3002", True),
+        ("\u73fe\u5728\u3053\u306e\u30d7\u30ed\u30b8\u30a7\u30af\u30c8\u306b\u5728\u8077\u4e2d\u3067\u3059\u3002", "\u73fe\u5728\u3053\u306e\u30d7\u30ed\u30b8\u30a7\u30af\u30c8\u306b\u5728\u8077\u4e2d\u3067\u3059\u3002", True),
+        ("Ya no trabajo en este puesto.", "Ya no trabajo en este puesto.", False),
+        ("I no longer work in this role.", "I no longer work in this role.", False),
+        ("N\u00e3o trabalho mais neste cargo.", "N\u00e3o trabalho mais neste cargo.", False),
+    ],
+)
+async def test_answer_accepts_contextual_localized_employment_status(
+    isolated_db, raw_input, answer, expected_current
+) -> None:
+    """Lifecycle changes require a current/ended marker tied to work, role, or project context."""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Original", raw_input=raw_input, is_current=not expected_current)
+        )
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"is_current": expected_current}}),
+        ):
+            updated = await ExperienceEnrichmentService(session).apply_answer(
+                created.experience_id, "dates", answer
+            )
+
+    assert updated.is_current is expected_current
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "expected_current"),
+    [
+        ("The current matching flow is stable.", True),
+        ("I completed the task.", False),
+        ("\u5f53\u524d\u5339\u914d\u6d41\u7a0b\u5df2\u5b8c\u6210\u3002", True),
+    ],
+)
+async def test_answer_rejects_unrelated_current_or_completed_status_words_atomically(
+    isolated_db, raw_input, expected_current
+) -> None:
+    """Bare lifecycle keywords in unrelated matching or task text are not employment evidence."""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Original", raw_input=raw_input, is_current=not expected_current)
+        )
+        service = ExperienceEnrichmentService(session)
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"is_current": expected_current}}),
+        ):
+            with pytest.raises(InvalidEnrichmentPatch, match="supported"):
+                await service.apply_answer(created.experience_id, "dates", raw_input)
+        stored = await service.get_detail(created.experience_id)
+
+    assert stored.is_current is (not expected_current)
+    assert stored.evidence_items == []
