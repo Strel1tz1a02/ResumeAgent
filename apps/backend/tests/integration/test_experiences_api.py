@@ -48,6 +48,33 @@ async def test_ai_questions_and_answers_are_stateless_and_return_typed_detail(is
     assert "history" not in answer.json()
 
 
+async def test_ai_answer_rejects_explicit_evidence_action_clear_without_mutating(isolated_db) -> None:
+    """A nullable model action would otherwise become an invalid stored evidence row."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
+        experience_id = created.json()["experience_id"]
+        evidence = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Built API"}
+        )
+        evidence_id = evidence.json()["evidence_ids"][0]
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(
+                return_value={
+                    "evidence_update": {"evidence_id": evidence_id, "updates": {"action": None}}
+                }
+            ),
+        ):
+            rejected = await client.post(
+                f"/api/v1/experiences/{experience_id}/answers",
+                json={"question_id": "action", "answer": "Clear it"},
+            )
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+
+    assert rejected.status_code == 422
+    assert stored.json()["evidence_items"][0]["action"] == "Built API"
+
+
 def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 

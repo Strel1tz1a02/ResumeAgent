@@ -99,6 +99,68 @@ async def test_answer_creates_supported_evidence(enrichment_service) -> None:
     ]
 
 
+async def test_answer_accepts_facts_supported_by_raw_input_and_answer(isolated_db) -> None:
+    """Conservative provenance must still retain facts explicitly supplied by the user."""
+    raw_input = (
+        "Software Engineer at Acme Labs. Built a matching API using Python and FastAPI. "
+        "Released the workflow to campus users."
+    )
+    answer = "The work started in 2025-01 and served 100 users."
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Matcher", raw_input=raw_input)
+        )
+        result = {
+            "experience_updates": {
+                "organization": "Acme Labs",
+                "role": "Software Engineer",
+                "start_date": "2025-01",
+                "technologies": ["Python", "FastAPI"],
+                "background": "Built a matching API",
+            },
+            "new_evidence": {
+                "action": "Built a matching API",
+                "result": "Released the workflow to campus users",
+                "metrics": "100 users",
+            },
+        }
+        with patch("app.services.experience_enrichment_service.complete_json", new=AsyncMock(return_value=result)):
+            updated = await ExperienceEnrichmentService(session).apply_answer(
+                created.experience_id, "details", answer
+            )
+
+    assert updated.organization == "Acme Labs"
+    assert updated.technologies == ["Python", "FastAPI"]
+    assert updated.evidence_items[0].metrics == "100 users"
+
+
+@pytest.mark.parametrize(
+    ("patch_result", "answer"),
+    [
+        ({"experience_updates": {"organization": "Globex Corp"}}, "I worked at Acme Labs."),
+        ({"experience_updates": {"technologies": ["Kubernetes"]}}, "I used Python and FastAPI."),
+        ({"new_evidence": {"action": "Built API", "result": "Doubled retention"}}, "I built the API."),
+        ({"new_evidence": {"action": "Built API", "metrics": "100% faster"}}, "It handled 100 applications."),
+    ],
+)
+async def test_answer_rejects_unsupported_factual_claims_atomically(
+    enrichment_service, patch_result, answer
+) -> None:
+    """Invented employers, tools, outcomes, and metrics must never reach persisted state."""
+    service, experience_id = enrichment_service
+    with patch(
+        "app.services.experience_enrichment_service.complete_json",
+        new=AsyncMock(return_value=patch_result),
+    ):
+        with pytest.raises(InvalidEnrichmentPatch, match="supported"):
+            await service.apply_answer(experience_id, "details", answer)
+
+    stored = await service.get_detail(experience_id)
+    assert stored.organization is None
+    assert stored.technologies == []
+    assert stored.evidence_items == []
+
+
 async def test_answer_rejects_server_owned_patch_fields_without_mutating(enrichment_service) -> None:
     """Accepting status or completeness from the model would bypass server lifecycle controls."""
     service, experience_id = enrichment_service
@@ -117,7 +179,7 @@ async def test_answer_rejects_metric_not_supported_by_answer(enrichment_service)
     service, experience_id = enrichment_service
     result = {"new_evidence": {"action": "Improved matching", "metrics": "50% faster"}}
     with patch("app.services.experience_enrichment_service.complete_json", new=AsyncMock(return_value=result)):
-        with pytest.raises(InvalidEnrichmentPatch, match="quantitative"):
+        with pytest.raises(InvalidEnrichmentPatch, match="supported"):
             await service.apply_answer(experience_id, "metrics", "It made matching faster, but I do not know the number.")
 
     assert (await service.get_detail(experience_id)).evidence_items == []
@@ -128,7 +190,7 @@ async def test_answer_rejects_unsupported_quantitative_background_claim(enrichme
     service, experience_id = enrichment_service
     result = {"experience_updates": {"background": "Improved matching by 50%."}}
     with patch("app.services.experience_enrichment_service.complete_json", new=AsyncMock(return_value=result)):
-        with pytest.raises(InvalidEnrichmentPatch, match="quantitative"):
+        with pytest.raises(InvalidEnrichmentPatch, match="supported"):
             await service.apply_answer(experience_id, "background", "I improved matching, but did not measure it.")
 
     assert (await service.get_detail(experience_id)).background is None
@@ -142,6 +204,25 @@ async def test_answer_rolls_back_malformed_output(enrichment_service) -> None:
             await service.apply_answer(experience_id, "background", "More context")
 
     assert (await service.get_detail(experience_id)).background is None
+
+
+async def test_answer_rejects_explicit_evidence_action_clear(enrichment_service) -> None:
+    """An explicit null action must not invalidate a persisted evidence row."""
+    service, experience_id = enrichment_service
+    created = await EvidenceService(service._session).create(
+        experience_id, EvidenceCreate(action="Built API", result="Released")
+    )
+    result = {
+        "evidence_update": {
+            "evidence_id": created.evidence_ids[0],
+            "updates": {"action": None},
+        }
+    }
+    with patch("app.services.experience_enrichment_service.complete_json", new=AsyncMock(return_value=result)):
+        with pytest.raises(InvalidEnrichmentPatch):
+            await service.apply_answer(experience_id, "action", "Clear it")
+
+    assert (await service.get_detail(experience_id)).evidence_items[0].action == "Built API"
 
 
 async def test_answer_rejects_empty_experience_patch(enrichment_service) -> None:

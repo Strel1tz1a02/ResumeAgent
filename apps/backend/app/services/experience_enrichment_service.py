@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
 from pydantic import ValidationError
@@ -57,7 +58,13 @@ _SECRET_PATTERNS = (
     (re.compile(r"(?i)(bearer\s+)\S+"), r"\1[REDACTED]"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED]"),
 )
-_QUANTITY_RE = re.compile(r"(?<![\w.])(?:[$€£]?\d+(?:[.,]\d+)?(?:%|x)?)(?!\w)")
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+_NON_SUBSTANTIVE_TOKENS = frozenset(
+    {
+        "a", "an", "and", "at", "by", "for", "from", "i", "in", "is", "it", "of", "on",
+        "or", "our", "the", "that", "this", "to", "was", "we", "with", "you", "your",
+    }
+)
 _FALLBACK_QUESTIONS = {
     "identity": "What concise title best describes this experience?",
     "organization": "Which organization, team, or client was this experience with?",
@@ -93,25 +100,30 @@ def _sanitize_prompt_value(value: Any) -> Any:
     return value
 
 
-def _has_unsupported_quantities(
-    fields: ExperienceEnrichmentEvidenceFields | Any | None,
-    answer: str,
-    *,
-    field_names: set[str] | None = None,
-) -> bool:
-    """Reject quantitative evidence that cannot be traced to the user's current answer."""
-    if fields is None:
+def _normalize_tokens(value: str) -> list[str]:
+    """Normalize human text deterministically for conservative factual provenance checks."""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    tokens: list[str] = []
+    for token in _TOKEN_RE.findall(normalized):
+        if token.isascii() and len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
+
+
+def _is_supported_value(value: str, source: str, current_value: str | None = None) -> bool:
+    """Accept only a persisted value, a source substring, or fully sourced material tokens."""
+    if current_value is not None and _normalize_tokens(value) == _normalize_tokens(current_value):
+        return True
+    proposed_tokens = _normalize_tokens(value)
+    source_tokens = _normalize_tokens(source)
+    if not proposed_tokens:
         return False
-    answer_quantities = {token.casefold() for token in _QUANTITY_RE.findall(answer)}
-    for name, value in fields.model_dump(exclude_none=True).items():
-        if field_names is not None and name not in field_names:
-            continue
-        if not isinstance(value, str):
-            continue
-        proposed_quantities = {token.casefold() for token in _QUANTITY_RE.findall(value)}
-        if not proposed_quantities.issubset(answer_quantities):
-            return True
-    return False
+    if "".join(proposed_tokens) in "".join(source_tokens):
+        return True
+    source_set = set(source_tokens)
+    material_tokens = [token for token in proposed_tokens if token not in _NON_SUBSTANTIVE_TOKENS]
+    return bool(material_tokens) and all(token in source_set for token in material_tokens)
 
 
 class ExperienceEnrichmentService:
@@ -171,7 +183,6 @@ class ExperienceEnrichmentService:
                 schema_type="experience_enrichment",
             )
             patch = ExperienceEnrichmentPatch.model_validate(raw)
-            self._validate_quantities(patch, answer)
         except ValidationError as error:
             raise InvalidEnrichmentPatch("Malformed or unsupported enrichment patch") from error
         except InvalidEnrichmentPatch:
@@ -184,6 +195,7 @@ class ExperienceEnrichmentService:
             current = await self._get_or_raise(experience_id)
             if current.updated_at != snapshot_version:
                 raise ExperienceStaleWriteError("experience changed while the answer was being processed")
+            await self._validate_patch_provenance(current, patch, answer)
             updated = await self._apply_patch(current, patch)
             updated = await self._recalculate_completeness(updated)
             refreshed = await ExperienceService(self._session)._detail(updated)
@@ -250,27 +262,70 @@ class ExperienceEnrichmentService:
             updated = await self._experiences.set_status(item.experience_id, "draft")
         return updated
 
+    async def _validate_patch_provenance(
+        self, current: ExperienceItem, patch: ExperienceEnrichmentPatch, answer: str
+    ) -> None:
+        """Prove every new protected fact comes from raw input or this answer before writing."""
+        source = f"{current.raw_input}\n{answer}"
+        experience_updates = patch.experience_updates
+        if experience_updates is not None:
+            for field_name in (
+                "organization", "role", "location", "start_date", "end_date", "background", "notes"
+            ):
+                if field_name not in experience_updates.model_fields_set:
+                    continue
+                value = getattr(experience_updates, field_name)
+                if value is not None and not _is_supported_value(
+                    value, source, getattr(current, field_name)
+                ):
+                    raise InvalidEnrichmentPatch("Enrichment patch contains factual content not supported by raw input or answer")
+            for field_name in ("technologies", "tags"):
+                if field_name not in experience_updates.model_fields_set:
+                    continue
+                values = getattr(experience_updates, field_name)
+                if values is None:
+                    continue
+                current_values = getattr(current, field_name) or []
+                for value in values:
+                    if not any(_is_supported_value(value, source, existing) for existing in current_values) and not _is_supported_value(value, source):
+                        raise InvalidEnrichmentPatch("Enrichment patch contains factual content not supported by raw input or answer")
+
+        if patch.evidence_update is not None:
+            evidence_id = patch.evidence_update.evidence_id
+            if evidence_id not in (current.evidence_ids or []):
+                raise InvalidEnrichmentPatch(
+                    f"Evidence {evidence_id} does not belong to experience {current.experience_id}"
+                )
+            evidence = await self._evidence.get(evidence_id)
+            if evidence is None:
+                raise InvalidEnrichmentPatch(f"Evidence {evidence_id} does not exist")
+            self._validate_evidence_fields(patch.evidence_update.updates, source, evidence)
+
+        if patch.new_evidence is not None:
+            self._validate_evidence_fields(patch.new_evidence, source, None)
+
+    @staticmethod
+    def _validate_evidence_fields(
+        fields: ExperienceEnrichmentEvidenceFields,
+        source: str,
+        current: EvidenceItem | None,
+    ) -> None:
+        for field_name in ("action", "result", "metrics"):
+            if field_name not in fields.model_fields_set:
+                continue
+            value = getattr(fields, field_name)
+            if value is not None and not _is_supported_value(
+                value, source, getattr(current, field_name) if current is not None else None
+            ):
+                raise InvalidEnrichmentPatch(
+                    "Enrichment patch contains factual content not supported by raw input or answer"
+                )
+
     async def _get_or_raise(self, experience_id: int) -> ExperienceItem:
         item = await self._experiences.get(experience_id)
         if item is None:
             raise ExperienceNotFoundError(f"Experience {experience_id} was not found")
         return item
-
-    @staticmethod
-    def _validate_quantities(patch: ExperienceEnrichmentPatch, answer: str) -> None:
-        evidence_fields = [patch.new_evidence]
-        if patch.evidence_update is not None:
-            evidence_fields.append(patch.evidence_update.updates)
-        unsupported = any(_has_unsupported_quantities(fields, answer) for fields in evidence_fields)
-        unsupported = unsupported or _has_unsupported_quantities(
-            patch.experience_updates,
-            answer,
-            field_names={"background", "notes"},
-        )
-        if unsupported:
-            raise InvalidEnrichmentPatch(
-                "Unsupported quantitative claim; ask the user to confirm the metric before storing it"
-            )
 
     @staticmethod
     def _detail_json(detail: Any) -> str:

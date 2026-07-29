@@ -274,6 +274,8 @@ class ExperienceEnrichmentEvidenceFields(BaseModel):
     def _must_contain_a_field(self) -> "ExperienceEnrichmentEvidenceFields":
         if not self.model_fields_set:
             raise ValueError("evidence update must contain at least one field")
+        if "action" in self.model_fields_set and self.action is None:
+            raise ValueError("evidence action cannot be null")
         return self
 
 

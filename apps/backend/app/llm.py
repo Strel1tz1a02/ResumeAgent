@@ -856,11 +856,28 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
                 return False
             logging.warning("Possible truncation detected: enrichment question is incomplete")
             return True
-        patch_keys = {"experience_updates", "evidence_update", "new_evidence"}
-        if not any(key in data for key in patch_keys):
-            logging.warning("Possible truncation detected: enrichment answer has no patch operation")
-            return True
-        return False
+        experience_updates = data.get("experience_updates")
+        if isinstance(experience_updates, dict) and experience_updates:
+            return False
+        evidence_update = data.get("evidence_update")
+        if (
+            isinstance(evidence_update, dict)
+            and isinstance(evidence_update.get("evidence_id"), int)
+            and not isinstance(evidence_update.get("evidence_id"), bool)
+            and evidence_update["evidence_id"] > 0
+            and isinstance(evidence_update.get("updates"), dict)
+            and evidence_update["updates"]
+        ):
+            return False
+        new_evidence = data.get("new_evidence")
+        if (
+            isinstance(new_evidence, dict)
+            and isinstance(new_evidence.get("action"), str)
+            and bool(new_evidence["action"].strip())
+        ):
+            return False
+        logging.warning("Possible truncation detected: enrichment answer has no complete patch operation")
+        return True
 
     if schema_type == "interview_prep":
         required = {
