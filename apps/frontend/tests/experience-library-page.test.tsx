@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   getDeletionImpact: vi.fn(),
   deleteExperiencePermanently: vi.fn(),
   requestNextExperienceQuestion: vi.fn(),
+  submitExperienceAnswer: vi.fn(),
 }));
 
 const translate = vi.hoisted(
@@ -72,6 +73,18 @@ const translate = vi.hoisted(
       'experiences.permanent.affectedMatches': '1 affected matches',
       'experiences.permanent.affectedResumes': '1 affected resumes',
       'experiences.permanent.confirm': 'Delete permanently',
+      'experiences.ai.title': 'Organize with AI',
+      'experiences.ai.start': 'Help me organize with AI',
+      'experiences.ai.answer': 'Your answer',
+      'experiences.ai.submit': 'Apply answer',
+      'experiences.ai.next': 'Ask another question',
+      'experiences.ai.loading': 'Preparing question',
+      'experiences.ai.answering': 'Applying answer',
+      'experiences.ai.retry': 'Try again',
+      'experiences.ai.error':
+        'AI could not organize this experience. You can keep editing it manually.',
+      'experiences.ai.fallback': 'Suggested question',
+      'experiences.ai.manual': 'You can edit this experience manually at any time.',
       'common.cancel': 'Cancel',
     })[key] ?? key
 );
@@ -503,7 +516,7 @@ describe('ExperienceLibraryPage', () => {
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /Searchable project/ })).not.toBeInTheDocument()
     );
-    fireEvent.click(screen.getByRole('button', { name: 'Recycle bin' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Recycle bin' }));
     await screen.findByRole('button', { name: 'Restore experience' });
     fireEvent.click(screen.getByRole('button', { name: 'Restore experience' }));
     await waitFor(() => expect(api.restoreExperience).toHaveBeenCalledWith(1));
@@ -527,7 +540,7 @@ describe('ExperienceLibraryPage', () => {
     });
     api.deleteExperiencePermanently.mockResolvedValue(undefined);
     render(<ExperienceLibraryPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Recycle bin' }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Recycle bin' }));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete permanently' }));
     expect(await screen.findByText('1 affected matches')).toBeInTheDocument();
@@ -878,5 +891,123 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
     await screen.findByRole('heading', { name: 'Second experience' });
     expect(screen.queryByText('ready failed')).not.toBeInTheDocument();
+  });
+
+  it('starts AI only on request, applies one answer, and offers the returned next question', async () => {
+    const enriched = {
+      ...listItem,
+      title: 'Organized project',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: {
+        question_id: 'next-2',
+        question: 'What result did it achieve?',
+        is_fallback: false,
+      },
+    };
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'start-1',
+      question: 'What did you personally build?',
+      is_fallback: true,
+    });
+    api.submitExperienceAnswer.mockResolvedValue(enriched);
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('button', { name: 'Help me organize with AI' });
+    expect(api.requestNextExperienceQuestion).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Help me organize with AI' }));
+
+    expect(await screen.findByText('What did you personally build?')).toBeInTheDocument();
+    expect(screen.getByText('Suggested question')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'I designed the search service.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply answer' }));
+
+    await waitFor(() =>
+      expect(api.submitExperienceAnswer).toHaveBeenCalledWith(1, {
+        question_id: 'start-1',
+        answer: 'I designed the search service.',
+      })
+    );
+    expect(await screen.findByRole('heading', { name: 'Organized project' })).toBeInTheDocument();
+    expect(screen.getByText('What result did it achieve?')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveValue('');
+    expect(
+      screen.getByText('You can edit this experience manually at any time.')
+    ).toBeInTheDocument();
+  });
+
+  it('keeps manual editing available and retries the current AI request after an error', async () => {
+    api.requestNextExperienceQuestion
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({
+        question_id: 'retry-1',
+        question: 'What changed?',
+        is_fallback: false,
+      });
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('button', { name: 'Help me organize with AI' });
+    fireEvent.click(screen.getByRole('button', { name: 'Help me organize with AI' }));
+    expect(
+      await screen.findByText(
+        'AI could not organize this experience. You can keep editing it manually.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Title' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('What changed?')).toBeInTheDocument();
+  });
+
+  it('ignores a late AI answer after the user selects a different experience', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'late-1',
+      question: 'What did you build?',
+      is_fallback: false,
+    });
+    api.submitExperienceAnswer.mockReturnValue(pendingAnswer.promise);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Help me organize with AI' }));
+    await screen.findByText('What did you build?');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'A service.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply answer' }));
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+
+    pendingAnswer.resolve({
+      ...listItem,
+      title: 'Late AI overwrite',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: null,
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Late AI overwrite' })).not.toBeInTheDocument()
+    );
+    expect(screen.getByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
+  });
+
+  it('exposes the active and archived views as ARIA tabs', async () => {
+    render(<ExperienceLibraryPage />);
+    expect(await screen.findByRole('tab', { name: 'Active', selected: true })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Recycle bin', selected: false })).toBeInTheDocument();
   });
 });

@@ -89,6 +89,10 @@
     "llmNotConfiguredMessage": "> API キーがありません。設定するまで履歴書のカスタマイズは無効です。",
     "setupRequiredTitle": "[ 設定が必要 ]",
     "setupRequiredMessage": "> 履歴書のカスタマイズを有効にするには、設定で API キーを構成してください。",
+    "experienceLibrary": {
+      "title": "経験ライブラリ",
+      "description": "メモを再利用できる履歴書の根拠に変換します。"
+    },
     "uploadDialog": {
       "success": "履歴書のアップロードに成功しました。",
       "successMaster": "履歴書がアップロードされ、マスターとして設定されました。",
@@ -99,6 +103,119 @@
       "dropzoneSubtitle": "PDF、DOC、DOCX（最大 4MB）",
       "tryDifferentFile": "別のファイルを試す",
       "parsingFailedKeepOpen": "AI 解析に失敗しました。別のファイルを試すか、このダイアログを閉じてください。"
+    }
+  },
+  "experiences": {
+    "kicker": "根拠ワークスペース",
+    "title": "経験ライブラリ",
+    "views": "経験ビュー",
+    "active": "アクティブ",
+    "archive": "ごみ箱",
+    "refresh": "更新",
+    "search": "経験を検索",
+    "loading": "経験を読み込み中",
+    "empty": "経験がありません",
+    "noResults": "一致する経験がありません",
+    "error": "経験を読み込めませんでした",
+    "retry": "再試行",
+    "rawInput": "元の入力",
+    "backToList": "一覧に戻る",
+    "kind": {
+      "all": "すべての種類",
+      "work": "職務",
+      "internship": "インターンシップ",
+      "project": "プロジェクト",
+      "research": "研究",
+      "campus": "学内",
+      "volunteer": "ボランティア",
+      "other": "その他"
+    },
+    "status": { "draft": "下書き", "ready": "準備完了", "archived": "アーカイブ済み" },
+    "import": {
+      "title": "経験をインポート",
+      "description": "メモを貼り付けて下書きを作成します。",
+      "text": "経験のテキスト",
+      "submit": "インポートを保存",
+      "cancel": "キャンセル",
+      "error": "この経験をインポートできませんでした"
+    },
+    "editor": {
+      "title": "経験の詳細",
+      "titleField": "タイトル",
+      "kind": "種類",
+      "organization": "組織",
+      "role": "役割",
+      "location": "場所",
+      "start_date": "開始日",
+      "end_date": "終了日",
+      "is_current": "現在の経験",
+      "technologies": "技術",
+      "tags": "タグ",
+      "raw_input": "元の入力",
+      "background": "背景",
+      "notes": "メモ",
+      "save": "経験を保存",
+      "saving": "保存中…",
+      "error": "経験を保存できませんでした"
+    },
+    "evidence": {
+      "title": "根拠",
+      "card": "根拠項目",
+      "action": "行動",
+      "result": "結果",
+      "metrics": "指標",
+      "add": "根拠を追加",
+      "save": "根拠を保存",
+      "moveUp": "上へ移動",
+      "moveDown": "下へ移動",
+      "delete": "根拠を削除",
+      "error": "根拠を更新できませんでした"
+    },
+    "completeness": {
+      "title": "完全性",
+      "score": "{score}% 完了",
+      "missing": "不足している項目",
+      "guidance": "推奨される質問"
+    },
+    "ready": {
+      "action": "準備完了にする",
+      "submitting": "準備完了にしています…",
+      "conflict": "この経験は {score}% 完了しています。追加してください: {missing}。",
+      "error": "準備完了にできませんでした"
+    },
+    "lifecycle": {
+      "archive": "経験をアーカイブ",
+      "restore": "経験を復元",
+      "permanent": "完全に削除",
+      "error": "経験の状態を更新できませんでした"
+    },
+    "permanent": {
+      "title": "完全に削除しますか？",
+      "description": "この操作は元に戻せません。",
+      "loadingImpact": "影響を確認中…",
+      "affectedMatches": "影響を受ける一致: {count}",
+      "affectedResumes": "影響を受ける履歴書: {count}",
+      "confirm": "完全に削除",
+      "deleting": "削除中…",
+      "error": "この経験を削除できませんでした"
+    },
+    "unsaved": {
+      "title": "未保存の変更を破棄しますか？",
+      "description": "編集内容は失われます。",
+      "discard": "編集を破棄"
+    },
+    "ai": {
+      "title": "AIで整理",
+      "start": "AIに整理を手伝ってもらう",
+      "next": "別の質問をする",
+      "answer": "あなたの回答",
+      "submit": "回答を適用",
+      "loading": "質問を準備中",
+      "answering": "回答を適用中",
+      "retry": "もう一度試す",
+      "fallback": "提案された質問",
+      "manual": "この経験はいつでも手動で編集できます。",
+      "error": "AIはこの経験を整理できませんでした。手動で編集を続けられます。"
     }
   },
   "builder": {

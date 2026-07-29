@@ -89,6 +89,10 @@
     "llmNotConfiguredMessage": "> Des clés API sont manquantes. La personnalisation du CV est désactivée jusqu'à la configuration dans les paramètres.",
     "setupRequiredTitle": "[ CONFIGURATION REQUISE ]",
     "setupRequiredMessage": "> Configurez la clé API dans les paramètres pour activer la personnalisation du CV.",
+    "experienceLibrary": {
+      "title": "Bibliothèque d’expériences",
+      "description": "Transformez vos notes en preuves réutilisables pour votre CV."
+    },
     "uploadDialog": {
       "success": "CV téléversé avec succès.",
       "successMaster": "CV téléversé et défini comme principal.",
@@ -99,6 +103,119 @@
       "dropzoneSubtitle": "PDF, DOC, DOCX (Max 4 Mo)",
       "tryDifferentFile": "Essayer un autre fichier",
       "parsingFailedKeepOpen": "L'analyse par IA a échoué. Essayez un autre fichier ou fermez cette boîte de dialogue."
+    }
+  },
+  "experiences": {
+    "kicker": "Espace de preuves",
+    "title": "Bibliothèque d’expériences",
+    "views": "Vues des expériences",
+    "active": "Actives",
+    "archive": "Corbeille",
+    "refresh": "Actualiser",
+    "search": "Rechercher des expériences",
+    "loading": "Chargement des expériences",
+    "empty": "Aucune expérience",
+    "noResults": "Aucune expérience correspondante",
+    "error": "Impossible de charger les expériences",
+    "retry": "Réessayer",
+    "rawInput": "Texte d’origine",
+    "backToList": "Retour à la liste",
+    "kind": {
+      "all": "Tous les types",
+      "work": "Emploi",
+      "internship": "Stage",
+      "project": "Projet",
+      "research": "Recherche",
+      "campus": "Campus",
+      "volunteer": "Bénévolat",
+      "other": "Autre"
+    },
+    "status": { "draft": "Brouillon", "ready": "Prêt", "archived": "Archivé" },
+    "import": {
+      "title": "Importer une expérience",
+      "description": "Collez vos notes pour créer un brouillon.",
+      "text": "Texte de l’expérience",
+      "submit": "Enregistrer l’import",
+      "cancel": "Annuler",
+      "error": "Impossible d’importer cette expérience"
+    },
+    "editor": {
+      "title": "Détails de l’expérience",
+      "titleField": "Titre",
+      "kind": "Type",
+      "organization": "Organisation",
+      "role": "Rôle",
+      "location": "Lieu",
+      "start_date": "Date de début",
+      "end_date": "Date de fin",
+      "is_current": "Expérience en cours",
+      "technologies": "Technologies",
+      "tags": "Étiquettes",
+      "raw_input": "Texte d’origine",
+      "background": "Contexte",
+      "notes": "Notes",
+      "save": "Enregistrer l’expérience",
+      "saving": "Enregistrement…",
+      "error": "Impossible d’enregistrer l’expérience"
+    },
+    "evidence": {
+      "title": "Preuves",
+      "card": "Élément de preuve",
+      "action": "Action",
+      "result": "Résultat",
+      "metrics": "Indicateurs",
+      "add": "Ajouter une preuve",
+      "save": "Enregistrer la preuve",
+      "moveUp": "Monter",
+      "moveDown": "Descendre",
+      "delete": "Supprimer la preuve",
+      "error": "Impossible de mettre à jour la preuve"
+    },
+    "completeness": {
+      "title": "Complétude",
+      "score": "{score}% complété",
+      "missing": "À compléter",
+      "guidance": "Questions suggérées"
+    },
+    "ready": {
+      "action": "Marquer comme prête",
+      "submitting": "Validation…",
+      "conflict": "Cette expérience est complétée à {score} %. Ajoutez : {missing}.",
+      "error": "Impossible de la marquer comme prête"
+    },
+    "lifecycle": {
+      "archive": "Archiver l’expérience",
+      "restore": "Restaurer l’expérience",
+      "permanent": "Supprimer définitivement",
+      "error": "Impossible de mettre à jour le statut"
+    },
+    "permanent": {
+      "title": "Supprimer définitivement ?",
+      "description": "Cette action est irréversible.",
+      "loadingImpact": "Vérification des éléments affectés…",
+      "affectedMatches": "{count} correspondances affectées",
+      "affectedResumes": "{count} CV affectés",
+      "confirm": "Supprimer définitivement",
+      "deleting": "Suppression…",
+      "error": "Impossible de supprimer cette expérience"
+    },
+    "unsaved": {
+      "title": "Ignorer les modifications non enregistrées ?",
+      "description": "Vos modifications seront perdues.",
+      "discard": "Ignorer les modifications"
+    },
+    "ai": {
+      "title": "Organiser avec l’IA",
+      "start": "M’aider à organiser avec l’IA",
+      "next": "Poser une autre question",
+      "answer": "Votre réponse",
+      "submit": "Appliquer la réponse",
+      "loading": "Préparation de la question",
+      "answering": "Application de la réponse",
+      "retry": "Réessayer",
+      "fallback": "Question suggérée",
+      "manual": "Vous pouvez modifier cette expérience manuellement à tout moment.",
+      "error": "L’IA n’a pas pu organiser cette expérience. Vous pouvez continuer à la modifier manuellement."
     }
   },
   "builder": {
@@ -176,7 +293,8 @@
       "resume": "CV",
       "coverLetter": "LETTRE DE MOTIVATION",
       "outreach": "MESSAGE DE CONTACT",
-      "jdMatch": "CORRESPONDANCE FP"
+      "jdMatch": "CORRESPONDANCE FP",
+      "interviewPrep": "PRÉPARATION AUX ENTRETIENS"
     },
     "footer": {
       "moduleLabel": "Module Créateur de CV",
@@ -195,7 +313,9 @@
       "outreachDescription": "Générez un message de prise de contact concis pour LinkedIn ou e-mail basé sur votre CV et la fiche de poste.",
       "generateButton": "Générer {title}",
       "coverLetterFooter": "Conseil : personnalisez d'abord pour de meilleurs résultats.",
-      "outreachFooter": "Conseil : restez bref et personnalisé."
+      "outreachFooter": "Conseil : restez bref et personnalisé.",
+      "interviewPrepDescription": "Générez une préparation aux entretiens adaptée à votre CV personnalisé et à la fiche de poste.",
+      "interviewPrepFooter": "Conseil : utilisez-la après la personnalisation pour préparer des réponses fidèles à votre CV."
     },
     "regenerateDialog": {
       "title": "Régénérer {title} ?",
@@ -444,7 +564,8 @@
       "editorPanel": "Panneau d'édition",
       "coverLetterEditor": "Éditeur de lettre de motivation",
       "outreachEditor": "Éditeur de message de contact",
-      "jdMatchAnalysis": "Analyse de correspondance FP"
+      "jdMatchAnalysis": "Analyse de correspondance FP",
+      "interviewPrep": "Préparation aux entretiens"
     },
     "alerts": {
       "saveNotAvailable": "L'enregistrement n'est disponible que lors de la modification d'un CV existant.",
@@ -461,7 +582,8 @@
       "coverLetterDownloadFailed": "Impossible de télécharger la lettre de motivation : {error}",
       "outreachSaveFailed": "Impossible d'enregistrer le message de contact. Veuillez réessayer.",
       "coverLetterGenerateFailed": "Impossible de générer la lettre de motivation : {error}",
-      "outreachGenerateFailed": "Impossible de générer le message de contact : {error}"
+      "outreachGenerateFailed": "Impossible de générer le message de contact : {error}",
+      "interviewPrepGenerateFailed": "Impossible de générer la préparation aux entretiens : {error}"
     }
   },
   "enrichment": {
@@ -701,6 +823,10 @@
       "outreachMessage": {
         "label": "Message de prospection à froid",
         "description": "Générez un message de networking pour LinkedIn ou e-mail"
+      },
+      "interviewPrep": {
+        "label": "Préparation aux entretiens",
+        "description": "Générez automatiquement une préparation aux entretiens en enregistrant un CV personnalisé"
       },
       "customPromptLabel": "Invite personnalisée (optionnelle)",
       "customPromptHelp": "Doit inclure ces espaces réservés (chacun entre accolades) : job_description, resume_data, output_language. Laissez vide pour utiliser l'invite par défaut.",
@@ -1005,6 +1131,25 @@
       "loadFailed": "Impossible de charger les candidatures.",
       "moveFailed": "Impossible de déplacer la candidature.",
       "deleteFailed": "Impossible de supprimer la ou les candidatures."
+    }
+  },
+  "interviewPrep": {
+    "title": "Préparation aux entretiens",
+    "regenerate": "Régénérer",
+    "unavailableTitle": "Préparation aux entretiens indisponible",
+    "loadingContextDescription": "Vérification du contexte de poste de ce CV adapté avant la génération.",
+    "missingContextDescription": "Ce CV adapté ne contient pas le contexte de poste enregistré nécessaire pour générer une préparation aux entretiens. Adaptez de nouveau le CV avec une description de poste pour utiliser ce parcours.",
+    "saveRequiredDescription": "Enregistrez ce CV adapté avant de générer une préparation aux entretiens.",
+    "focusArea": "Domaine à travailler",
+    "suggestedAnswerPoints": "Points de réponse suggérés",
+    "whyItMatters": "Pourquoi c’est important",
+    "preparationSuggestion": "Suggestion de préparation",
+    "sections": {
+      "roleFit": "Analyse de l’adéquation au poste",
+      "resumeQuestions": "Questions basées sur le CV",
+      "projectFollowUps": "Questions de suivi sur les projets",
+      "skillGaps": "Lacunes de compétences",
+      "talkingPoints": "Points à aborder"
     }
   }
 }

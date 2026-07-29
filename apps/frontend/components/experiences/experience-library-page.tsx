@@ -24,6 +24,7 @@ import { EvidenceListEditor } from './evidence-list-editor';
 import { ExperienceEditor } from './experience-editor';
 import { ExperienceList } from './experience-list';
 import { PermanentDeleteDialog } from './permanent-delete-dialog';
+import { ExperienceQuestionPanel } from './experience-question-panel';
 import { TextImportDialog } from './text-import-dialog';
 
 const experienceKinds: ExperienceKind[] = [
@@ -456,12 +457,20 @@ export function ExperienceLibraryPage() {
           aria-label={t('experiences.views')}
         >
           <Button
+            id="experience-view-active-tab"
+            role="tab"
+            aria-selected={view === 'active'}
+            aria-controls="experience-view-active-panel"
             variant={view === 'active' ? 'default' : 'outline'}
             onClick={() => switchView('active')}
           >
             {t('experiences.active')}
           </Button>
           <Button
+            id="experience-view-archived-tab"
+            role="tab"
+            aria-selected={view === 'archived'}
+            aria-controls="experience-view-archived-panel"
             className="ml-2"
             variant={view === 'archived' ? 'default' : 'outline'}
             onClick={() => switchView('archived')}
@@ -496,7 +505,12 @@ export function ExperienceLibraryPage() {
             <Loader2 className="h-5 w-5 animate-spin" /> {t('experiences.loading')}
           </div>
         ) : (
-          <div className="grid min-h-[30rem] md:grid-cols-[minmax(18rem,0.85fr)_minmax(0,1.4fr)]">
+          <div
+            id={`experience-view-${view}-panel`}
+            role="tabpanel"
+            aria-labelledby={`experience-view-${view}-tab`}
+            className="grid min-h-[30rem] md:grid-cols-[minmax(18rem,0.85fr)_minmax(0,1.4fr)]"
+          >
             <section
               data-testid="experience-list-pane"
               className={`${mobilePane === 'list' ? 'block' : 'hidden'} border-b border-black p-4 md:block md:border-b-0 md:border-r md:p-6`}
@@ -570,6 +584,13 @@ export function ExperienceLibraryPage() {
                         onMutationStart={invalidateDetailRequest}
                         onDirtyChange={setEvidenceDirty}
                         resetSignal={resetSignal}
+                      />
+                      <ExperienceQuestionPanel
+                        key={selectedDetail.experience_id}
+                        experienceId={selectedDetail.experience_id}
+                        hasUnsavedChanges={hasUnsavedChanges}
+                        onMutationStart={invalidateDetailRequest}
+                        onApplied={replaceDetail}
                       />
                       <CompletenessPanel
                         experience={selectedDetail}

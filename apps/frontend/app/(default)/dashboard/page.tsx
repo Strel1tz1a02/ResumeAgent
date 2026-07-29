@@ -18,6 +18,7 @@ import RefreshCw from 'lucide-react/dist/esm/icons/refresh-cw';
 import Plus from 'lucide-react/dist/esm/icons/plus';
 import Settings from 'lucide-react/dist/esm/icons/settings';
 import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle';
+import BookOpenText from 'lucide-react/dist/esm/icons/book-open-text';
 
 import {
   fetchResume,
@@ -305,7 +306,7 @@ export default function DashboardPage() {
     return Math.abs(hash);
   };
 
-  const totalCards = 1 + tailoredResumes.length + 1;
+  const totalCards = 1 + tailoredResumes.length + 2;
   const fillerCount = Math.max(0, (5 - (totalCards % 5)) % 5);
   const extraFillerCount = 5;
   // Use Tailwind classes for fillers now that we have them in config or use specific hex if needed
@@ -528,7 +529,26 @@ export default function DashboardPage() {
           );
         })}
 
-        {/* 3. Create Tailored Resume */}
+        {/* 3. Experience Library */}
+        <Link href="/experiences" className="block h-full">
+          <Card variant="interactive" className="aspect-square h-full bg-secondary">
+            <div className="flex h-full flex-1 flex-col justify-between">
+              <div className="flex h-14 w-14 items-center justify-center border-2 border-black bg-primary text-white">
+                <BookOpenText className="h-7 w-7" />
+              </div>
+              <div>
+                <CardTitle className="text-lg uppercase">
+                  {t('dashboard.experienceLibrary.title')}
+                </CardTitle>
+                <CardDescription className="mt-2 text-xs">
+                  {t('dashboard.experienceLibrary.description')}
+                </CardDescription>
+              </div>
+            </div>
+          </Card>
+        </Link>
+
+        {/* 4. Create Tailored Resume */}
         <Card className="aspect-square h-full" variant="default">
           <div className="flex-1 flex flex-col items-center justify-center text-center h-full">
             <Button
@@ -544,7 +564,7 @@ export default function DashboardPage() {
           </div>
         </Card>
 
-        {/* 4. Fillers */}
+        {/* 5. Fillers */}
         {Array.from({ length: fillerCount }).map((_, index) => (
           <Card
             key={`filler-${index}`}

@@ -89,6 +89,10 @@
     "llmNotConfiguredMessage": "> API keys are missing. Resume tailoring is disabled until configured in settings.",
     "setupRequiredTitle": "[ SETUP REQUIRED ]",
     "setupRequiredMessage": "> Configure API key in settings to enable resume tailoring.",
+    "experienceLibrary": {
+      "title": "Experience library",
+      "description": "Turn notes into reusable resume evidence."
+    },
     "uploadDialog": {
       "success": "Resume uploaded successfully.",
       "successMaster": "Resume uploaded and set as master.",
@@ -99,6 +103,119 @@
       "dropzoneSubtitle": "PDF, DOC, DOCX (Max 4MB)",
       "tryDifferentFile": "Try Different File",
       "parsingFailedKeepOpen": "AI parsing failed. Try a different file or close this dialog."
+    }
+  },
+  "experiences": {
+    "kicker": "Evidence workspace",
+    "title": "Experience library",
+    "views": "Experience views",
+    "active": "Active",
+    "archive": "Recycle bin",
+    "refresh": "Refresh",
+    "search": "Search experiences",
+    "loading": "Loading experiences",
+    "empty": "No experiences",
+    "noResults": "No matching experiences",
+    "error": "Could not load experiences",
+    "retry": "Retry",
+    "rawInput": "Raw input",
+    "backToList": "Back to list",
+    "kind": {
+      "all": "All kinds",
+      "work": "Work",
+      "internship": "Internship",
+      "project": "Project",
+      "research": "Research",
+      "campus": "Campus",
+      "volunteer": "Volunteer",
+      "other": "Other"
+    },
+    "status": { "draft": "Draft", "ready": "Ready", "archived": "Archived" },
+    "import": {
+      "title": "Import experience",
+      "description": "Paste your experience notes to create a draft.",
+      "text": "Experience text",
+      "submit": "Save import",
+      "cancel": "Cancel",
+      "error": "Could not import this experience"
+    },
+    "editor": {
+      "title": "Experience details",
+      "titleField": "Title",
+      "kind": "Kind",
+      "organization": "Organization",
+      "role": "Role",
+      "location": "Location",
+      "start_date": "Start date",
+      "end_date": "End date",
+      "is_current": "Current experience",
+      "technologies": "Technologies",
+      "tags": "Tags",
+      "raw_input": "Raw input",
+      "background": "Background",
+      "notes": "Notes",
+      "save": "Save experience",
+      "saving": "Saving…",
+      "error": "Could not save experience"
+    },
+    "evidence": {
+      "title": "Evidence",
+      "card": "Evidence item",
+      "action": "Action",
+      "result": "Result",
+      "metrics": "Metrics",
+      "add": "Add evidence",
+      "save": "Save evidence",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "delete": "Delete evidence",
+      "error": "Could not update evidence"
+    },
+    "completeness": {
+      "title": "Completeness",
+      "score": "{score}% complete",
+      "missing": "Still needed",
+      "guidance": "Suggested follow-ups"
+    },
+    "ready": {
+      "action": "Mark ready",
+      "submitting": "Marking ready…",
+      "conflict": "This experience is {score}% complete. Add: {missing}.",
+      "error": "Could not mark ready"
+    },
+    "lifecycle": {
+      "archive": "Archive experience",
+      "restore": "Restore experience",
+      "permanent": "Delete permanently",
+      "error": "Could not update experience status"
+    },
+    "permanent": {
+      "title": "Delete permanently?",
+      "description": "This cannot be undone.",
+      "loadingImpact": "Checking affected records…",
+      "affectedMatches": "{count} affected matches",
+      "affectedResumes": "{count} affected resumes",
+      "confirm": "Delete permanently",
+      "deleting": "Deleting…",
+      "error": "Could not delete this experience"
+    },
+    "unsaved": {
+      "title": "Discard unsaved changes?",
+      "description": "Your edits will be lost.",
+      "discard": "Discard edits"
+    },
+    "ai": {
+      "title": "Organize with AI",
+      "start": "Help me organize with AI",
+      "next": "Ask another question",
+      "answer": "Your answer",
+      "submit": "Apply answer",
+      "loading": "Preparing question",
+      "answering": "Applying answer",
+      "retry": "Try again",
+      "fallback": "Suggested question",
+      "manual": "You can edit this experience manually at any time.",
+      "error": "AI could not organize this experience. You can keep editing it manually."
     }
   },
   "builder": {

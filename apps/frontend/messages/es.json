@@ -89,6 +89,10 @@
     "llmNotConfiguredMessage": "> Faltan claves API. La personalización del currículum está deshabilitada hasta configurarlo en Ajustes.",
     "setupRequiredTitle": "[ CONFIGURACIÓN REQUERIDA ]",
     "setupRequiredMessage": "> Configura la clave API en Ajustes para habilitar la personalización del currículum.",
+    "experienceLibrary": {
+      "title": "Biblioteca de experiencias",
+      "description": "Convierte notas en evidencia reutilizable para tu currículum."
+    },
     "uploadDialog": {
       "success": "Currículum subido con éxito.",
       "successMaster": "Currículum subido y establecido como maestro.",
@@ -99,6 +103,119 @@
       "dropzoneSubtitle": "PDF, DOC, DOCX (Máx. 4MB)",
       "tryDifferentFile": "Probar otro archivo",
       "parsingFailedKeepOpen": "El análisis de IA falló. Prueba otro archivo o cierra este diálogo."
+    }
+  },
+  "experiences": {
+    "kicker": "Espacio de evidencias",
+    "title": "Biblioteca de experiencias",
+    "views": "Vistas de experiencias",
+    "active": "Activas",
+    "archive": "Papelera",
+    "refresh": "Actualizar",
+    "search": "Buscar experiencias",
+    "loading": "Cargando experiencias",
+    "empty": "No hay experiencias",
+    "noResults": "No hay experiencias coincidentes",
+    "error": "No se pudieron cargar las experiencias",
+    "retry": "Reintentar",
+    "rawInput": "Texto original",
+    "backToList": "Volver a la lista",
+    "kind": {
+      "all": "Todos los tipos",
+      "work": "Trabajo",
+      "internship": "Prácticas",
+      "project": "Proyecto",
+      "research": "Investigación",
+      "campus": "Universidad",
+      "volunteer": "Voluntariado",
+      "other": "Otro"
+    },
+    "status": { "draft": "Borrador", "ready": "Listo", "archived": "Archivado" },
+    "import": {
+      "title": "Importar experiencia",
+      "description": "Pega tus notas para crear un borrador.",
+      "text": "Texto de la experiencia",
+      "submit": "Guardar importación",
+      "cancel": "Cancelar",
+      "error": "No se pudo importar esta experiencia"
+    },
+    "editor": {
+      "title": "Detalles de la experiencia",
+      "titleField": "Título",
+      "kind": "Tipo",
+      "organization": "Organización",
+      "role": "Puesto",
+      "location": "Ubicación",
+      "start_date": "Fecha de inicio",
+      "end_date": "Fecha de finalización",
+      "is_current": "Experiencia actual",
+      "technologies": "Tecnologías",
+      "tags": "Etiquetas",
+      "raw_input": "Texto original",
+      "background": "Contexto",
+      "notes": "Notas",
+      "save": "Guardar experiencia",
+      "saving": "Guardando…",
+      "error": "No se pudo guardar la experiencia"
+    },
+    "evidence": {
+      "title": "Evidencia",
+      "card": "Elemento de evidencia",
+      "action": "Acción",
+      "result": "Resultado",
+      "metrics": "Métricas",
+      "add": "Añadir evidencia",
+      "save": "Guardar evidencia",
+      "moveUp": "Subir",
+      "moveDown": "Bajar",
+      "delete": "Eliminar evidencia",
+      "error": "No se pudo actualizar la evidencia"
+    },
+    "completeness": {
+      "title": "Completitud",
+      "score": "{score}% completo",
+      "missing": "Aún falta",
+      "guidance": "Preguntas sugeridas"
+    },
+    "ready": {
+      "action": "Marcar como listo",
+      "submitting": "Marcando como listo…",
+      "conflict": "Esta experiencia está completa al {score}%. Añade: {missing}.",
+      "error": "No se pudo marcar como lista"
+    },
+    "lifecycle": {
+      "archive": "Archivar experiencia",
+      "restore": "Restaurar experiencia",
+      "permanent": "Eliminar permanentemente",
+      "error": "No se pudo actualizar el estado"
+    },
+    "permanent": {
+      "title": "¿Eliminar permanentemente?",
+      "description": "Esta acción no se puede deshacer.",
+      "loadingImpact": "Comprobando registros afectados…",
+      "affectedMatches": "{count} coincidencias afectadas",
+      "affectedResumes": "{count} currículums afectados",
+      "confirm": "Eliminar permanentemente",
+      "deleting": "Eliminando…",
+      "error": "No se pudo eliminar esta experiencia"
+    },
+    "unsaved": {
+      "title": "¿Descartar cambios sin guardar?",
+      "description": "Tus cambios se perderán.",
+      "discard": "Descartar cambios"
+    },
+    "ai": {
+      "title": "Organizar con IA",
+      "start": "Ayúdame a organizarlo con IA",
+      "next": "Hacer otra pregunta",
+      "answer": "Tu respuesta",
+      "submit": "Aplicar respuesta",
+      "loading": "Preparando pregunta",
+      "answering": "Aplicando respuesta",
+      "retry": "Intentarlo de nuevo",
+      "fallback": "Pregunta sugerida",
+      "manual": "Puedes editar esta experiencia manualmente en cualquier momento.",
+      "error": "La IA no pudo organizar esta experiencia. Puedes seguir editándola manualmente."
     }
   },
   "builder": {

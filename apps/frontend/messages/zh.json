@@ -89,6 +89,10 @@
     "llmNotConfiguredMessage": "> 缺少 API 密钥。配置前将禁用简历定制功能。",
     "setupRequiredTitle": "[ 需要配置 ]",
     "setupRequiredMessage": "> 请在设置中配置 API 密钥以启用简历定制。",
+    "experienceLibrary": {
+      "title": "经历库",
+      "description": "将笔记整理为可复用的简历证据。"
+    },
     "uploadDialog": {
       "success": "简历上传成功。",
       "successMaster": "简历已上传并设为主简历。",
@@ -99,6 +103,119 @@
       "dropzoneSubtitle": "PDF、DOC、DOCX（最大 4MB）",
       "tryDifferentFile": "尝试其他文件",
       "parsingFailedKeepOpen": "AI 解析失败。请尝试其他文件，或关闭此对话框。"
+    }
+  },
+  "experiences": {
+    "kicker": "证据工作区",
+    "title": "经历库",
+    "views": "经历视图",
+    "active": "进行中",
+    "archive": "回收站",
+    "refresh": "刷新",
+    "search": "搜索经历",
+    "loading": "正在加载经历",
+    "empty": "暂无经历",
+    "noResults": "没有匹配的经历",
+    "error": "无法加载经历",
+    "retry": "重试",
+    "rawInput": "原始输入",
+    "backToList": "返回列表",
+    "kind": {
+      "all": "所有类型",
+      "work": "工作",
+      "internship": "实习",
+      "project": "项目",
+      "research": "研究",
+      "campus": "校园",
+      "volunteer": "志愿服务",
+      "other": "其他"
+    },
+    "status": { "draft": "草稿", "ready": "已就绪", "archived": "已归档" },
+    "import": {
+      "title": "导入经历",
+      "description": "粘贴经历笔记以创建草稿。",
+      "text": "经历文本",
+      "submit": "保存导入",
+      "cancel": "取消",
+      "error": "无法导入此经历"
+    },
+    "editor": {
+      "title": "经历详情",
+      "titleField": "标题",
+      "kind": "类型",
+      "organization": "组织",
+      "role": "角色",
+      "location": "地点",
+      "start_date": "开始日期",
+      "end_date": "结束日期",
+      "is_current": "当前经历",
+      "technologies": "技术",
+      "tags": "标签",
+      "raw_input": "原始输入",
+      "background": "背景",
+      "notes": "备注",
+      "save": "保存经历",
+      "saving": "正在保存…",
+      "error": "无法保存经历"
+    },
+    "evidence": {
+      "title": "证据",
+      "card": "证据项目",
+      "action": "行动",
+      "result": "结果",
+      "metrics": "指标",
+      "add": "添加证据",
+      "save": "保存证据",
+      "moveUp": "上移",
+      "moveDown": "下移",
+      "delete": "删除证据",
+      "error": "无法更新证据"
+    },
+    "completeness": {
+      "title": "完整度",
+      "score": "已完成 {score}%",
+      "missing": "仍需补充",
+      "guidance": "建议追问"
+    },
+    "ready": {
+      "action": "标记为就绪",
+      "submitting": "正在标记为就绪…",
+      "conflict": "此经历已完成 {score}%。请补充：{missing}。",
+      "error": "无法标记为就绪"
+    },
+    "lifecycle": {
+      "archive": "归档经历",
+      "restore": "恢复经历",
+      "permanent": "永久删除",
+      "error": "无法更新经历状态"
+    },
+    "permanent": {
+      "title": "永久删除？",
+      "description": "此操作无法撤销。",
+      "loadingImpact": "正在检查受影响的记录…",
+      "affectedMatches": "受影响的匹配：{count}",
+      "affectedResumes": "受影响的简历：{count}",
+      "confirm": "永久删除",
+      "deleting": "正在删除…",
+      "error": "无法删除此经历"
+    },
+    "unsaved": {
+      "title": "放弃未保存的更改？",
+      "description": "你的编辑将会丢失。",
+      "discard": "放弃编辑"
+    },
+    "ai": {
+      "title": "用 AI 整理",
+      "start": "让 AI 帮我整理",
+      "next": "再问一个问题",
+      "answer": "你的回答",
+      "submit": "应用回答",
+      "loading": "正在准备问题",
+      "answering": "正在应用回答",
+      "retry": "重试",
+      "fallback": "建议问题",
+      "manual": "你随时可以手动编辑这段经历。",
+      "error": "AI 无法整理这段经历。你仍可继续手动编辑。"
     }
   },
   "builder": {
