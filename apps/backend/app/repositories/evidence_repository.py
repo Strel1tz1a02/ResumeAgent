@@ -43,7 +43,7 @@ class EvidenceRepository:
         by_id = {row.id: row for row in rows}
         missing_ids = sorted(set(evidence_ids) - set(by_id))
         if missing_ids:
-            logger.warning("%s", missing_ids)
+            logger.warning("Missing evidence IDs while expanding references: %s", missing_ids)
         return [by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in by_id]
 
     async def update_fields(self, evidence_id: int, fields: dict[str, Any]) -> EvidenceItem:
