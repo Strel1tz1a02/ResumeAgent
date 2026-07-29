@@ -3,9 +3,13 @@
 from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
+import pytest
 
+from app.database import Database
 from app.main import app
 from app.repositories.experience_repository import ExperienceStaleWriteError
+from app.schemas.experiences import ExperienceCreate, ExperienceUpdate
+from app.services.experience_service import ExperienceConflictError, ExperienceService
 
 
 def _client() -> AsyncClient:
@@ -220,3 +224,60 @@ async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolate
         stored = await client.get(f"/api/v1/experiences/{experience_id}")
     assert stored.status_code == 200
     assert stored.json()["title"] == "Winner"
+
+
+async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalculation(
+    tmp_path, monkeypatch
+) -> None:
+    """A fixed clock must not let completeness recalculation restore a stale version token."""
+    frozen_time = "2030-01-01T00:00:00+00:00"
+    monkeypatch.setattr(
+        "app.repositories.experience_repository._updated_at", lambda: frozen_time
+    )
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            created = await ExperienceService(session).create(ExperienceCreate(title="Original"))
+            experience_id = created.experience_id
+
+        async with database.session() as winner_session:
+            async with database.session() as stale_session:
+                winner_service = ExperienceService(winner_session)
+                stale_service = ExperienceService(stale_session)
+                original_conditional_update = stale_service._experiences.update_fields_if_current
+
+                async def commit_winner_before_stale_write(
+                    stale_id: int, observed_updated_at: str, fields: dict
+                ):
+                    await stale_session.rollback()
+                    winner = await winner_service.patch(
+                        stale_id,
+                        ExperienceUpdate(
+                            title="Winner",
+                            background="Made campus recruiting faster.",
+                        ),
+                    )
+                    assert winner.completeness == 25
+                    return await original_conditional_update(
+                        stale_id, observed_updated_at, fields
+                    )
+
+                monkeypatch.setattr(
+                    stale_service._experiences,
+                    "update_fields_if_current",
+                    commit_winner_before_stale_write,
+                )
+                with pytest.raises(ExperienceConflictError):
+                    await stale_service.patch(
+                        experience_id,
+                        ExperienceUpdate(title="Loser"),
+                    )
+
+        async with database.session() as session:
+            stored = await ExperienceService(session).get(experience_id)
+            assert stored.title == "Winner"
+            assert stored.background == "Made campus recruiting faster."
+            assert stored.completeness == 25
+            assert stored.updated_at > frozen_time
+    finally:
+        await database.close()

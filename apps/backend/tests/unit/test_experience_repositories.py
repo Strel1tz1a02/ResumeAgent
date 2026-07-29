@@ -8,6 +8,7 @@ import pytest
 from app.database import Database
 from app.models import EvidenceItem, ExperienceItem
 from app.repositories.evidence_repository import EvidenceRepository
+from app.repositories import experience_repository as experience_repository_module
 from app.repositories.experience_repository import (
     ExperienceRepository,
     ExperienceStaleWriteError,
@@ -218,6 +219,41 @@ async def test_conditional_experience_update_rejects_a_stale_independent_session
             stored = await ExperienceRepository(session).get(experience_id)
             assert stored is not None
             assert stored.title == "Winner"
+    finally:
+        await database.close()
+
+
+async def test_all_experience_mutations_advance_updated_at_under_a_fixed_clock(
+    tmp_path, monkeypatch
+) -> None:
+    """Reusing or regressing a frozen timestamp would weaken future stale-write checks."""
+    frozen_time = "2030-01-01T00:00:00+00:00"
+    monkeypatch.setattr(experience_repository_module, "_updated_at", lambda: frozen_time)
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            experiences = ExperienceRepository(session)
+            evidence = EvidenceRepository(session)
+            item = await experiences.create(
+                ExperienceItem(kind="project", title="Original", updated_at=frozen_time)
+            )
+            proof = await evidence.create(EvidenceItem(action="Built proof"))
+            await session.commit()
+
+            first = await experiences.update_fields(item.experience_id, {"title": "Edited"})
+            assert first.updated_at > frozen_time
+            first_updated_at = first.updated_at
+
+            second = await experiences.set_evidence_ids(item.experience_id, [proof.id])
+            assert second.updated_at > first_updated_at
+            second_updated_at = second.updated_at
+
+            third = await experiences.set_completeness(item.experience_id, 10)
+            assert third.updated_at > second_updated_at
+            third_updated_at = third.updated_at
+
+            fourth = await experiences.set_status(item.experience_id, "archived")
+            assert fourth.updated_at > third_updated_at
     finally:
         await database.close()
 

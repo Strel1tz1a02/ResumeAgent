@@ -38,11 +38,12 @@ def _updated_at() -> str:
 
 
 def _next_updated_at(observed_updated_at: str) -> str:
-    """Generate a new audit timestamp distinct from the version just observed."""
-    current = _updated_at()
-    if current != observed_updated_at:
-        return current
-    return (datetime.fromisoformat(observed_updated_at) + timedelta(microseconds=1)).isoformat()
+    """Generate a UTC audit timestamp strictly later than the version just observed."""
+    observed = datetime.fromisoformat(observed_updated_at)
+    current = datetime.fromisoformat(_updated_at())
+    if current > observed:
+        return current.isoformat()
+    return (observed + timedelta(microseconds=1)).isoformat()
 
 
 class ExperienceStaleWriteError(ValueError):
@@ -127,7 +128,7 @@ class ExperienceRepository:
             raise ValueError(f"unsupported experience fields: {sorted(unknown)}")
         for name, value in fields.items():
             setattr(item, name, value)
-        item.updated_at = _updated_at()
+        item.updated_at = _next_updated_at(item.updated_at)
         await self._session.flush()
         return item
 
@@ -194,7 +195,7 @@ class ExperienceRepository:
                 )
 
         item.evidence_ids = list(evidence_ids)
-        item.updated_at = _updated_at()
+        item.updated_at = _next_updated_at(item.updated_at)
         await self._session.flush()
         return item
 
@@ -210,7 +211,7 @@ class ExperienceRepository:
         if item is None:
             raise ValueError(f"experience {experience_id} does not exist")
         item.completeness = completeness
-        item.updated_at = _updated_at()
+        item.updated_at = _next_updated_at(item.updated_at)
         await self._session.flush()
         return item
 
@@ -227,7 +228,7 @@ class ExperienceRepository:
             raise ValueError(f"experience {experience_id} does not exist")
         item.status = status
         item.archived_at = _updated_at() if status == "archived" else None
-        item.updated_at = _updated_at()
+        item.updated_at = _next_updated_at(item.updated_at)
         await self._session.flush()
         return item
 
