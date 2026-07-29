@@ -58,12 +58,30 @@ _SECRET_PATTERNS = (
     (re.compile(r"(?i)(bearer\s+)\S+"), r"\1[REDACTED]"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"), "[REDACTED]"),
 )
-_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
-_NON_SUBSTANTIVE_TOKENS = frozenset(
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+_NEGATION_PREFIXES = (
+    "not", "no", "never", "without", "no longer", "not current",
+    "no", "sin", "ya no", "pas", "sans", "plus", "ne", "não", "sem", "não mais",
+)
+_CJK_NEGATION_PREFIXES = ("不是", "不再", "不再是", "没有", "未", "非")
+_CJK_NEGATION_FOLLOWING = ("ではない", "じゃない", "ではありません", "ない")
+_NEGATION_BRIDGE_WORDS = frozenset(
     {
-        "a", "an", "and", "at", "by", "for", "from", "i", "in", "is", "it", "of", "on",
-        "or", "our", "the", "that", "this", "to", "was", "we", "with", "you", "your",
+        "a", "an", "am", "are", "as", "be", "been", "being", "el", "en", "era", "es", "est",
+        "estoy", "is", "la", "las", "le", "les", "longer", "los", "mais", "o", "os", "pas",
+        "soy", "sou", "suis", "the", "un", "una", "um", "uma", "was",
     }
+)
+_CURRENT_PHRASES = (
+    "current", "currently", "present", "ongoing", "still", "actualmente", "en curso", "actuellement",
+    "en cours", "atualmente", "em andamento", "现在", "目前", "至今", "仍在", "在职",
+    "現在", "継続中", "在職中",
+)
+_ENDED_PHRASES = (
+    "ended", "finished", "completed", "no longer", "not current", "ya no", "terminó",
+    "finalizó", "terminé", "terminée", "plus", "não mais", "terminou", "encerrado",
+    "已结束", "不再", "已离职", "終了", "退職",
 )
 _FALLBACK_QUESTIONS = {
     "identity": "What concise title best describes this experience?",
@@ -100,30 +118,71 @@ def _sanitize_prompt_value(value: Any) -> Any:
     return value
 
 
-def _normalize_tokens(value: str) -> list[str]:
-    """Normalize human text deterministically for conservative factual provenance checks."""
+def _normalize_relation_text(value: str) -> str:
+    """Normalize Unicode and separators while preserving exact word relationships."""
     normalized = unicodedata.normalize("NFKC", value).casefold()
-    tokens: list[str] = []
-    for token in _TOKEN_RE.findall(normalized):
-        if token.isascii() and len(token) > 3 and token.endswith("s"):
-            token = token[:-1]
-        tokens.append(token)
-    return tokens
+    return " ".join("".join(char if char.isalnum() else " " for char in normalized).split())
+
+
+def _match_is_negated(source: str, start: int, end: int, *, cjk: bool) -> bool:
+    """Reject a phrase whose immediately governing prefix negates the asserted relation."""
+    prefix = source[:start].rstrip()
+    if cjk:
+        return prefix.endswith(_CJK_NEGATION_PREFIXES) or source[end:].lstrip().startswith(
+            _CJK_NEGATION_FOLLOWING
+        )
+    words = _WORD_RE.findall(prefix)[-5:]
+    joined = " ".join(words)
+    if "not only" in joined:
+        return False
+    for marker in _NEGATION_PREFIXES:
+        marker_words = marker.split()
+        for index in range(len(words) - len(marker_words) + 1):
+            if words[index : index + len(marker_words)] != marker_words:
+                continue
+            if all(word in _NEGATION_BRIDGE_WORDS for word in words[index + len(marker_words) :]):
+                return True
+    return False
 
 
 def _is_supported_value(value: str, source: str, current_value: str | None = None) -> bool:
-    """Accept only a persisted value, a source substring, or fully sourced material tokens."""
-    if current_value is not None and _normalize_tokens(value) == _normalize_tokens(current_value):
+    """Accept only unchanged or contiguous, non-negated source facts; never token bags."""
+    normalized_value = _normalize_relation_text(value)
+    if current_value is not None and normalized_value == _normalize_relation_text(current_value):
         return True
-    proposed_tokens = _normalize_tokens(value)
-    source_tokens = _normalize_tokens(source)
-    if not proposed_tokens:
+    normalized_source = _normalize_relation_text(source)
+    if not normalized_value:
         return False
-    if "".join(proposed_tokens) in "".join(source_tokens):
-        return True
-    source_set = set(source_tokens)
-    material_tokens = [token for token in proposed_tokens if token not in _NON_SUBSTANTIVE_TOKENS]
-    return bool(material_tokens) and all(token in source_set for token in material_tokens)
+    cjk = bool(_CJK_RE.search(normalized_value))
+    if cjk:
+        start = normalized_source.find(normalized_value)
+        return start >= 0 and not _match_is_negated(
+            normalized_source, start, start + len(normalized_value), cjk=True
+        )
+    pattern = re.compile(rf"(?<!\w){re.escape(normalized_value)}(?!\w)")
+    for match in pattern.finditer(normalized_source):
+        if not _match_is_negated(normalized_source, match.start(), match.end(), cjk=False):
+            return True
+    return False
+
+
+def _has_status_phrase(source: str, phrases: tuple[str, ...]) -> bool:
+    """Find one explicit, affirmative localized lifecycle phrase in user-provided text."""
+    normalized_source = _normalize_relation_text(source)
+    for phrase in phrases:
+        normalized_phrase = _normalize_relation_text(phrase)
+        if _CJK_RE.search(normalized_phrase):
+            start = normalized_source.find(normalized_phrase)
+            if start >= 0 and not _match_is_negated(
+                normalized_source, start, start + len(normalized_phrase), cjk=True
+            ):
+                return True
+            continue
+        pattern = re.compile(rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)")
+        for match in pattern.finditer(normalized_source):
+            if not _match_is_negated(normalized_source, match.start(), match.end(), cjk=False):
+                return True
+    return False
 
 
 class ExperienceEnrichmentService:
@@ -195,7 +254,7 @@ class ExperienceEnrichmentService:
             current = await self._get_or_raise(experience_id)
             if current.updated_at != snapshot_version:
                 raise ExperienceStaleWriteError("experience changed while the answer was being processed")
-            await self._validate_patch_provenance(current, patch, answer)
+            await self._validate_patch_provenance(current, patch, answer, question_id)
             updated = await self._apply_patch(current, patch)
             updated = await self._recalculate_completeness(updated)
             refreshed = await ExperienceService(self._session)._detail(updated)
@@ -263,7 +322,7 @@ class ExperienceEnrichmentService:
         return updated
 
     async def _validate_patch_provenance(
-        self, current: ExperienceItem, patch: ExperienceEnrichmentPatch, answer: str
+        self, current: ExperienceItem, patch: ExperienceEnrichmentPatch, answer: str, question_id: str
     ) -> None:
         """Prove every new protected fact comes from raw input or this answer before writing."""
         source = f"{current.raw_input}\n{answer}"
@@ -279,6 +338,14 @@ class ExperienceEnrichmentService:
                     value, source, getattr(current, field_name)
                 ):
                     raise InvalidEnrichmentPatch("Enrichment patch contains factual content not supported by raw input or answer")
+            if "is_current" in experience_updates.model_fields_set:
+                is_current = experience_updates.is_current
+                if is_current != current.is_current and not _has_status_phrase(
+                    source, _CURRENT_PHRASES if is_current else _ENDED_PHRASES
+                ):
+                    raise InvalidEnrichmentPatch(
+                        "Enrichment patch contains factual content not supported by raw input or answer"
+                    )
             for field_name in ("technologies", "tags"):
                 if field_name not in experience_updates.model_fields_set:
                     continue
