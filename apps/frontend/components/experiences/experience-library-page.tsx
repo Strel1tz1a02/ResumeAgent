@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import Plus from 'lucide-react/dist/esm/icons/plus';
 import { Button } from '@/components/ui/button';
@@ -30,18 +30,34 @@ export function ExperienceLibraryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
+  const isMountedRef = useRef(false);
+  const listRequestGenerationRef = useRef(0);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      listRequestGenerationRef.current += 1;
+    };
+  }, []);
 
   const loadExperiences = useCallback(async () => {
+    const requestGeneration = ++listRequestGenerationRef.current;
     setLoading(true);
     setError(null);
     try {
       const response = await listExperiences();
+      if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
       setExperiences(response.items);
       setSelectedExperienceId((current) => current ?? response.items[0]?.experience_id ?? null);
     } catch (reason) {
+      if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
       setError(reason instanceof Error ? reason.message : t('experiences.error'));
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && requestGeneration === listRequestGenerationRef.current) {
+        setLoading(false);
+      }
     }
   }, [t]);
 
@@ -55,17 +71,35 @@ export function ExperienceLibraryPage() {
       const matchesKind = kind === 'all' || experience.kind === kind;
       if (!matchesKind) return false;
       if (!normalizedQuery) return true;
-      return [experience.title, experience.organization, experience.role, ...experience.tags]
+      return [
+        experience.title,
+        experience.organization,
+        experience.role,
+        experience.raw_input,
+        ...experience.tags,
+        ...experience.technologies,
+      ]
         .filter((value): value is string => Boolean(value))
         .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
   }, [experiences, kind, query]);
 
-  const selectedExperience = experiences.find(
+  const selectedExperience = filteredExperiences.find(
     (experience) => experience.experience_id === selectedExperienceId
   );
 
+  useEffect(() => {
+    if (selectedExperienceId !== null && !selectedExperience) {
+      setSelectedExperienceId(filteredExperiences[0]?.experience_id ?? null);
+    }
+  }, [filteredExperiences, selectedExperience, selectedExperienceId]);
+
   const handleImported = (experience: ExperienceRead) => {
+    listRequestGenerationRef.current += 1;
+    setLoading(false);
+    setError(null);
+    setQuery('');
+    setKind('all');
     setExperiences((current) => {
       const index = current.findIndex((item) => item.experience_id === experience.experience_id);
       if (index === -1) return [experience, ...current];
@@ -74,6 +108,12 @@ export function ExperienceLibraryPage() {
       );
     });
     setSelectedExperienceId(experience.experience_id);
+    setMobilePane('detail');
+  };
+
+  const handleSelectExperience = (experience: ExperienceRead) => {
+    setSelectedExperienceId(experience.experience_id);
+    setMobilePane('detail');
   };
 
   return (
@@ -135,7 +175,10 @@ export function ExperienceLibraryPage() {
           </div>
         ) : (
           <div className="grid min-h-[30rem] md:grid-cols-[minmax(18rem,0.85fr)_minmax(0,1.4fr)]">
-            <section className="border-b border-black p-4 md:border-b-0 md:border-r md:p-6">
+            <section
+              data-testid="experience-list-pane"
+              className={`${mobilePane === 'list' ? 'block' : 'hidden'} border-b border-black p-4 md:block md:border-b-0 md:border-r md:p-6`}
+            >
               {error && (
                 <div className="mb-4 flex items-center justify-between gap-3 border border-destructive bg-red-50 p-3">
                   <p className="font-mono text-xs text-destructive">{t('experiences.error')}</p>
@@ -156,13 +199,24 @@ export function ExperienceLibraryPage() {
                 <ExperienceList
                   experiences={filteredExperiences}
                   selectedExperienceId={selectedExperienceId}
-                  onSelect={(experience) => setSelectedExperienceId(experience.experience_id)}
+                  onSelect={handleSelectExperience}
                 />
               )}
             </section>
-            <section className="p-4 md:p-6">
+            <section
+              data-testid="experience-detail-pane"
+              className={`${mobilePane === 'detail' ? 'block' : 'hidden'} p-4 md:block md:p-6`}
+            >
               {selectedExperience ? (
                 <div className="space-y-6">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="md:hidden"
+                    onClick={() => setMobilePane('list')}
+                  >
+                    {t('experiences.backToList')}
+                  </Button>
                   <div className="border-b border-black pb-4">
                     <p className="font-mono text-xs uppercase tracking-widest text-primary">
                       {t(`experiences.kind.${selectedExperience.kind}`)}

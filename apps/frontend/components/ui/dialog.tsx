@@ -32,6 +32,21 @@ const useDialogContext = () => {
   return context;
 };
 
+const focusableSelector = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector)).filter(
+    (element) => !element.hasAttribute('disabled') && element.getAttribute('aria-hidden') !== 'true'
+  );
+}
+
 interface DialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -105,6 +120,28 @@ interface DialogContentProps {
 const DialogContent: React.FC<DialogContentProps> = ({ children, className }) => {
   const { open, onOpenChange, titleId } = useDialogContext();
   const { t } = useTranslations();
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const previousFocusRef = React.useRef<HTMLElement | null>(null);
+
+  const restoreFocus = React.useCallback(() => {
+    const previousFocus = previousFocusRef.current;
+    previousFocusRef.current = null;
+    if (previousFocus?.isConnected) previousFocus.focus();
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) {
+      restoreFocus();
+      return;
+    }
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const container = contentRef.current;
+    if (!container) return;
+    const autofocusTarget = container.querySelector<HTMLElement>('[data-autofocus], [autofocus]');
+    (autofocusTarget ?? getFocusableElements(container)[0] ?? container).focus();
+    return restoreFocus;
+  }, [open, restoreFocus]);
 
   // Handle escape key
   React.useEffect(() => {
@@ -130,6 +167,28 @@ const DialogContent: React.FC<DialogContentProps> = ({ children, className }) =>
     };
   }, [open]);
 
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return;
+    const container = contentRef.current;
+    if (!container) return;
+    const focusableElements = getFocusableElements(container);
+    if (focusableElements.length === 0) {
+      event.preventDefault();
+      container.focus();
+      return;
+    }
+    const first = focusableElements[0];
+    const last = focusableElements[focusableElements.length - 1];
+    const activeElement = document.activeElement;
+    if (event.shiftKey && (activeElement === first || activeElement === container)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!open || typeof document === 'undefined') return null;
 
   return createPortal(
@@ -142,9 +201,11 @@ const DialogContent: React.FC<DialogContentProps> = ({ children, className }) =>
       {/* Content */}
       <div className="fixed inset-0 flex items-center justify-center p-4">
         <div
+          ref={contentRef}
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
+          tabIndex={-1}
           className={cn(
             'relative w-full max-w-lg',
             'border border-black bg-background shadow-sw-lg',
@@ -153,6 +214,7 @@ const DialogContent: React.FC<DialogContentProps> = ({ children, className }) =>
             className
           )}
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={handleKeyDown}
         >
           {children}
           <button

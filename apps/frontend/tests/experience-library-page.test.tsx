@@ -16,6 +16,7 @@ const translate = vi.hoisted(
       'experiences.kind': 'Kind',
       'experiences.kind.all': 'All kinds',
       'experiences.kind.project': 'Project',
+      'experiences.kind.volunteer': 'Volunteer',
       'experiences.import': 'Import',
       'experiences.import.title': 'Import experience',
       'experiences.import.description': 'Paste your experience notes.',
@@ -29,6 +30,8 @@ const translate = vi.hoisted(
       'experiences.refresh': 'Refresh',
       'experiences.error': 'Could not load experiences',
       'experiences.rawInput': 'Raw input',
+      'experiences.backToList': 'Back to list',
+      'experiences.status.draft': 'Draft status',
     })[key] ?? key
 );
 
@@ -72,6 +75,16 @@ const imported: ExperienceDetail = {
   missing_dimensions: ['evidence'],
   suggested_questions: ['What changed?'],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('ExperienceLibraryPage', () => {
   beforeEach(() => {
@@ -136,6 +149,132 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Project' }));
     expect(screen.getByRole('button', { name: /Searchable project/ })).toBeInTheDocument();
     expect(screen.queryByText('Volunteer event')).not.toBeInTheDocument();
+  });
+
+  it('finds experiences from raw input and technologies', async () => {
+    const rawOnly = {
+      ...listItem,
+      experience_id: 2,
+      title: 'Untitled note',
+      raw_input: 'Migrated a legacy warehouse',
+      technologies: [],
+      tags: [],
+    };
+    const technologyOnly = {
+      ...listItem,
+      experience_id: 3,
+      title: 'Implementation',
+      raw_input: '',
+      technologies: ['Rust'],
+      tags: [],
+    };
+    api.listExperiences.mockResolvedValueOnce({ items: [rawOnly, technologyOnly], total: 2 });
+    render(<ExperienceLibraryPage />);
+    await screen.findByRole('button', { name: /Untitled note/ });
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search experiences' }), {
+      target: { value: 'legacy warehouse' },
+    });
+    expect(screen.getByRole('button', { name: /Untitled note/ })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search experiences' }), {
+      target: { value: 'rust' },
+    });
+    expect(screen.getByRole('button', { name: /Implementation/ })).toBeInTheDocument();
+  });
+
+  it('keeps an imported draft when an older initial list request resolves later', async () => {
+    const initialList = deferred<{ items: ExperienceRead[]; total: number }>();
+    api.listExperiences.mockReturnValueOnce(initialList.promise);
+    api.importExperienceText.mockResolvedValue(imported);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
+      target: { value: 'Exactly this valid text' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+    await screen.findByRole('heading', { name: 'Imported experience' });
+
+    initialList.resolve({ items: [listItem], total: 1 });
+    await waitFor(() => expect(api.listExperiences).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('heading', { name: 'Imported experience' })).toBeInTheDocument();
+    expect(screen.getByText('Exactly this valid text')).toBeInTheDocument();
+  });
+
+  it('reselects the first visible item when a filter hides the selected detail', async () => {
+    const volunteer = {
+      ...listItem,
+      experience_id: 2,
+      kind: 'volunteer' as const,
+      title: 'Volunteer event',
+    };
+    api.listExperiences.mockResolvedValueOnce({ items: [listItem, volunteer], total: 2 });
+    render(<ExperienceLibraryPage />);
+    await screen.findByRole('heading', { name: 'Searchable project' });
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search experiences' }), {
+      target: { value: 'volunteer' },
+    });
+    expect(screen.getByRole('heading', { name: 'Volunteer event' })).toBeInTheDocument();
+  });
+
+  it('clears incompatible filters and opens the imported draft detail pane', async () => {
+    api.importExperienceText.mockResolvedValue(imported);
+    render(<ExperienceLibraryPage />);
+    await screen.findByRole('button', { name: /Searchable project/ });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search experiences' }), {
+      target: { value: 'only-existing-item' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
+      target: { value: 'Exactly this valid text' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+
+    expect(await screen.findByRole('heading', { name: 'Imported experience' })).toBeInTheDocument();
+    expect(screen.getByTestId('experience-detail-pane')).toHaveClass('block');
+    expect(screen.getByTestId('experience-list-pane')).toHaveClass('hidden');
+  });
+
+  it('switches mobile panes on list selection and returns to the list with Back', async () => {
+    render(<ExperienceLibraryPage />);
+    await screen.findByRole('button', { name: /Searchable project/ });
+
+    expect(screen.getByTestId('experience-list-pane')).toHaveClass('block');
+    expect(screen.getByTestId('experience-detail-pane')).toHaveClass('hidden');
+    fireEvent.click(screen.getByRole('button', { name: /Searchable project/ }));
+    expect(screen.getByTestId('experience-list-pane')).toHaveClass('hidden');
+    expect(screen.getByTestId('experience-detail-pane')).toHaveClass('block');
+    fireEvent.click(screen.getByRole('button', { name: 'Back to list' }));
+    expect(screen.getByTestId('experience-list-pane')).toHaveClass('block');
+    expect(screen.getByTestId('experience-detail-pane')).toHaveClass('hidden');
+  });
+
+  it('localizes the status label and stops Enter from escaping the import textarea', async () => {
+    const documentKeydown = vi.fn();
+    document.addEventListener('keydown', documentKeydown);
+    render(<ExperienceLibraryPage />);
+    await screen.findByRole('button', { name: /Searchable project/ });
+    expect(screen.getByText(/Draft status/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Experience text' }), { key: 'Enter' });
+    expect(documentKeydown).not.toHaveBeenCalled();
+    document.removeEventListener('keydown', documentKeydown);
+  });
+
+  it('returns focus to Import when the dialog closes with Escape', async () => {
+    render(<ExperienceLibraryPage />);
+    const importButton = screen.getByRole('button', { name: 'Import' });
+    importButton.focus();
+    fireEvent.click(importButton);
+    await screen.findByRole('textbox', { name: 'Experience text' });
+
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(importButton).toHaveFocus();
   });
 
   it('persists exact pasted text, selects the returned draft, and does not start questions', async () => {

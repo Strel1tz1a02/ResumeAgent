@@ -31,8 +31,8 @@ export function ExperienceList({
             >
               <span className="font-serif text-lg font-bold leading-tight">{experience.title}</span>
               <span className="font-mono text-xs uppercase tracking-wide">
-                {t(`experiences.kind.${experience.kind}`)} · {experience.status} ·{' '}
-                {experience.completeness}%
+                {t(`experiences.kind.${experience.kind}`)} ·{' '}
+                {t(`experiences.status.${experience.status}`)} · {experience.completeness}%
               </span>
               {experience.organization && (
                 <span className="text-sm">{experience.organization}</span>
