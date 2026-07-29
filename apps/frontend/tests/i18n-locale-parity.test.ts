@@ -78,6 +78,29 @@ describe('i18n locale parity (guards the next build break)', () => {
     expect(REFERENCE.size).toBeGreaterThan(20);
   });
 
+  it('keeps experience-library page, AI, and dashboard-entry copy available in every locale', () => {
+    for (const [name, locale] of Object.entries({ en, ...LOCALES })) {
+      const messages = locale as {
+        experiences?: { title?: unknown; ai?: { start?: unknown; fallback?: unknown } };
+        dashboard?: { experienceLibrary?: { title?: unknown; description?: unknown } };
+      };
+      expect(messages.experiences?.title, `${name}.json experience title`).toEqual(
+        expect.any(String)
+      );
+      expect(messages.experiences?.ai?.start, `${name}.json AI start`).toEqual(expect.any(String));
+      expect(messages.experiences?.ai?.fallback, `${name}.json AI fallback`).toEqual(
+        expect.any(String)
+      );
+      expect(messages.dashboard?.experienceLibrary?.title, `${name}.json dashboard title`).toEqual(
+        expect.any(String)
+      );
+      expect(
+        messages.dashboard?.experienceLibrary?.description,
+        `${name}.json dashboard description`
+      ).toEqual(expect.any(String));
+    }
+  });
+
   it('detects shape mismatches by JSON type (object / number / array vs string)', () => {
     // Proves the kind-aware comparison fires on the exact gaps a presence-only
     // set-diff would let through (cubic review, PR #820) — including primitive
