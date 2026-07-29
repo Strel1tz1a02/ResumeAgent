@@ -16,6 +16,9 @@ import { useTranslations } from '@/lib/i18n';
 interface EvidenceListEditorProps {
   experience: ExperienceDetail;
   onMutated: (experience: ExperienceDetail) => void;
+  onMutationStart: (experienceId: number) => void;
+  onDirtyChange: (dirty: boolean) => void;
+  resetSignal: number;
 }
 
 type EvidenceDraft = { action: string; result: string; metrics: string };
@@ -26,7 +29,13 @@ const toDraft = (item: ExperienceDetail['evidence_items'][number]): EvidenceDraf
   metrics: item.metrics ?? '',
 });
 
-export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditorProps) {
+export function EvidenceListEditor({
+  experience,
+  onMutated,
+  onMutationStart,
+  onDirtyChange,
+  resetSignal,
+}: EvidenceListEditorProps) {
   const { t } = useTranslations();
   const [drafts, setDrafts] = useState<Record<number, EvidenceDraft>>({});
   const [newEvidence, setNewEvidence] = useState<EvidenceDraft>({
@@ -42,7 +51,27 @@ export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditor
     setDrafts(
       Object.fromEntries(experience.evidence_items.map((item) => [item.id, toDraft(item)]))
     );
-  }, [experience.evidence_items]);
+    setNewEvidence({ action: '', result: '', metrics: '' });
+    setError(null);
+  }, [experience.experience_id, experience.evidence_items, resetSignal]);
+
+  const dirty =
+    newEvidence.action !== '' ||
+    newEvidence.result !== '' ||
+    newEvidence.metrics !== '' ||
+    experience.evidence_items.some((item) => {
+      const draft = drafts[item.id];
+      return Boolean(
+        draft &&
+        (draft.action !== item.action ||
+          draft.result !== (item.result ?? '') ||
+          draft.metrics !== (item.metrics ?? ''))
+      );
+    });
+
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
 
   const updateDraft = (id: number, key: keyof EvidenceDraft, value: string) => {
     setDrafts((current) => ({ ...current, [id]: { ...current[id], [key]: value } }));
@@ -55,6 +84,7 @@ export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditor
     if (submitting || !newEvidence.action.trim()) return;
     setSubmitting('new');
     setError(null);
+    onMutationStart(experience.experience_id);
     try {
       const detail = await createEvidence(experience.experience_id, {
         action: newEvidence.action.trim(),
@@ -75,6 +105,7 @@ export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditor
     if (submitting || !draft?.action.trim()) return;
     setSubmitting(`save-${id}`);
     setError(null);
+    onMutationStart(experience.experience_id);
     try {
       onMutated(
         await patchEvidence(experience.experience_id, id, {
@@ -94,6 +125,7 @@ export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditor
     if (submitting) return;
     setSubmitting(`delete-${id}`);
     setError(null);
+    onMutationStart(experience.experience_id);
     try {
       onMutated(await deleteEvidence(experience.experience_id, id));
     } catch (reason) {
@@ -110,6 +142,7 @@ export function EvidenceListEditor({ experience, onMutated }: EvidenceListEditor
     [ids[index], ids[nextIndex]] = [ids[nextIndex], ids[index]];
     setSubmitting(`move-${experience.evidence_items[index].id}`);
     setError(null);
+    onMutationStart(experience.experience_id);
     try {
       onMutated(await reorderEvidence(experience.experience_id, ids));
     } catch (reason) {

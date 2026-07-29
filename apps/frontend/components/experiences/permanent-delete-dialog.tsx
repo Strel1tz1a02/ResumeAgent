@@ -22,6 +22,8 @@ interface PermanentDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDeleted: (experienceId: number) => void;
+  onMutationStart: (experienceId: number) => void;
+  onSubmittingChange: (submitting: boolean) => void;
 }
 
 export function PermanentDeleteDialog({
@@ -29,6 +31,8 @@ export function PermanentDeleteDialog({
   open,
   onOpenChange,
   onDeleted,
+  onMutationStart,
+  onSubmittingChange,
 }: PermanentDeleteDialogProps) {
   const { t } = useTranslations();
   const [impact, setImpact] = useState<DeletionImpactResponse | null>(null);
@@ -56,7 +60,9 @@ export function PermanentDeleteDialog({
   const remove = async () => {
     if (experienceId === null || !impact || submitting) return;
     setSubmitting(true);
+    onSubmittingChange(true);
     setError(null);
+    onMutationStart(experienceId);
     try {
       await deleteExperiencePermanently(experienceId);
       onDeleted(experienceId);
@@ -65,6 +71,7 @@ export function PermanentDeleteDialog({
       setError(reason instanceof Error ? reason.message : t('experiences.permanent.error'));
     } finally {
       setSubmitting(false);
+      onSubmittingChange(false);
     }
   };
 

@@ -42,6 +42,7 @@ interface ExperienceDraft {
 interface ExperienceEditorProps {
   experience: ExperienceDetail;
   onSaved: (experience: ExperienceDetail) => void;
+  onMutationStart: (experienceId: number) => void;
   onDirtyChange: (dirty: boolean) => void;
   resetSignal: number;
 }
@@ -115,6 +116,7 @@ function explicitUpdate(draft: ExperienceDraft): ExperienceUpdate {
 export function ExperienceEditor({
   experience,
   onSaved,
+  onMutationStart,
   onDirtyChange,
   resetSignal,
 }: ExperienceEditorProps) {
@@ -153,6 +155,7 @@ export function ExperienceEditor({
     if (saving || archived || !draft.title.trim()) return;
     setSaving(true);
     setError(null);
+    onMutationStart(experience.experience_id);
     try {
       const detail = await patchExperience(experience.experience_id, explicitUpdate(draft));
       setDraft(draftFromExperience(detail));

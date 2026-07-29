@@ -71,6 +71,7 @@ const translate = vi.hoisted(
       'experiences.permanent.affectedMatches': '1 affected matches',
       'experiences.permanent.affectedResumes': '1 affected resumes',
       'experiences.permanent.confirm': 'Delete permanently',
+      'common.cancel': 'Cancel',
     })[key] ?? key
 );
 
@@ -558,6 +559,192 @@ describe('ExperienceLibraryPage', () => {
       await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }));
+    expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
+  });
+
+  it('keeps a dirty metadata draft and query unchanged until filter discard is confirmed', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Unsaved title' },
+    });
+    const search = screen.getByRole('textbox', { name: 'Search experiences' });
+    fireEvent.change(search, { target: { value: 'Second' } });
+
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+    expect(search).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }));
+    expect(search).toHaveValue('Second');
+    expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
+  });
+
+  it('keeps a dirty metadata draft and kind unchanged when filter discard is cancelled', async () => {
+    const volunteer = {
+      ...listItem,
+      experience_id: 2,
+      kind: 'volunteer' as const,
+      title: 'Volunteer event',
+    };
+    api.listExperiences.mockResolvedValue({ items: [listItem, volunteer], total: 2 });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Unsaved title' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Kind' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Volunteer' }));
+
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('button', { name: 'Kind' })).toHaveTextContent('All kinds');
+    expect(screen.getByRole('heading', { name: 'Searchable project' })).toBeInTheDocument();
+  });
+
+  it('protects unsaved evidence edits during selection and beforeunload', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByLabelText('Action new'), {
+      target: { value: 'Unsaved evidence' },
+    });
+    const beforeUnload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+  });
+
+  it('does not let an older A detail response replace a saved A response after A to B to A selection', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const firstA = deferred<ExperienceDetail>();
+    const savedA = {
+      ...listItem,
+      title: 'Saved A title',
+      updated_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    const staleA = {
+      ...listItem,
+      title: 'Stale A title',
+      updated_at: '2025-01-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience
+      .mockReturnValueOnce(firstA.promise)
+      .mockResolvedValueOnce({
+        ...second,
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+      .mockResolvedValueOnce({
+        ...listItem,
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      });
+    api.patchExperience.mockResolvedValue(savedA);
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('button', { name: /Searchable project/ });
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+    fireEvent.click(screen.getByRole('button', { name: /Searchable project/ }));
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    fireEvent.change(title, { target: { value: 'Saved A title' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+    await screen.findByDisplayValue('Saved A title');
+
+    firstA.resolve(staleA);
+    await waitFor(() =>
+      expect(screen.queryByDisplayValue('Stale A title')).not.toBeInTheDocument()
+    );
+  });
+
+  it('ignores a late ready conflict for A after B becomes selected', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const pendingReady = deferred<ExperienceDetail>();
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.markExperienceReady.mockReturnValue(pendingReady.promise);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark ready' }));
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+    pendingReady.reject({ conflict: { completeness: 44, missing_dimensions: ['metrics'] } });
+
+    await waitFor(() => expect(screen.queryByText('Not ready')).not.toBeInTheDocument());
+    expect(screen.queryByText('metrics')).not.toBeInTheDocument();
+  });
+
+  it('does not clear B when a late archive for A completes and prevents double archive submits', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const pendingArchive = deferred<ExperienceDetail>();
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.archiveExperience.mockReturnValue(pendingArchive.promise);
+    render(<ExperienceLibraryPage />);
+
+    const archive = await screen.findByRole('button', { name: 'Archive experience' });
+    fireEvent.click(archive);
+    fireEvent.click(archive);
+    expect(api.archiveExperience).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+    pendingArchive.resolve({
+      ...listItem,
+      status: 'archived',
+      archived_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+
     expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
   });
 });

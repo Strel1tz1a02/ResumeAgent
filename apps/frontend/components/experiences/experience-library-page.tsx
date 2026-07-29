@@ -37,6 +37,36 @@ const experienceKinds: ExperienceKind[] = [
 ];
 type LibraryView = 'active' | 'archived';
 
+function filterExperiences(
+  experiences: ExperienceRead[],
+  query: string,
+  kind: ExperienceKind | 'all'
+): ExperienceRead[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  return experiences.filter((experience) => {
+    if (kind !== 'all' && experience.kind !== kind) return false;
+    if (!normalizedQuery) return true;
+    return [
+      experience.title,
+      experience.organization,
+      experience.role,
+      experience.raw_input,
+      ...experience.tags,
+      ...experience.technologies,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
+  });
+}
+
+function isOlderDetail(current: ExperienceDetail | null, next: ExperienceDetail): boolean {
+  return Boolean(
+    current &&
+    current.experience_id === next.experience_id &&
+    current.updated_at.localeCompare(next.updated_at) > 0
+  );
+}
+
 export function ExperienceLibraryPage() {
   const { t } = useTranslations();
   const [experiences, setExperiences] = useState<ExperienceRead[]>([]);
@@ -49,16 +79,32 @@ export function ExperienceLibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
-  const [draftDirty, setDraftDirty] = useState(false);
+  const [metadataDirty, setMetadataDirty] = useState(false);
+  const [evidenceDirty, setEvidenceDirty] = useState(false);
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
   const [readyError, setReadyError] = useState<string | null>(null);
   const [readySubmitting, setReadySubmitting] = useState(false);
+  const [lifecycleSubmitting, setLifecycleSubmitting] = useState<{
+    experienceId: number;
+    action: 'archive' | 'restore' | 'permanent';
+  } | null>(null);
   const [permanentExperienceId, setPermanentExperienceId] = useState<number | null>(null);
   const isMountedRef = useRef(false);
   const listRequestGenerationRef = useRef(0);
   const detailRequestGenerationRef = useRef(0);
   const pendingDiscardActionRef = useRef<(() => void) | null>(null);
+  const selectedExperienceIdRef = useRef<number | null>(null);
+  const dirtyRef = useRef(false);
+  const hasUnsavedChanges = metadataDirty || evidenceDirty;
+
+  useEffect(() => {
+    selectedExperienceIdRef.current = selectedExperienceId;
+  }, [selectedExperienceId]);
+
+  useEffect(() => {
+    dirtyRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -78,11 +124,21 @@ export function ExperienceLibraryPage() {
         const response = await listExperiences({ status: targetView });
         if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
         setExperiences(response.items);
-        setSelectedExperienceId((current) =>
-          response.items.some((item) => item.experience_id === current)
-            ? current
-            : (response.items[0]?.experience_id ?? null)
-        );
+        const currentId = selectedExperienceIdRef.current;
+        if (response.items.some((item) => item.experience_id === currentId)) return;
+        const replacementId = response.items[0]?.experience_id ?? null;
+        const selectReplacement = () => {
+          selectedExperienceIdRef.current = replacementId;
+          detailRequestGenerationRef.current += 1;
+          setSelectedExperienceId(replacementId);
+          setSelectedDetail(null);
+        };
+        if (currentId !== null && dirtyRef.current) {
+          pendingDiscardActionRef.current = selectReplacement;
+          setDiscardDialogOpen(true);
+        } else {
+          selectReplacement();
+        }
       } catch (reason) {
         if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
         setError(reason instanceof Error ? reason.message : t('experiences.error'));
@@ -109,7 +165,7 @@ export function ExperienceLibraryPage() {
         if (
           !isMountedRef.current ||
           requestGeneration !== detailRequestGenerationRef.current ||
-          detail.experience_id !== selectedExperienceId
+          detail.experience_id !== selectedExperienceIdRef.current
         )
           return;
         setSelectedDetail(detail);
@@ -119,23 +175,10 @@ export function ExperienceLibraryPage() {
       });
   }, [selectedExperienceId]);
 
-  const filteredExperiences = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    return experiences.filter((experience) => {
-      if (kind !== 'all' && experience.kind !== kind) return false;
-      if (!normalizedQuery) return true;
-      return [
-        experience.title,
-        experience.organization,
-        experience.role,
-        experience.raw_input,
-        ...experience.tags,
-        ...experience.technologies,
-      ]
-        .filter((value): value is string => Boolean(value))
-        .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
-    });
-  }, [experiences, kind, query]);
+  const filteredExperiences = useMemo(
+    () => filterExperiences(experiences, query, kind),
+    [experiences, kind, query]
+  );
 
   const selectedExperience = filteredExperiences.find(
     (experience) => experience.experience_id === selectedExperienceId
@@ -144,26 +187,20 @@ export function ExperienceLibraryPage() {
     selectedDetail?.experience_id === selectedExperienceId ? selectedDetail : selectedExperience;
 
   useEffect(() => {
-    if (selectedExperienceId !== null && !selectedExperience) {
-      setSelectedExperienceId(filteredExperiences[0]?.experience_id ?? null);
-    }
-  }, [filteredExperiences, selectedExperience, selectedExperienceId]);
-
-  useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!draftDirty) return;
+      if (!hasUnsavedChanges) return;
       event.preventDefault();
       event.returnValue = '';
     };
-    if (!draftDirty) return;
+    if (!hasUnsavedChanges) return;
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [draftDirty]);
+  }, [hasUnsavedChanges]);
 
   useEffect(() => {
     const handleInAppNavigation = (event: MouseEvent) => {
       if (
-        !draftDirty ||
+        !hasUnsavedChanges ||
         event.defaultPrevented ||
         event.button !== 0 ||
         event.metaKey ||
@@ -181,18 +218,33 @@ export function ExperienceLibraryPage() {
     };
     document.addEventListener('click', handleInAppNavigation, true);
     return () => document.removeEventListener('click', handleInAppNavigation, true);
-  }, [draftDirty]);
+  }, [hasUnsavedChanges]);
 
   const replaceDetail = useCallback((detail: ExperienceDetail) => {
-    setSelectedDetail(detail);
     setExperiences((current) =>
       current.map((item) => (item.experience_id === detail.experience_id ? detail : item))
+    );
+    setSelectedDetail((current) =>
+      selectedExperienceIdRef.current === detail.experience_id && !isOlderDetail(current, detail)
+        ? detail
+        : current
     );
     setReadyError(null);
   }, []);
 
+  const invalidateDetailRequest = useCallback((experienceId: number) => {
+    if (selectedExperienceIdRef.current === experienceId) detailRequestGenerationRef.current += 1;
+  }, []);
+
+  const selectExperience = useCallback((experienceId: number | null) => {
+    selectedExperienceIdRef.current = experienceId;
+    detailRequestGenerationRef.current += 1;
+    setSelectedExperienceId(experienceId);
+    if (experienceId === null) setSelectedDetail(null);
+  }, []);
+
   const discardThen = (action: () => void) => {
-    if (!draftDirty) {
+    if (!hasUnsavedChanges) {
       action();
       return;
     }
@@ -201,12 +253,33 @@ export function ExperienceLibraryPage() {
   };
 
   const handleDiscard = () => {
-    setDraftDirty(false);
+    setMetadataDirty(false);
+    setEvidenceDirty(false);
     setResetSignal((current) => current + 1);
     const action = pendingDiscardActionRef.current;
     pendingDiscardActionRef.current = null;
     setDiscardDialogOpen(false);
     action?.();
+  };
+
+  const applyFilters = (nextQuery: string, nextKind: ExperienceKind | 'all') => {
+    const nextFiltered = filterExperiences(experiences, nextQuery, nextKind);
+    const selectedStillVisible = nextFiltered.some(
+      (experience) => experience.experience_id === selectedExperienceIdRef.current
+    );
+    const apply = () => {
+      setQuery(nextQuery);
+      setKind(nextKind);
+      if (!selectedStillVisible) {
+        selectExperience(nextFiltered[0]?.experience_id ?? null);
+      }
+    };
+    if (!selectedStillVisible && hasUnsavedChanges) {
+      pendingDiscardActionRef.current = apply;
+      setDiscardDialogOpen(true);
+      return;
+    }
+    apply();
   };
 
   const handleImported = (experience: ExperienceDetail) => {
@@ -224,14 +297,14 @@ export function ExperienceLibraryPage() {
             item.experience_id === experience.experience_id ? experience : item
           );
     });
-    setSelectedExperienceId(experience.experience_id);
+    selectExperience(experience.experience_id);
     setSelectedDetail(experience);
     setMobilePane('detail');
   };
 
   const handleSelectExperience = (experience: ExperienceRead) => {
     discardThen(() => {
-      setSelectedExperienceId(experience.experience_id);
+      selectExperience(experience.experience_id);
       setMobilePane('detail');
     });
   };
@@ -240,7 +313,7 @@ export function ExperienceLibraryPage() {
     if (nextView === view) return;
     discardThen(() => {
       setView(nextView);
-      setSelectedExperienceId(null);
+      selectExperience(null);
       setSelectedDetail(null);
       setMobilePane('list');
     });
@@ -248,15 +321,17 @@ export function ExperienceLibraryPage() {
 
   const handleReady = async () => {
     if (!selectedDetail || readySubmitting) return;
+    const targetId = selectedDetail.experience_id;
+    invalidateDetailRequest(targetId);
     setReadySubmitting(true);
     setReadyError(null);
     try {
-      replaceDetail(await markExperienceReady(selectedDetail.experience_id));
+      replaceDetail(await markExperienceReady(targetId));
     } catch (reason) {
       const conflict = reason as ExperienceReadyConflictError;
-      if (conflict?.conflict) {
+      if (conflict?.conflict && selectedExperienceIdRef.current === targetId) {
         setSelectedDetail((current) =>
-          current
+          current?.experience_id === targetId
             ? {
                 ...current,
                 completeness: conflict.conflict.completeness,
@@ -279,40 +354,57 @@ export function ExperienceLibraryPage() {
   };
 
   const archive = async () => {
-    if (!selectedDetail) return;
+    if (!selectedDetail || lifecycleSubmitting) return;
+    const targetId = selectedDetail.experience_id;
+    invalidateDetailRequest(targetId);
+    setLifecycleSubmitting({ experienceId: targetId, action: 'archive' });
     try {
-      const archived = await archiveExperience(selectedDetail.experience_id);
+      const archived = await archiveExperience(targetId);
       setExperiences((current) =>
         current.filter((item) => item.experience_id !== archived.experience_id)
       );
-      setSelectedExperienceId(null);
-      setSelectedDetail(null);
-      setMobilePane('list');
+      if (selectedExperienceIdRef.current === targetId) {
+        selectExperience(null);
+        setMobilePane('list');
+      }
     } catch (reason) {
-      setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+      if (selectedExperienceIdRef.current === targetId) {
+        setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+      }
+    } finally {
+      setLifecycleSubmitting(null);
     }
   };
 
   const restore = async () => {
-    if (!selectedDetail) return;
+    if (!selectedDetail || lifecycleSubmitting) return;
+    const targetId = selectedDetail.experience_id;
+    invalidateDetailRequest(targetId);
+    setLifecycleSubmitting({ experienceId: targetId, action: 'restore' });
     try {
-      const restored = await restoreExperience(selectedDetail.experience_id);
+      const restored = await restoreExperience(targetId);
       setExperiences((current) =>
         current.filter((item) => item.experience_id !== restored.experience_id)
       );
-      setSelectedExperienceId(null);
-      setSelectedDetail(null);
-      setMobilePane('list');
+      if (selectedExperienceIdRef.current === targetId) {
+        selectExperience(null);
+        setMobilePane('list');
+      }
     } catch (reason) {
-      setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+      if (selectedExperienceIdRef.current === targetId) {
+        setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+      }
+    } finally {
+      setLifecycleSubmitting(null);
     }
   };
 
   const handleDeletedPermanently = (experienceId: number) => {
     setExperiences((current) => current.filter((item) => item.experience_id !== experienceId));
-    setSelectedExperienceId(null);
-    setSelectedDetail(null);
-    setMobilePane('list');
+    if (selectedExperienceIdRef.current === experienceId) {
+      selectExperience(null);
+      setMobilePane('list');
+    }
   };
 
   return (
@@ -367,14 +459,14 @@ export function ExperienceLibraryPage() {
           <Input
             aria-label={t('experiences.search')}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => applyFilters(event.target.value, kind)}
             placeholder={t('experiences.search')}
             className="md:border-r-0"
           />
           <Dropdown
             label={t('experiences.kind')}
             value={kind}
-            onChange={(value) => setKind(value as ExperienceKind | 'all')}
+            onChange={(value) => applyFilters(query, value as ExperienceKind | 'all')}
             className="mt-3 md:mt-0"
             options={[
               { id: 'all', label: t('experiences.kind.all') },
@@ -454,10 +546,17 @@ export function ExperienceLibraryPage() {
                       <ExperienceEditor
                         experience={selectedDetail}
                         onSaved={replaceDetail}
-                        onDirtyChange={setDraftDirty}
+                        onMutationStart={invalidateDetailRequest}
+                        onDirtyChange={setMetadataDirty}
                         resetSignal={resetSignal}
                       />
-                      <EvidenceListEditor experience={selectedDetail} onMutated={replaceDetail} />
+                      <EvidenceListEditor
+                        experience={selectedDetail}
+                        onMutated={replaceDetail}
+                        onMutationStart={invalidateDetailRequest}
+                        onDirtyChange={setEvidenceDirty}
+                        resetSignal={resetSignal}
+                      />
                       <CompletenessPanel
                         experience={selectedDetail}
                         onMarkReady={() => void handleReady()}
@@ -465,17 +564,25 @@ export function ExperienceLibraryPage() {
                         error={readyError}
                       />
                       {view === 'active' ? (
-                        <Button variant="destructive" onClick={() => void archive()}>
+                        <Button
+                          variant="destructive"
+                          onClick={() => void archive()}
+                          disabled={Boolean(lifecycleSubmitting)}
+                        >
                           {t('experiences.lifecycle.archive')}
                         </Button>
                       ) : (
                         <div className="flex flex-wrap gap-2">
-                          <Button onClick={() => void restore()}>
+                          <Button
+                            onClick={() => void restore()}
+                            disabled={Boolean(lifecycleSubmitting)}
+                          >
                             {t('experiences.lifecycle.restore')}
                           </Button>
                           <Button
                             variant="destructive"
                             onClick={() => setPermanentExperienceId(selectedDetail.experience_id)}
+                            disabled={Boolean(lifecycleSubmitting)}
                           >
                             {t('experiences.lifecycle.permanent')}
                           </Button>
@@ -528,6 +635,14 @@ export function ExperienceLibraryPage() {
           if (!open) setPermanentExperienceId(null);
         }}
         onDeleted={handleDeletedPermanently}
+        onMutationStart={invalidateDetailRequest}
+        onSubmittingChange={(submitting) => {
+          setLifecycleSubmitting(
+            submitting && permanentExperienceId !== null
+              ? { experienceId: permanentExperienceId, action: 'permanent' }
+              : null
+          );
+        }}
       />
     </main>
   );
