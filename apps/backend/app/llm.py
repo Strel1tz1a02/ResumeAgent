@@ -814,7 +814,8 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
     Args:
         data: Parsed JSON dict.
         schema_type: Expected schema — "resume" (full resume), "enrichment"
-            (analyze output), "diff" (diff changes), "keywords", or
+            (analyze output), "experience_enrichment" (one question or a
+            narrow experience patch), "diff" (diff changes), "keywords", or
             "interview_prep".
             Determines which fields are checked for truncation.
     """
@@ -842,6 +843,22 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
             logging.warning(
                 "Possible truncation detected: enrichment missing required keys"
             )
+            return True
+        return False
+
+    if schema_type == "experience_enrichment":
+        # Question turns require one question object. Answer turns require at
+        # least one recognized patch operation. Do not use resume-array
+        # heuristics here: empty evidence arrays are a valid library state.
+        question = data.get("question")
+        if isinstance(question, dict):
+            if question.get("question_id") and question.get("question"):
+                return False
+            logging.warning("Possible truncation detected: enrichment question is incomplete")
+            return True
+        patch_keys = {"experience_updates", "evidence_update", "new_evidence"}
+        if not any(key in data for key in patch_keys):
+            logging.warning("Possible truncation detected: enrichment answer has no patch operation")
             return True
         return False
 
@@ -1083,7 +1100,7 @@ async def complete_json(
 
     Args:
         schema_type: Expected schema — "resume", "enrichment", "diff",
-            "keywords", or "interview_prep". Passed to _appears_truncated for
+            "keywords", "interview_prep", or "experience_enrichment". Passed to _appears_truncated for
             context-aware truncation detection and used to tailor retry hints.
     """
     router, config = get_router(config)
@@ -1155,6 +1172,11 @@ async def complete_json(
                     elif schema_type == "interview_prep":
                         hint = (
                             "\n\nIMPORTANT: Output the COMPLETE JSON object with ALL keys: role_fit_analysis, resume_questions, project_follow_ups, skill_gaps, talking_points. Do not truncate."
+                        )
+                    elif schema_type == "experience_enrichment":
+                        hint = (
+                            "\n\nIMPORTANT: Output a COMPLETE JSON object containing either "
+                            "question or a recognized enrichment patch operation. Do not truncate."
                         )
                     else:
                         hint = (

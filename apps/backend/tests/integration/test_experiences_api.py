@@ -18,6 +18,36 @@ from app.services.evidence_service import EvidenceService
 from app.services.experience_service import ExperienceConflictError, ExperienceService
 
 
+async def test_ai_questions_and_answers_are_stateless_and_return_typed_detail(isolated_db) -> None:
+    """Removing enrichment routes or saving a chat transcript would break this stateless contract."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
+        experience_id = created.json()["experience_id"]
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"question": {"question_id": "organization", "question": "Which organization was this with?"}}),
+        ):
+            question = await client.post(f"/api/v1/experiences/{experience_id}/questions/next")
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"organization": "Campus Lab"}}),
+        ):
+            answer = await client.post(
+                f"/api/v1/experiences/{experience_id}/answers",
+                json={"question_id": "organization", "answer": "It was with Campus Lab."},
+            )
+
+    assert question.status_code == 200
+    assert question.json() == {
+        "question_id": "organization",
+        "question": "Which organization was this with?",
+        "is_fallback": False,
+    }
+    assert answer.status_code == 200
+    assert answer.json()["organization"] == "Campus Lab"
+    assert "history" not in answer.json()
+
+
 def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 

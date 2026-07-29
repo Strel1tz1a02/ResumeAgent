@@ -192,3 +192,131 @@ class DeletionImpactResponse(BaseModel):
 
     affected_matches: list[int] = Field(default_factory=list)
     affected_resumes: list[str] = Field(default_factory=list)
+
+
+class ExperienceEnrichmentQuestion(BaseModel):
+    """One stateless follow-up question generated from persisted facts only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=1, max_length=80)
+    question: str = Field(min_length=1, max_length=1_000)
+    is_fallback: bool = False
+
+
+class ExperienceEnrichmentAnswerRequest(BaseModel):
+    """A single answer; the server deliberately stores no conversation transcript."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str = Field(min_length=1, max_length=80)
+    answer: str = Field(min_length=1, max_length=8_000)
+
+    @field_validator("answer")
+    @classmethod
+    def _answer_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("answer must not be blank")
+        return value
+
+
+class ExperienceEnrichmentExperienceUpdate(BaseModel):
+    """The narrow experience fields an LLM may propose from one answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    organization: str | None = None
+    role: str | None = None
+    location: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    is_current: bool | None = None
+    background: str | None = None
+    technologies: list[str] | None = None
+    tags: list[str] | None = None
+    notes: str | None = None
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def _validate_enrichment_dates(cls, value: str | None) -> str | None:
+        if value is not None and not _YEAR_MONTH_RE.fullmatch(value):
+            raise ValueError("date must use YYYY-MM format")
+        return value
+
+    @field_validator("technologies", "tags", mode="before")
+    @classmethod
+    def _normalize_enrichment_labels(cls, value: object) -> list[str] | None:
+        if value is None:
+            return None
+        return _normalize_labels(value)
+
+
+class ExperienceEnrichmentEvidenceFields(BaseModel):
+    """Only factual evidence content is writable by an enrichment response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str | None = None
+    result: str | None = None
+    metrics: str | None = None
+
+    @field_validator("action")
+    @classmethod
+    def _action_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("action must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _must_contain_a_field(self) -> "ExperienceEnrichmentEvidenceFields":
+        if not self.model_fields_set:
+            raise ValueError("evidence update must contain at least one field")
+        return self
+
+
+class ExperienceEnrichmentEvidenceUpdate(BaseModel):
+    """A typed update that can target only an existing owned evidence row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: int = Field(gt=0)
+    updates: ExperienceEnrichmentEvidenceFields
+
+
+class ExperienceEnrichmentPatch(BaseModel):
+    """The complete narrow JSON contract accepted from the enrichment LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    experience_updates: ExperienceEnrichmentExperienceUpdate | None = None
+    evidence_update: ExperienceEnrichmentEvidenceUpdate | None = None
+    new_evidence: ExperienceEnrichmentEvidenceFields | None = None
+    next_question: ExperienceEnrichmentQuestion | None = None
+
+    @model_validator(mode="after")
+    def _must_contain_a_mutation(self) -> "ExperienceEnrichmentPatch":
+        has_experience_update = bool(
+            self.experience_updates and self.experience_updates.model_fields_set
+        )
+        if not any((has_experience_update, self.evidence_update, self.new_evidence)):
+            raise ValueError("enrichment answer must contain a recognized patch operation")
+        if self.new_evidence is not None and not self.new_evidence.action:
+            raise ValueError("new evidence requires an action")
+        return self
+
+
+class ExperienceEnrichmentQuestionResponse(BaseModel):
+    """Narrow LLM response for a question-generation turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: ExperienceEnrichmentQuestion
+
+
+class ExperienceEnrichmentAnswerResponse(ExperienceDetail):
+    """Expanded persisted detail and an optional stateless suggested next question."""
+
+    next_question: ExperienceEnrichmentQuestion | None = None

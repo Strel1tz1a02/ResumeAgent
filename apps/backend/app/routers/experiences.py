@@ -10,6 +10,9 @@ from app.repositories.session import get_repository_session
 from app.schemas.experiences import (
     DeletionImpactResponse,
     ExperienceCreate,
+    ExperienceEnrichmentAnswerRequest,
+    ExperienceEnrichmentAnswerResponse,
+    ExperienceEnrichmentQuestion,
     ExperienceDetail,
     ExperienceImportTextRequest,
     ExperienceListQuery,
@@ -20,6 +23,11 @@ from app.schemas.experiences import (
 from app.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
 from app.services.evidence_service import EvidenceService
 from app.services.experience_import_service import ExperienceImportService
+from app.services.experience_enrichment_service import (
+    EnrichmentRetryableError,
+    ExperienceEnrichmentService,
+    InvalidEnrichmentPatch,
+)
 from app.services.experience_service import (
     ExperienceConflictError,
     ExperienceNotFoundError,
@@ -78,6 +86,34 @@ async def get_experience(experience_id: int, session: Session) -> ExperienceDeta
     try:
         return await ExperienceService(session).get(experience_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post("/{experience_id}/questions/next", response_model=ExperienceEnrichmentQuestion)
+async def next_enrichment_question(
+    experience_id: int, session: Session
+) -> ExperienceEnrichmentQuestion:
+    """Generate one stateless factual follow-up without persisting a chat transcript."""
+    try:
+        return await ExperienceEnrichmentService(session).next_question(experience_id)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.post("/{experience_id}/answers", response_model=ExperienceEnrichmentAnswerResponse)
+async def apply_enrichment_answer(
+    experience_id: int,
+    request: ExperienceEnrichmentAnswerRequest,
+    session: Session,
+) -> ExperienceEnrichmentAnswerResponse:
+    """Apply one typed answer patch atomically; conversation history is never stored."""
+    try:
+        return await ExperienceEnrichmentService(session).apply_answer(
+            experience_id, request.question_id, request.answer
+        )
+    except EnrichmentRetryableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (InvalidEnrichmentPatch, ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)
 
 

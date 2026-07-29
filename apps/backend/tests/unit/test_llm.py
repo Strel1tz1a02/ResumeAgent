@@ -209,6 +209,20 @@ class TestAppearsTruncated:
         }
         assert _appears_truncated(data, schema_type="enrichment") is False
 
+    # --- experience enrichment schema ---
+
+    def test_experience_enrichment_requires_question_or_patch_without_resume_heuristics(self):
+        """A stateless question or a narrow patch is valid even without resume arrays."""
+        assert _appears_truncated(
+            {"question": {"question_id": "action", "question": "What did you do?"}},
+            schema_type="experience_enrichment",
+        ) is False
+        assert _appears_truncated(
+            {"new_evidence": {"action": "Built API"}},
+            schema_type="experience_enrichment",
+        ) is False
+        assert _appears_truncated({}, schema_type="experience_enrichment") is True
+
     # --- diff schema ---
 
     def test_diff_empty_changes(self):
