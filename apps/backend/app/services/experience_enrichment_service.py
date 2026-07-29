@@ -126,7 +126,10 @@ _CURRENT_STATUS_PATTERNS = (
 )
 _ENDED_STATUS_PATTERNS = (
     r"\b(?:no\s+longer|not\s+currently).{0,48}\b(?:work\w*|employ\w*|serv\w*|role|job)\b",
-    r"\b(?:role|job|employment|project|internship)\s+(?:has\s+)?(?:ended|finished|completed)\b",
+    r"\b(?:role|job|position|employment|internship|experience)\s+(?:has\s+)?(?:ended|finished)\b",
+    r"\bproject\s+(?:has\s+)?ended\b",
+    r"\bproject\s+(?:was|is|has\s+been)\s+(?:completed|finished)\b",
+    r"\bi\s+(?:completed|finished)\s+(?:the\s+)?project\b",
     r"\b(?:left|resigned)\s+(?:from\s+)?(?:the\s+|my\s+)?(?:role|job|company|employment)\b",
     r"\b(?:ya\s+no|no\s+actualmente).{0,48}\b(?:trabaj\w*|emple\w*|puesto|rol|proyecto|pr\u00e1ctica)\b",
     r"\b(?:puesto|rol|emple\w*|proyecto|pr\u00e1ctica).{0,48}\b(?:termin\w*|finaliz\w*|acab\w*)\b",
@@ -239,19 +242,32 @@ def _is_supported_value(value: str, source: str, current_value: str | None = Non
     return False
 
 
-def _has_contextual_status_evidence(source: str, is_current: bool) -> bool:
-    """Require lifecycle wording to be tied to employment, role, or project context."""
-    patterns = _CURRENT_STATUS_PATTERNS if is_current else _ENDED_STATUS_PATTERNS
+def _contextual_status_signals(source: str) -> set[bool]:
+    """Return affirmative current/ended lifecycle signals tied to work context."""
+    signals: set[bool] = set()
     for normalized_clause in _normalized_relation_clauses(source):
         cjk = bool(_CJK_RE.search(normalized_clause))
-        for expression in patterns:
-            for match in re.finditer(expression, normalized_clause):
-                if is_current and _match_is_negated(
-                    normalized_clause, match.start(), match.end(), cjk=cjk
-                ):
-                    continue
-                return True
-    return False
+        for is_current, patterns in (
+            (True, _CURRENT_STATUS_PATTERNS),
+            (False, _ENDED_STATUS_PATTERNS),
+        ):
+            for expression in patterns:
+                for match in re.finditer(expression, normalized_clause):
+                    if is_current and _match_is_negated(
+                        normalized_clause, match.start(), match.end(), cjk=cjk
+                    ):
+                        continue
+                    signals.add(is_current)
+    return signals
+
+
+def _has_authoritative_status_evidence(raw_input: str, answer: str, is_current: bool) -> bool:
+    """Use the latest answer when it states lifecycle facts; otherwise fall back to raw input."""
+    answer_signals = _contextual_status_signals(answer)
+    if answer_signals:
+        return answer_signals == {is_current}
+    raw_signals = _contextual_status_signals(raw_input)
+    return raw_signals == {is_current}
 
 
 class ExperienceEnrichmentService:
@@ -409,8 +425,8 @@ class ExperienceEnrichmentService:
                     raise InvalidEnrichmentPatch("Enrichment patch contains factual content not supported by raw input or answer")
             if "is_current" in experience_updates.model_fields_set:
                 is_current = experience_updates.is_current
-                if is_current != current.is_current and not _has_contextual_status_evidence(
-                    source, is_current
+                if is_current != current.is_current and not _has_authoritative_status_evidence(
+                    current.raw_input, answer, is_current
                 ):
                     raise InvalidEnrichmentPatch(
                         "Enrichment patch contains factual content not supported by raw input or answer"

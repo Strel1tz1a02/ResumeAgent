@@ -580,3 +580,74 @@ async def test_answer_rejects_unrelated_current_or_completed_status_words_atomic
 
     assert stored.is_current is (not expected_current)
     assert stored.evidence_items == []
+
+
+@pytest.mark.parametrize(
+    ("raw_input", "answer", "expected_current", "accepted"),
+    [
+        (
+            "The project completed the task and continued into 2025.",
+            "The project completed the task and continued into 2025.",
+            False,
+            False,
+        ),
+        (
+            "I currently work in this role.",
+            "I no longer work in this role.",
+            True,
+            False,
+        ),
+        (
+            "I currently work in this role.",
+            "I no longer work in this role.",
+            False,
+            True,
+        ),
+        (
+            "I no longer work in this role.",
+            "I currently work in this role.",
+            True,
+            True,
+        ),
+        (
+            "I no longer work in this role.",
+            "I currently work in this role.",
+            False,
+            False,
+        ),
+        (
+            "No lifecycle details were saved.",
+            "I currently work in this role, but I no longer work in this role.",
+            True,
+            False,
+        ),
+        (
+            "No lifecycle details were saved.",
+            "I currently work in this role, but I no longer work in this role.",
+            False,
+            False,
+        ),
+    ],
+)
+async def test_answer_status_evidence_is_authoritative_and_non_conflicting(
+    isolated_db, raw_input, answer, expected_current, accepted
+) -> None:
+    """The latest answer wins over raw input unless its own lifecycle evidence conflicts."""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Original", raw_input=raw_input, is_current=not expected_current)
+        )
+        service = ExperienceEnrichmentService(session)
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(return_value={"experience_updates": {"is_current": expected_current}}),
+        ):
+            if accepted:
+                updated = await service.apply_answer(created.experience_id, "dates", answer)
+            else:
+                with pytest.raises(InvalidEnrichmentPatch, match="supported"):
+                    await service.apply_answer(created.experience_id, "dates", answer)
+                updated = await service.get_detail(created.experience_id)
+
+    assert updated.is_current is (expected_current if accepted else not expected_current)
+    assert updated.evidence_items == []
