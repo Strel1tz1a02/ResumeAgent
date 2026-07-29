@@ -65,6 +65,7 @@ const translate = vi.hoisted(
       'experiences.unsaved.discard': 'Discard edits',
       'experiences.ready.action': 'Mark ready',
       'experiences.ready.conflict': 'Not ready',
+      'experiences.ready.error': 'Could not mark ready',
       'experiences.permanent.title': 'Delete permanently?',
       'experiences.permanent.description': 'This cannot be undone.',
       'experiences.permanent.loadingImpact': 'Loading impact',
@@ -746,5 +747,136 @@ describe('ExperienceLibraryPage', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
+  });
+
+  it('preserves a dirty evidence card through an unrelated metadata save and still guards navigation', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const detail = {
+      ...listItem,
+      evidence_ids: [7],
+      evidence_items: [
+        {
+          id: 7,
+          action: 'Original action',
+          result: 'Original result',
+          metrics: null,
+          created_at: '2025-01-01T00:00:00Z',
+          updated_at: '2025-01-01T00:00:00Z',
+        },
+      ],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve(
+        id === 1
+          ? detail
+          : { ...second, evidence_items: [], missing_dimensions: [], suggested_questions: [] }
+      )
+    );
+    api.patchExperience.mockResolvedValue({
+      ...detail,
+      title: 'Metadata saved',
+      evidence_items: [...detail.evidence_items],
+    });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByLabelText('Action 7'), {
+      target: { value: 'Unsaved action' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Metadata saved' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+
+    expect(await screen.findByLabelText('Action 7')).toHaveValue('Unsaved action');
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+  });
+
+  it('preserves a dirty evidence card through mark-ready and resets it on explicit discard', async () => {
+    const detail = {
+      ...listItem,
+      evidence_ids: [7],
+      evidence_items: [
+        {
+          id: 7,
+          action: 'Original action',
+          result: 'Original result',
+          metrics: null,
+          created_at: '2025-01-01T00:00:00Z',
+          updated_at: '2025-01-01T00:00:00Z',
+        },
+      ],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.fetchExperience.mockResolvedValue(detail);
+    api.markExperienceReady.mockResolvedValue({
+      ...detail,
+      status: 'ready',
+      evidence_items: [...detail.evidence_items],
+    });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByLabelText('Action 7'), {
+      target: { value: 'Unsaved action' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Mark ready' }));
+    expect(await screen.findByLabelText('Action 7')).toHaveValue('Unsaved action');
+    fireEvent.click(screen.getByRole('button', { name: 'Back to list' }));
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }));
+    expect(screen.getByLabelText('Action 7')).toHaveValue('Original action');
+  });
+
+  it('does not show a late A conflict as B generic ready error', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const pendingReady = deferred<ExperienceDetail>();
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.markExperienceReady.mockReturnValue(pendingReady.promise);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark ready' }));
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+    pendingReady.reject({ conflict: { completeness: 44, missing_dimensions: ['metrics'] } });
+
+    await waitFor(() => expect(screen.queryByText('Could not mark ready')).not.toBeInTheDocument());
+    expect(screen.queryByText('metrics')).not.toBeInTheDocument();
+  });
+
+  it('clears an A ready error when selecting B', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.markExperienceReady.mockRejectedValue(new Error('ready failed'));
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark ready' }));
+    expect(await screen.findByText('ready failed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    await screen.findByRole('heading', { name: 'Second experience' });
+    expect(screen.queryByText('ready failed')).not.toBeInTheDocument();
   });
 });

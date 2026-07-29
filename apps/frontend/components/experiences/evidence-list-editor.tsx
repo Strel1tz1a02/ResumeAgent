@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -29,6 +29,9 @@ const toDraft = (item: ExperienceDetail['evidence_items'][number]): EvidenceDraf
   metrics: item.metrics ?? '',
 });
 
+const sameDraft = (left: EvidenceDraft, right: EvidenceDraft) =>
+  left.action === right.action && left.result === right.result && left.metrics === right.metrics;
+
 export function EvidenceListEditor({
   experience,
   onMutated,
@@ -45,14 +48,39 @@ export function EvidenceListEditor({
   });
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const baselineRef = useRef<Record<number, EvidenceDraft>>({});
+  const loadedExperienceIdRef = useRef(experience.experience_id);
+  const loadedResetSignalRef = useRef(resetSignal);
   const archived = experience.status === 'archived';
 
   useEffect(() => {
-    setDrafts(
-      Object.fromEntries(experience.evidence_items.map((item) => [item.id, toDraft(item)]))
+    const serverBaseline = Object.fromEntries(
+      experience.evidence_items.map((item) => [item.id, toDraft(item)])
     );
-    setNewEvidence({ action: '', result: '', metrics: '' });
-    setError(null);
+    const fullReset =
+      loadedExperienceIdRef.current !== experience.experience_id ||
+      loadedResetSignalRef.current !== resetSignal;
+    setDrafts((current) => {
+      if (fullReset) return serverBaseline;
+      const next: Record<number, EvidenceDraft> = {};
+      for (const item of experience.evidence_items) {
+        const serverDraft = serverBaseline[item.id];
+        const localDraft = current[item.id];
+        const previousBaseline = baselineRef.current[item.id];
+        next[item.id] =
+          localDraft && previousBaseline && !sameDraft(localDraft, previousBaseline)
+            ? localDraft
+            : serverDraft;
+      }
+      return next;
+    });
+    baselineRef.current = serverBaseline;
+    if (fullReset) {
+      setNewEvidence({ action: '', result: '', metrics: '' });
+      setError(null);
+    }
+    loadedExperienceIdRef.current = experience.experience_id;
+    loadedResetSignalRef.current = resetSignal;
   }, [experience.experience_id, experience.evidence_items, resetSignal]);
 
   const dirty =
@@ -61,12 +89,8 @@ export function EvidenceListEditor({
     newEvidence.metrics !== '' ||
     experience.evidence_items.some((item) => {
       const draft = drafts[item.id];
-      return Boolean(
-        draft &&
-        (draft.action !== item.action ||
-          draft.result !== (item.result ?? '') ||
-          draft.metrics !== (item.metrics ?? ''))
-      );
+      const baseline = baselineRef.current[item.id] ?? toDraft(item);
+      return Boolean(draft && !sameDraft(draft, baseline));
     });
 
   useEffect(() => {

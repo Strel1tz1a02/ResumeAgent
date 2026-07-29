@@ -83,7 +83,9 @@ export function ExperienceLibraryPage() {
   const [evidenceDirty, setEvidenceDirty] = useState(false);
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
-  const [readyError, setReadyError] = useState<string | null>(null);
+  const [readyError, setReadyError] = useState<{ experienceId: number; message: string } | null>(
+    null
+  );
   const [readySubmitting, setReadySubmitting] = useState(false);
   const [lifecycleSubmitting, setLifecycleSubmitting] = useState<{
     experienceId: number;
@@ -229,7 +231,7 @@ export function ExperienceLibraryPage() {
         ? detail
         : current
     );
-    setReadyError(null);
+    setReadyError((current) => (current?.experienceId === detail.experience_id ? null : current));
   }, []);
 
   const invalidateDetailRequest = useCallback((experienceId: number) => {
@@ -240,6 +242,7 @@ export function ExperienceLibraryPage() {
     selectedExperienceIdRef.current = experienceId;
     detailRequestGenerationRef.current += 1;
     setSelectedExperienceId(experienceId);
+    setReadyError(null);
     if (experienceId === null) setSelectedDetail(null);
   }, []);
 
@@ -328,8 +331,9 @@ export function ExperienceLibraryPage() {
     try {
       replaceDetail(await markExperienceReady(targetId));
     } catch (reason) {
+      if (selectedExperienceIdRef.current !== targetId) return;
       const conflict = reason as ExperienceReadyConflictError;
-      if (conflict?.conflict && selectedExperienceIdRef.current === targetId) {
+      if (conflict?.conflict) {
         setSelectedDetail((current) =>
           current?.experience_id === targetId
             ? {
@@ -339,14 +343,18 @@ export function ExperienceLibraryPage() {
               }
             : current
         );
-        setReadyError(
-          t('experiences.ready.conflict', {
+        setReadyError({
+          experienceId: targetId,
+          message: t('experiences.ready.conflict', {
             score: conflict.conflict.completeness,
             missing: conflict.conflict.missing_dimensions.join(', '),
-          })
-        );
+          }),
+        });
       } else {
-        setReadyError(reason instanceof Error ? reason.message : t('experiences.ready.error'));
+        setReadyError({
+          experienceId: targetId,
+          message: reason instanceof Error ? reason.message : t('experiences.ready.error'),
+        });
       }
     } finally {
       setReadySubmitting(false);
@@ -369,7 +377,10 @@ export function ExperienceLibraryPage() {
       }
     } catch (reason) {
       if (selectedExperienceIdRef.current === targetId) {
-        setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+        setReadyError({
+          experienceId: targetId,
+          message: reason instanceof Error ? reason.message : t('experiences.lifecycle.error'),
+        });
       }
     } finally {
       setLifecycleSubmitting(null);
@@ -392,7 +403,10 @@ export function ExperienceLibraryPage() {
       }
     } catch (reason) {
       if (selectedExperienceIdRef.current === targetId) {
-        setReadyError(reason instanceof Error ? reason.message : t('experiences.lifecycle.error'));
+        setReadyError({
+          experienceId: targetId,
+          message: reason instanceof Error ? reason.message : t('experiences.lifecycle.error'),
+        });
       }
     } finally {
       setLifecycleSubmitting(null);
@@ -561,7 +575,11 @@ export function ExperienceLibraryPage() {
                         experience={selectedDetail}
                         onMarkReady={() => void handleReady()}
                         submitting={readySubmitting}
-                        error={readyError}
+                        error={
+                          readyError?.experienceId === selectedDetail.experience_id
+                            ? readyError.message
+                            : null
+                        }
                       />
                       {view === 'active' ? (
                         <Button
