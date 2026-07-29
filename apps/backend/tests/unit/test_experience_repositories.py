@@ -1,5 +1,6 @@
 """Real-SQLite behavior tests for the experience repositories."""
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -292,6 +293,51 @@ async def test_conditional_evidence_reference_update_rejects_stale_version(tmp_p
             stored = await ExperienceRepository(session).get(experience_id)
             assert stored is not None
             assert stored.evidence_ids == [first.id]
+    finally:
+        await database.close()
+
+
+async def test_sqlite_ownership_write_lock_serializes_cross_experience_assignment(tmp_path) -> None:
+    """Without a lock before ownership reads, two sessions can both claim the same JSON evidence ID."""
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            experiences = ExperienceRepository(session)
+            evidence = EvidenceRepository(session)
+            first = await experiences.create(ExperienceItem(kind="project", title="First owner"))
+            second = await experiences.create(ExperienceItem(kind="project", title="Second owner"))
+            proof = await evidence.create(EvidenceItem(action="Exclusive"))
+            await session.commit()
+
+        second_attempted_lock = asyncio.Event()
+
+        async with database.session() as first_session:
+            async with database.session() as second_session:
+                first_repository = ExperienceRepository(first_session)
+                second_repository = ExperienceRepository(second_session)
+
+                async def assign_second() -> None:
+                    second_attempted_lock.set()
+                    await second_repository.acquire_ownership_write_lock()
+                    with pytest.raises(ValueError, match="already belongs"):
+                        await second_repository.set_evidence_ids(second.experience_id, [proof.id])
+                    await second_session.rollback()
+
+                await first_repository.acquire_ownership_write_lock()
+                await first_repository.set_evidence_ids(first.experience_id, [proof.id])
+                second_task = asyncio.create_task(assign_second())
+                await second_attempted_lock.wait()
+                await asyncio.sleep(0)
+                await first_session.commit()
+                await second_task
+
+        async with database.session() as session:
+            first_stored = await ExperienceRepository(session).get(first.experience_id)
+            second_stored = await ExperienceRepository(session).get(second.experience_id)
+            assert first_stored is not None
+            assert second_stored is not None
+            assert first_stored.evidence_ids == [proof.id]
+            assert second_stored.evidence_ids == []
     finally:
         await database.close()
 

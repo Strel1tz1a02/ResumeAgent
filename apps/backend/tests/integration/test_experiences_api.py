@@ -7,9 +7,11 @@ import pytest
 
 from app.database import Database
 from app.main import app
+from app.repositories import evidence_repository as evidence_repository_module
 from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository
 from app.repositories.experience_repository import ExperienceStaleWriteError
+from app.schemas.evidence_items import EvidenceCreate
 from app.schemas.experiences import ExperienceCreate, ExperienceUpdate
 from app.services.evidence_service import EvidenceService
 from app.services.experience_service import ExperienceConflictError, ExperienceService
@@ -303,6 +305,61 @@ async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, mo
         stored_evidence = await EvidenceRepository(session).get(evidence_id)
     assert stored_evidence is not None
     assert stored_evidence.action == "Original"
+
+
+async def test_patch_evidence_advances_its_timestamp_when_the_clock_regresses(
+    isolated_db, monkeypatch
+) -> None:
+    """A frozen or regressed clock must not weaken evidence audit ordering after an edit."""
+    async with _client() as client:
+        experience = await client.post("/api/v1/experiences", json={"title": "Audit proof"})
+        experience_id = experience.json()["experience_id"]
+        created = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Before"}
+        )
+        evidence_id = created.json()["evidence_ids"][0]
+        original_updated_at = created.json()["evidence_items"][0]["updated_at"]
+
+        monkeypatch.setattr(evidence_repository_module, "_updated_at", lambda: "2000-01-01T00:00:00+00:00")
+        patched = await client.patch(
+            f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}",
+            json={"action": "After"},
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["evidence_items"][0]["action"] == "After"
+    assert patched.json()["evidence_items"][0]["updated_at"] > original_updated_at
+
+
+async def test_evidence_service_acquires_ownership_lock_before_loading_experience(
+    isolated_db, monkeypatch
+) -> None:
+    """Reading ownership before the write lock would leave a cross-session assignment race."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Lock order"})
+        experience_id = created.json()["experience_id"]
+
+    async with isolated_db.session() as session:
+        service = EvidenceService(session)
+        lock_acquired = False
+
+        async def acquire_lock() -> None:
+            nonlocal lock_acquired
+            lock_acquired = True
+
+        original_get = service._experiences.get
+
+        async def guarded_get(experience_id: int):
+            assert lock_acquired
+            return await original_get(experience_id)
+
+        monkeypatch.setattr(
+            service._experiences, "acquire_ownership_write_lock", acquire_lock, raising=False
+        )
+        monkeypatch.setattr(service._experiences, "get", guarded_get)
+        detail = await service.create(experience_id, EvidenceCreate(action="Locked first"))
+
+    assert detail.evidence_items[0].action == "Locked first"
 
 
 async def test_missing_and_server_owned_fields_are_rejected(isolated_db) -> None:

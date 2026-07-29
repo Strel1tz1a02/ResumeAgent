@@ -100,6 +100,7 @@ class EvidenceService:
         mutation: Callable[[ExperienceItem, str], Awaitable[ExperienceItem]],
     ) -> ExperienceDetail:
         try:
+            await self._experiences.acquire_ownership_write_lock()
             item = await self._get_experience_or_raise(experience_id)
             # Claim the experience version before touching an evidence row.  This
             # keeps patch operations subject to the same optimistic concurrency

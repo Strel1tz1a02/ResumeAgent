@@ -62,6 +62,23 @@ class ExperienceRepository:
         await self._session.flush()
         return item
 
+    async def acquire_ownership_write_lock(self) -> None:
+        """Serialize JSON evidence ownership checks for the caller-owned transaction.
+
+        SQLite has no row-level locking and JSON references have no foreign-key
+        constraint, so its `BEGIN IMMEDIATE` must happen before any ownership
+        read. Other databases use a locking select as the closest equivalent.
+        """
+        if self._session.in_transaction():
+            raise RuntimeError("ownership write lock must be acquired before any database operation")
+        connection = await self._session.connection()
+        if connection.dialect.name == "sqlite":
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+            return
+        await self._session.execute(
+            select(ExperienceItem.experience_id).limit(1).with_for_update()
+        )
+
     async def get(self, experience_id: int) -> ExperienceItem | None:
         """Return one experience regardless of lifecycle status."""
         return await self._session.get(ExperienceItem, experience_id)

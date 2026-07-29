@@ -1,6 +1,6 @@
 """Queries and mutations for experience evidence records."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 def _updated_at() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _next_updated_at(observed_updated_at: str) -> str:
+    """Generate an evidence audit timestamp strictly later than its observed version."""
+    observed = datetime.fromisoformat(observed_updated_at)
+    current = datetime.fromisoformat(_updated_at())
+    if current > observed:
+        return current.isoformat()
+    return (observed + timedelta(microseconds=1)).isoformat()
 
 
 class EvidenceRepository:
@@ -56,7 +65,7 @@ class EvidenceRepository:
             raise ValueError(f"unsupported evidence fields: {sorted(unknown)}")
         for name, value in fields.items():
             setattr(item, name, value)
-        item.updated_at = _updated_at()
+        item.updated_at = _next_updated_at(item.updated_at)
         await self._session.flush()
         return item
 
