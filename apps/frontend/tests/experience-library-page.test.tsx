@@ -1032,6 +1032,30 @@ describe('ExperienceLibraryPage', () => {
     expect(await screen.findByRole('tab', { name: 'Active', selected: true })).toHaveFocus();
   });
 
+  it('does not focus an inactive tab when unsaved changes block an arrow-key view switch', async () => {
+    render(<ExperienceLibraryPage />);
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    const active = await screen.findByRole('tab', { name: 'Active', selected: true });
+    const archived = screen.getByRole('tab', { name: 'Recycle bin', selected: false });
+    let archivedFocusCount = 0;
+    archived.addEventListener('focus', () => {
+      archivedFocusCount += 1;
+    });
+    fireEvent.change(title, {
+      target: { value: 'Unsaved title' },
+    });
+
+    active.focus();
+    fireEvent.keyDown(active, { key: 'ArrowRight' });
+
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+    expect(archivedFocusCount).toBe(0);
+    expect(archived).not.toHaveFocus();
+    expect(archived).toHaveAttribute('aria-selected', 'false');
+  });
+
   it('applies AI question and answer responses in StrictMode and clears the answer pending state', async () => {
     const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
     api.requestNextExperienceQuestion.mockResolvedValue({
@@ -1118,6 +1142,7 @@ describe('ExperienceLibraryPage', () => {
       next_question: null,
     });
 
+    await waitFor(() => expect(screen.queryByText('Applying answer...')).not.toBeInTheDocument());
     await waitFor(() =>
       expect(screen.queryByRole('heading', { name: 'Late AI overwrite' })).not.toBeInTheDocument()
     );

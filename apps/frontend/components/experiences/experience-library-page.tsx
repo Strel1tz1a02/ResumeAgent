@@ -313,13 +313,14 @@ export function ExperienceLibraryPage() {
     });
   };
 
-  const switchView = (nextView: LibraryView) => {
+  const switchView = (nextView: LibraryView, moveFocus = false) => {
     if (nextView === view) return;
     discardThen(() => {
       setView(nextView);
       selectExperience(null);
       setSelectedDetail(null);
       setMobilePane('list');
+      if (moveFocus) document.getElementById(`experience-view-${nextView}-tab`)?.focus();
     });
   };
 
@@ -332,8 +333,7 @@ export function ExperienceLibraryPage() {
           : null;
     if (!nextView) return;
     event.preventDefault();
-    switchView(nextView);
-    document.getElementById(`experience-view-${nextView}-tab`)?.focus();
+    switchView(nextView, true);
   };
 
   const handleReady = async () => {

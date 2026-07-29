@@ -1,5 +1,7 @@
 """Tests for the Fernet API-key encryption helper."""
 
+import os
+
 import pytest
 
 from app import crypto
@@ -23,6 +25,8 @@ class TestCrypto:
         assert crypto.decrypt(ciphertext) == "sk-super-secret"
 
     def test_secret_file_created_with_600_perms(self, isolated_secret):
+        if os.name == "nt":
+            pytest.skip("Windows does not enforce POSIX chmod mode bits")
         crypto.encrypt("x")
         secret = isolated_secret / ".secret_key"
         assert secret.exists()
