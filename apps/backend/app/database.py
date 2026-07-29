@@ -13,9 +13,10 @@ Two engines back one SQLite file:
 import asyncio
 import logging
 import shutil
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select
@@ -98,6 +99,12 @@ class Database:
         self._ensure_initialized()
         assert self._sync_session_factory is not None
         return self._sync_session_factory
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        """Yield one shared async session without controlling its transaction."""
+        async with self._session() as session:
+            yield session
 
     async def close(self) -> None:
         """Dispose engines and release file handles."""
