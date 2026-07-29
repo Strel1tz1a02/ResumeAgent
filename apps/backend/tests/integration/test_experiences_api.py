@@ -695,3 +695,85 @@ async def test_permanent_delete_requires_archive_and_preserves_unrelated_rows(is
         assert await ExperienceRepository(session).get(other_id) is not None
         assert await EvidenceRepository(session).get(other_evidence_id) is not None
         assert await session.get(Resume, "seeded-resume") is not None
+
+
+async def test_patch_rolls_back_post_write_failure_in_current_and_reopened_sessions(
+    isolated_db, monkeypatch
+) -> None:
+    """A failed completeness refresh must not leave the already-flushed title visible or committed."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Original"})
+    experience_id = created.json()["experience_id"]
+
+    async with isolated_db.session() as session:
+        service = ExperienceService(session)
+
+        async def fail_after_write(*_args, **_kwargs):
+            raise RuntimeError("forced completeness failure")
+
+        monkeypatch.setattr(service._experiences, "set_completeness", fail_after_write)
+        with pytest.raises(RuntimeError, match="forced completeness failure"):
+            await service.patch(experience_id, ExperienceUpdate(title="Uncommitted"))
+
+        assert not session.in_transaction()
+        assert (await service.get(experience_id)).title == "Original"
+
+    async with isolated_db.session() as reopened_session:
+        assert (await ExperienceService(reopened_session).get(experience_id)).title == "Original"
+
+
+async def test_patch_maps_post_write_value_error_to_422_and_rolls_back(isolated_db) -> None:
+    """Leaking a repository ValueError after the title write would turn validation into a 500."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Original"})
+        experience_id = created.json()["experience_id"]
+
+    with patch(
+        "app.services.experience_service.ExperienceRepository.set_completeness",
+        new_callable=AsyncMock,
+        side_effect=ValueError("forced completeness validation"),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        ) as client:
+            failed = await client.patch(
+                f"/api/v1/experiences/{experience_id}", json={"title": "Uncommitted"}
+            )
+
+    assert failed.status_code == 422
+    async with _client() as client:
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+    assert stored.json()["title"] == "Original"
+
+
+async def test_restore_rejects_active_draft_and_ready_experiences(isolated_db) -> None:
+    """Allowing restore outside the archive state would make lifecycle actions non-idempotent."""
+    ready_payload = {
+        "kind": "project",
+        "title": "Ready",
+        "organization": "Campus Lab",
+        "role": "Engineer",
+        "start_date": "2026-01",
+        "is_current": True,
+        "background": "Built a complete project.",
+    }
+    async with _client() as client:
+        draft = await client.post("/api/v1/experiences", json={"title": "Draft"})
+        ready = await client.post("/api/v1/experiences", json=ready_payload)
+        draft_id = draft.json()["experience_id"]
+        ready_id = ready.json()["experience_id"]
+        await client.post(
+            f"/api/v1/experiences/{ready_id}/evidence",
+            json={"action": "Built", "result": "Released", "metrics": "1 launch"},
+        )
+        marked_ready = await client.post(f"/api/v1/experiences/{ready_id}/mark-ready")
+        draft_restore = await client.post(f"/api/v1/experiences/{draft_id}/restore")
+        ready_restore = await client.post(f"/api/v1/experiences/{ready_id}/restore")
+        stored_draft = await client.get(f"/api/v1/experiences/{draft_id}")
+        stored_ready = await client.get(f"/api/v1/experiences/{ready_id}")
+
+    assert marked_ready.json()["status"] == "ready"
+    assert draft_restore.status_code == 409
+    assert ready_restore.status_code == 409
+    assert stored_draft.json()["status"] == "draft"
+    assert stored_ready.json()["status"] == "ready"

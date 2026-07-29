@@ -133,6 +133,12 @@ class ExperienceService:
         except ExperienceDomainError:
             await self._session.rollback()
             raise
+        except ValueError as error:
+            await self._session.rollback()
+            raise ExperienceValidationError(str(error)) from error
+        except Exception:
+            await self._session.rollback()
+            raise
 
     async def mark_ready(self, experience_id: int) -> ExperienceDetail:
         """Promote a sufficiently complete active record to ready in one write transaction."""
@@ -168,7 +174,26 @@ class ExperienceService:
 
     async def restore(self, experience_id: int) -> ExperienceDetail:
         """Restore an archived record as a draft regardless of its former readiness."""
-        return await self._transition_status(experience_id, "draft")
+        try:
+            await self._experiences.acquire_ownership_write_lock()
+            item = await self._get_or_raise(experience_id)
+            if item.status != "archived":
+                raise ExperienceConflictError(
+                    f"Experience {experience_id} must be archived before it can be restored"
+                )
+            updated = await self._experiences.set_status(experience_id, "draft")
+            detail = await self._detail(updated)
+            await self._session.commit()
+            return detail
+        except ExperienceDomainError:
+            await self._session.rollback()
+            raise
+        except ValueError as error:
+            await self._session.rollback()
+            raise ExperienceValidationError(str(error)) from error
+        except Exception:
+            await self._session.rollback()
+            raise
 
     async def deletion_impact(self, experience_id: int) -> DeletionImpactResponse:
         """Return the stable deletion-review shape without consulting future match/resume links."""
@@ -215,12 +240,6 @@ class ExperienceService:
             await self._session.commit()
             return detail
         except ExperienceDomainError:
-            await self._session.rollback()
-            raise
-        except ValueError as error:
-            await self._session.rollback()
-            raise ExperienceValidationError(str(error)) from error
-        except Exception:
             await self._session.rollback()
             raise
         except ValueError as error:
