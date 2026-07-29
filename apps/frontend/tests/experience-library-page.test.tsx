@@ -4,7 +4,18 @@ import type { ExperienceDetail, ExperienceRead } from '@/lib/api/experiences';
 
 const api = vi.hoisted(() => ({
   listExperiences: vi.fn(),
+  fetchExperience: vi.fn(),
   importExperienceText: vi.fn(),
+  patchExperience: vi.fn(),
+  createEvidence: vi.fn(),
+  patchEvidence: vi.fn(),
+  deleteEvidence: vi.fn(),
+  reorderEvidence: vi.fn(),
+  markExperienceReady: vi.fn(),
+  archiveExperience: vi.fn(),
+  restoreExperience: vi.fn(),
+  getDeletionImpact: vi.fn(),
+  deleteExperiencePermanently: vi.fn(),
   requestNextExperienceQuestion: vi.fn(),
 }));
 
@@ -32,6 +43,34 @@ const translate = vi.hoisted(
       'experiences.rawInput': 'Raw input',
       'experiences.backToList': 'Back to list',
       'experiences.status.draft': 'Draft status',
+      'experiences.editor.titleField': 'Title',
+      'experiences.editor.is_current': 'Current experience',
+      'experiences.editor.save': 'Save experience',
+      'experiences.completeness.score': '72% complete',
+      'experiences.active': 'Active',
+      'experiences.archive': 'Recycle bin',
+      'experiences.lifecycle.archive': 'Archive experience',
+      'experiences.lifecycle.restore': 'Restore experience',
+      'experiences.lifecycle.permanent': 'Delete permanently',
+      'experiences.evidence.action': 'Action',
+      'experiences.evidence.result': 'Result',
+      'experiences.evidence.metrics': 'Metrics',
+      'experiences.evidence.add': 'Add evidence',
+      'experiences.evidence.save': 'Save evidence',
+      'experiences.evidence.moveUp': 'Move evidence up',
+      'experiences.evidence.moveDown': 'Move evidence down',
+      'experiences.evidence.delete': 'Delete evidence',
+      'experiences.unsaved.title': 'Discard unsaved changes?',
+      'experiences.unsaved.description': 'Your edits will be lost.',
+      'experiences.unsaved.discard': 'Discard edits',
+      'experiences.ready.action': 'Mark ready',
+      'experiences.ready.conflict': 'Not ready',
+      'experiences.permanent.title': 'Delete permanently?',
+      'experiences.permanent.description': 'This cannot be undone.',
+      'experiences.permanent.loadingImpact': 'Loading impact',
+      'experiences.permanent.affectedMatches': '1 affected matches',
+      'experiences.permanent.affectedResumes': '1 affected resumes',
+      'experiences.permanent.confirm': 'Delete permanently',
     })[key] ?? key
 );
 
@@ -90,6 +129,12 @@ describe('ExperienceLibraryPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.listExperiences.mockResolvedValue({ items: [listItem], total: 1 });
+    api.fetchExperience.mockResolvedValue({
+      ...listItem,
+      evidence_items: [],
+      missing_dimensions: ['evidence'],
+      suggested_questions: ['What changed?'],
+    });
   });
 
   afterEach(() => {
@@ -199,7 +244,7 @@ describe('ExperienceLibraryPage', () => {
     initialList.resolve({ items: [listItem], total: 1 });
     await waitFor(() => expect(api.listExperiences).toHaveBeenCalledTimes(1));
     expect(screen.getByRole('heading', { name: 'Imported experience' })).toBeInTheDocument();
-    expect(screen.getByText('Exactly this valid text')).toBeInTheDocument();
+    expect(screen.getAllByText('Exactly this valid text').length).toBeGreaterThan(0);
   });
 
   it('reselects the first visible item when a filter hides the selected detail', async () => {
@@ -293,7 +338,7 @@ describe('ExperienceLibraryPage', () => {
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getAllByText('Imported experience')).toHaveLength(2);
-    expect(screen.getByText('Exactly this valid text')).toBeInTheDocument();
+    expect(screen.getAllByText('Exactly this valid text').length).toBeGreaterThan(0);
     expect(api.requestNextExperienceQuestion).not.toHaveBeenCalled();
   });
 
@@ -315,6 +360,204 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(await screen.findByText('Could not load experiences')).toBeInTheDocument();
     expect(screen.getAllByText('Imported experience')).toHaveLength(2);
-    expect(screen.getByText('Exactly this valid text')).toBeInTheDocument();
+    expect(screen.getAllByText('Exactly this valid text').length).toBeGreaterThan(0);
+  });
+
+  it('saves controlled metadata with current experiences clearing the end date', async () => {
+    const refreshed = {
+      ...listItem,
+      title: 'Current platform',
+      is_current: true,
+      end_date: null,
+      completeness: 72,
+      evidence_items: [],
+      missing_dimensions: ['evidence'],
+      suggested_questions: [],
+    };
+    api.patchExperience.mockResolvedValue(refreshed);
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('heading', { name: 'Searchable project' });
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Current platform' },
+    });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Current experience' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+
+    await waitFor(() =>
+      expect(api.patchExperience).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ title: 'Current platform', is_current: true, end_date: null })
+      )
+    );
+    expect(screen.getByText('72% complete')).toBeInTheDocument();
+  });
+
+  it('keeps action, result, and metrics together when adding an evidence card', async () => {
+    const withEvidence = {
+      ...listItem,
+      completeness: 60,
+      evidence_ids: [4],
+      evidence_items: [
+        {
+          id: 4,
+          action: 'Automated imports',
+          result: 'Faster review',
+          metrics: '40%',
+          created_at: '2025-01-01',
+          updated_at: '2025-01-01',
+        },
+      ],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.createEvidence.mockResolvedValue(withEvidence);
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByLabelText('Action new');
+    fireEvent.change(screen.getByLabelText('Action new'), {
+      target: { value: 'Automated imports' },
+    });
+    fireEvent.change(screen.getByLabelText('Result new'), { target: { value: 'Faster review' } });
+    fireEvent.change(screen.getByLabelText('Metrics new'), { target: { value: '40%' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add evidence' }));
+
+    await waitFor(() =>
+      expect(api.createEvidence).toHaveBeenCalledWith(1, {
+        action: 'Automated imports',
+        result: 'Faster review',
+        metrics: '40%',
+      })
+    );
+    expect(screen.getByLabelText('Action 4')).toHaveValue('Automated imports');
+    expect(screen.getByLabelText('Result 4')).toHaveValue('Faster review');
+    expect(screen.getByLabelText('Metrics 4')).toHaveValue('40%');
+  });
+
+  it('keeps the edited metadata visible after a save failure', async () => {
+    api.patchExperience.mockRejectedValue(new Error('offline'));
+    render(<ExperienceLibraryPage />);
+
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    fireEvent.change(title, { target: { value: 'Still editing locally' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+
+    expect(await screen.findByText('offline')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('Still editing locally');
+  });
+
+  it('renders the server 409 completeness and missing guidance without changing the draft', async () => {
+    api.fetchExperience.mockResolvedValue({
+      ...listItem,
+      completeness: 20,
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+    api.markExperienceReady.mockRejectedValue({
+      conflict: { completeness: 44, missing_dimensions: ['metrics'] },
+    });
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('button', { name: 'Mark ready' });
+    fireEvent.click(screen.getByRole('button', { name: 'Mark ready' }));
+
+    expect(await screen.findByText('metrics')).toBeInTheDocument();
+    expect(screen.getByText('Not ready')).toBeInTheDocument();
+  });
+
+  it('archives from the active list and restores from the recycle bin', async () => {
+    const archived = {
+      ...listItem,
+      status: 'archived' as const,
+      archived_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.listExperiences.mockImplementation(({ status }: { status?: string } = {}) =>
+      Promise.resolve(
+        status === 'archived' ? { items: [archived], total: 1 } : { items: [listItem], total: 1 }
+      )
+    );
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve(
+        id === 1 && api.listExperiences.mock.calls.at(-1)?.[0]?.status === 'archived'
+          ? archived
+          : { ...listItem, evidence_items: [], missing_dimensions: [], suggested_questions: [] }
+      )
+    );
+    api.archiveExperience.mockResolvedValue(archived);
+    api.restoreExperience.mockResolvedValue({
+      ...listItem,
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+    render(<ExperienceLibraryPage />);
+
+    await screen.findByRole('button', { name: 'Archive experience' });
+    fireEvent.click(screen.getByRole('button', { name: 'Archive experience' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Searchable project/ })).not.toBeInTheDocument()
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle bin' }));
+    await screen.findByRole('button', { name: 'Restore experience' });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore experience' }));
+    await waitFor(() => expect(api.restoreExperience).toHaveBeenCalledWith(1));
+    expect(screen.queryByRole('button', { name: 'Restore experience' })).not.toBeInTheDocument();
+  });
+
+  it('loads deletion impact before allowing an archived experience to be permanently deleted', async () => {
+    const archived = {
+      ...listItem,
+      status: 'archived' as const,
+      archived_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    api.listExperiences.mockResolvedValue({ items: [archived], total: 1 });
+    api.fetchExperience.mockResolvedValue(archived);
+    api.getDeletionImpact.mockResolvedValue({
+      affected_matches: [7],
+      affected_resumes: ['resume-1'],
+    });
+    api.deleteExperiencePermanently.mockResolvedValue(undefined);
+    render(<ExperienceLibraryPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Recycle bin' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete permanently' }));
+    expect(await screen.findByText('1 affected matches')).toBeInTheDocument();
+    expect(screen.getByText('resume-1')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete permanently' }).at(-1)!);
+    await waitFor(() => expect(api.deleteExperiencePermanently).toHaveBeenCalledWith(1));
+    expect(screen.queryByRole('button', { name: /Searchable project/ })).not.toBeInTheDocument();
+  });
+
+  it('prompts before changing selection with a dirty draft and registers beforeunload only while dirty', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    render(<ExperienceLibraryPage />);
+
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    fireEvent.change(title, { target: { value: 'Unsaved title' } });
+    const beforeUnload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(beforeUnload);
+    expect(beforeUnload.defaultPrevented).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    expect(
+      await screen.findByRole('dialog', { name: /Discard unsaved changes/ })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }));
+    expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
   });
 });

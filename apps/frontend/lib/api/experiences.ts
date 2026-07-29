@@ -102,6 +102,13 @@ export interface ReadyConflictResponse {
   missing_dimensions: string[];
 }
 
+export class ExperienceReadyConflictError extends Error {
+  constructor(public readonly conflict: ReadyConflictResponse) {
+    super('Experience is not complete enough to mark ready');
+    this.name = 'ExperienceReadyConflictError';
+  }
+}
+
 export interface ExperienceEnrichmentQuestion {
   question_id: string;
   question: string;
@@ -210,10 +217,12 @@ export async function patchExperience(
 }
 
 export async function markExperienceReady(experienceId: number): Promise<ExperienceDetail> {
-  return parseResponse<ExperienceDetail>(
-    await apiPost(`${experiencePath(experienceId)}/mark-ready`, {}),
-    'Failed to mark experience ready'
-  );
+  const response = await apiPost(`${experiencePath(experienceId)}/mark-ready`, {});
+  if (response.status === 409) {
+    const payload = (await response.json()) as ReadyConflictResponse;
+    throw new ExperienceReadyConflictError(payload);
+  }
+  return parseResponse<ExperienceDetail>(response, 'Failed to mark experience ready');
 }
 
 export async function archiveExperience(experienceId: number): Promise<ExperienceDetail> {
