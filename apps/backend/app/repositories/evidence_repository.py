@@ -1,6 +1,7 @@
 """Queries and mutations for experience evidence records."""
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -8,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import EvidenceItem, ExperienceItem
 
-_EVIDENCE_FIELDS = frozenset(EvidenceItem.__table__.columns.keys()) - {"id"}
+_EVIDENCE_FIELDS = frozenset({"action", "result", "metrics"})
+logger = logging.getLogger(__name__)
 
 
 def _updated_at() -> str:
@@ -39,6 +41,9 @@ class EvidenceRepository:
             select(EvidenceItem).where(EvidenceItem.id.in_(evidence_ids))
         )
         by_id = {row.id: row for row in rows}
+        missing_ids = sorted(set(evidence_ids) - set(by_id))
+        if missing_ids:
+            logger.warning("%s", missing_ids)
         return [by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in by_id]
 
     async def update_fields(self, evidence_id: int, fields: dict[str, Any]) -> EvidenceItem:

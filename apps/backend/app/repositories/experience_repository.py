@@ -12,11 +12,25 @@ from app.models import EvidenceItem, ExperienceItem
 
 ExperienceStatusFilter = Literal["active", "draft", "ready", "archived"]
 ExperienceSort = Literal["updated_at_desc", "created_at_desc", "created_at_asc"]
+ExperienceLifecycleStatus = Literal["draft", "ready", "archived"]
 
-_EXPERIENCE_FIELDS = frozenset(ExperienceItem.__table__.columns.keys()) - {
-    "evidence_ids",
-    "experience_id",
-}
+_EXPERIENCE_FIELDS = frozenset(
+    {
+        "kind",
+        "title",
+        "organization",
+        "role",
+        "location",
+        "start_date",
+        "end_date",
+        "is_current",
+        "raw_input",
+        "background",
+        "technologies",
+        "tags",
+        "notes",
+    }
+)
 
 
 def _updated_at() -> str:
@@ -135,6 +149,43 @@ class ExperienceRepository:
                 )
 
         item.evidence_ids = list(evidence_ids)
+        item.updated_at = _updated_at()
+        await self._session.flush()
+        return item
+
+    async def set_completeness(
+        self, experience_id: int, completeness: int
+    ) -> ExperienceItem:
+        """Set a server-computed completeness score without exposing generic audit writes."""
+        if isinstance(completeness, bool) or not isinstance(completeness, int):
+            raise ValueError("completeness must be an integer from 0 to 100")
+        if not 0 <= completeness <= 100:
+            raise ValueError("completeness must be an integer from 0 to 100")
+        item = await self.get(experience_id)
+        if item is None:
+            raise ValueError(f"experience {experience_id} does not exist")
+        item.completeness = completeness
+        item.updated_at = _updated_at()
+        await self._session.flush()
+        return item
+
+    async def set_status(
+        self,
+        experience_id: int,
+        status: ExperienceLifecycleStatus,
+        *,
+        archived_at: str | None = None,
+    ) -> ExperienceItem:
+        """Apply a valid lifecycle state and keep its archive timestamp consistent."""
+        if status not in {"draft", "ready", "archived"}:
+            raise ValueError(f"unsupported experience status: {status}")
+        if status != "archived" and archived_at is not None:
+            raise ValueError("archived_at may only be set when status is archived")
+        item = await self.get(experience_id)
+        if item is None:
+            raise ValueError(f"experience {experience_id} does not exist")
+        item.status = status
+        item.archived_at = archived_at or _updated_at() if status == "archived" else None
         item.updated_at = _updated_at()
         await self._session.flush()
         return item
