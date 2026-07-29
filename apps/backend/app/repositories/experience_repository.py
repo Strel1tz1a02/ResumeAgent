@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
-from sqlalchemy import String, func, or_, select
+from sqlalchemy import String, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import EvidenceItem, ExperienceItem
@@ -35,6 +35,18 @@ _EXPERIENCE_FIELDS = frozenset(
 
 def _updated_at() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _next_updated_at(observed_updated_at: str) -> str:
+    """Generate a new audit timestamp distinct from the version just observed."""
+    current = _updated_at()
+    if current != observed_updated_at:
+        return current
+    return (datetime.fromisoformat(observed_updated_at) + timedelta(microseconds=1)).isoformat()
+
+
+class ExperienceStaleWriteError(ValueError):
+    """Raised when another transaction has changed an experience since it was read."""
 
 
 class ExperienceRepository:
@@ -117,6 +129,39 @@ class ExperienceRepository:
             setattr(item, name, value)
         item.updated_at = _updated_at()
         await self._session.flush()
+        return item
+
+    async def update_fields_if_current(
+        self,
+        experience_id: int,
+        observed_updated_at: str,
+        fields: dict[str, Any],
+    ) -> ExperienceItem:
+        """Update editable fields only while the caller's observed version is current."""
+        unknown = set(fields) - _EXPERIENCE_FIELDS
+        if unknown:
+            raise ValueError(f"unsupported experience fields: {sorted(unknown)}")
+
+        result = await self._session.execute(
+            update(ExperienceItem)
+            .where(
+                ExperienceItem.experience_id == experience_id,
+                ExperienceItem.updated_at == observed_updated_at,
+            )
+            .values(**fields, updated_at=_next_updated_at(observed_updated_at))
+        )
+        if result.rowcount != 1:
+            raise ExperienceStaleWriteError(
+                f"stale experience update for {experience_id}: the record has changed since it was read"
+            )
+
+        await self._session.flush()
+        item = await self.get(experience_id)
+        if item is None:
+            raise ExperienceStaleWriteError(
+                f"stale experience update for {experience_id}: the record has changed since it was read"
+            )
+        await self._session.refresh(item)
         return item
 
     async def set_evidence_ids(

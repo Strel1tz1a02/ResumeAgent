@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ExperienceItem
 from app.repositories.evidence_repository import EvidenceRepository
-from app.repositories.experience_repository import ExperienceRepository
+from app.repositories.experience_repository import ExperienceRepository, ExperienceStaleWriteError
 from app.schemas.evidence_items import EvidenceRead
 from app.schemas.experiences import (
     ExperienceCreate,
@@ -99,13 +99,23 @@ class ExperienceService:
 
         try:
             existing = await self._get_or_raise(experience_id)
+            observed_updated_at = existing.updated_at
             self._reject_null_non_nullable_fields(fields)
             self._validate_merged_dates(existing, fields)
-            updated = await self._experiences.update_fields(experience_id, fields)
+            updated = await self._experiences.update_fields_if_current(
+                experience_id,
+                observed_updated_at,
+                fields,
+            )
             await self._recalculate_completeness(updated)
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
+        except ExperienceStaleWriteError as error:
+            await self._session.rollback()
+            raise ExperienceConflictError(
+                f"Experience {experience_id} was updated by another request; reload and try again"
+            ) from error
         except ExperienceDomainError:
             await self._session.rollback()
             raise

@@ -8,7 +8,10 @@ import pytest
 from app.database import Database
 from app.models import EvidenceItem, ExperienceItem
 from app.repositories.evidence_repository import EvidenceRepository
-from app.repositories.experience_repository import ExperienceRepository
+from app.repositories.experience_repository import (
+    ExperienceRepository,
+    ExperienceStaleWriteError,
+)
 
 
 async def test_repositories_create_and_filter_active_experiences(tmp_path) -> None:
@@ -168,6 +171,53 @@ async def test_experience_updates_persist_editable_fields_and_reject_system_fiel
             assert saved.title == "After"
             assert saved.organization == "Kestrel"
             assert saved.tags == ["AI"]
+    finally:
+        await database.close()
+
+
+async def test_conditional_experience_update_rejects_a_stale_independent_session(tmp_path) -> None:
+    """An unconditional second writer would overwrite the first session's committed edit."""
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            item = await ExperienceRepository(session).create(
+                ExperienceItem(kind="project", title="Original")
+            )
+            experience_id = item.experience_id
+            await session.commit()
+
+        async with database.session() as winner_session:
+            async with database.session() as stale_session:
+                winner_repository = ExperienceRepository(winner_session)
+                stale_repository = ExperienceRepository(stale_session)
+                winner_observed = await winner_repository.get(experience_id)
+                stale_observed = await stale_repository.get(experience_id)
+                assert winner_observed is not None
+                assert stale_observed is not None
+                observed_updated_at = stale_observed.updated_at
+
+                # The stale session has captured its version and releases its read transaction.
+                await stale_session.rollback()
+                winner = await winner_repository.update_fields_if_current(
+                    experience_id,
+                    winner_observed.updated_at,
+                    {"title": "Winner"},
+                )
+                await winner_session.commit()
+
+                assert winner.updated_at != observed_updated_at
+                with pytest.raises(ExperienceStaleWriteError, match="stale"):
+                    await stale_repository.update_fields_if_current(
+                        experience_id,
+                        observed_updated_at,
+                        {"title": "Loser"},
+                    )
+                await stale_session.rollback()
+
+        async with database.session() as session:
+            stored = await ExperienceRepository(session).get(experience_id)
+            assert stored is not None
+            assert stored.title == "Winner"
     finally:
         await database.close()
 

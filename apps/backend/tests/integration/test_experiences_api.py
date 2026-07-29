@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.repositories.experience_repository import ExperienceStaleWriteError
 
 
 def _client() -> AsyncClient:
@@ -196,3 +197,26 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
     assert detail.json()["kind"] == "project"
     assert detail.json()["title"] == "Stable"
     assert detail.json()["raw_input"] == "source"
+
+
+async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolated_db) -> None:
+    """Mapping stale conditional writes as success would let clients lose a winner's edit."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Winner"})
+        experience_id = created.json()["experience_id"]
+
+    with patch(
+        "app.services.experience_service.ExperienceRepository.update_fields_if_current",
+        new_callable=AsyncMock,
+        side_effect=ExperienceStaleWriteError("experience update is stale"),
+    ):
+        async with _client() as client:
+            stale = await client.patch(
+                f"/api/v1/experiences/{experience_id}", json={"title": "Loser"}
+            )
+
+    assert stale.status_code == 409
+    async with _client() as client:
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+    assert stored.status_code == 200
+    assert stored.json()["title"] == "Winner"
