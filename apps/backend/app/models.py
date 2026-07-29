@@ -135,3 +135,43 @@ class ApiKey(Base):
     provider: Mapped[str] = mapped_column(String, primary_key=True)
     ciphertext: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class ExperienceItem(Base):
+    """A person-level experience record, independent from resume documents."""
+
+    __tablename__ = "experience_items"
+
+    experience_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(32), default="other", index=True)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    organization: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    start_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    end_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False)
+    raw_input: Mapped[str] = mapped_column(Text, default="")
+    background: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    technologies: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    completeness: Mapped[int] = mapped_column(Integer, default=0)
+    archived_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso, index=True)
+
+
+class EvidenceItem(Base):
+    """One ordered action/result/metric fact referenced by an experience."""
+
+    __tablename__ = "evidence_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action: Mapped[str] = mapped_column(Text)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
