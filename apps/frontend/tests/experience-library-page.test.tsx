@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExperienceDetail, ExperienceRead } from '@/lib/api/experiences';
@@ -1009,5 +1010,117 @@ describe('ExperienceLibraryPage', () => {
     render(<ExperienceLibraryPage />);
     expect(await screen.findByRole('tab', { name: 'Active', selected: true })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Recycle bin', selected: false })).toBeInTheDocument();
+  });
+
+  it('uses roving tab focus and arrow keys to switch library views', async () => {
+    render(<ExperienceLibraryPage />);
+    const active = await screen.findByRole('tab', { name: 'Active', selected: true });
+    const archived = screen.getByRole('tab', { name: 'Recycle bin', selected: false });
+
+    expect(active).toHaveAttribute('tabindex', '0');
+    expect(archived).toHaveAttribute('tabindex', '-1');
+    active.focus();
+    fireEvent.keyDown(active, { key: 'ArrowRight' });
+
+    expect(await screen.findByRole('tab', { name: 'Recycle bin', selected: true })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: 'Active', selected: false })).toHaveAttribute(
+      'tabindex',
+      '-1'
+    );
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Recycle bin' }), { key: 'ArrowLeft' });
+    expect(await screen.findByRole('tab', { name: 'Active', selected: true })).toHaveFocus();
+  });
+
+  it('applies AI question and answer responses in StrictMode and clears the answer pending state', async () => {
+    const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'strict-1',
+      question: 'Which outcome mattered most?',
+      is_fallback: false,
+    });
+    api.submitExperienceAnswer.mockReturnValue(pendingAnswer.promise);
+    render(
+      <StrictMode>
+        <ExperienceLibraryPage />
+      </StrictMode>
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Help me organize with AI' }));
+    await screen.findByText('Which outcome mattered most?');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'Reduced response time.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply answer' }));
+    expect(await screen.findByText('Applying answer')).toBeInTheDocument();
+
+    pendingAnswer.resolve({
+      ...listItem,
+      title: 'Strict mode update',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: null,
+    });
+
+    expect(await screen.findByRole('heading', { name: 'Strict mode update' })).toBeInTheDocument();
+    expect(screen.queryByText('Applying answer')).not.toBeInTheDocument();
+  });
+
+  it('submits an AI answer only once while the answer request is pending', async () => {
+    const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'double-1',
+      question: 'What did you improve?',
+      is_fallback: false,
+    });
+    api.submitExperienceAnswer.mockReturnValue(pendingAnswer.promise);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Help me organize with AI' }));
+    await screen.findByText('What did you improve?');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'Search speed.' },
+    });
+    const submit = screen.getByRole('button', { name: 'Apply answer' });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(api.submitExperienceAnswer).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not apply a late AI answer after the selected detail becomes dirty', async () => {
+    const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'dirty-1',
+      question: 'What was your contribution?',
+      is_fallback: false,
+    });
+    api.submitExperienceAnswer.mockReturnValue(pendingAnswer.promise);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Help me organize with AI' }));
+    await screen.findByText('What was your contribution?');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'I owned the launch.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply answer' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Unsaved local title' },
+    });
+
+    pendingAnswer.resolve({
+      ...listItem,
+      title: 'Late AI overwrite',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: null,
+    });
+
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Late AI overwrite' })).not.toBeInTheDocument()
+    );
+    expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('Unsaved local title');
   });
 });

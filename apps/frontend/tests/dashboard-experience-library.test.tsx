@@ -39,4 +39,11 @@ describe('DashboardPage experience library entry', () => {
     expect(link).toHaveAttribute('href', '/experiences');
     expect(screen.getByText('Turn notes into reusable resume evidence.')).toBeInTheDocument();
   });
+
+  it('keeps the initial grid filled to the next row with the experience card included', async () => {
+    render(<DashboardPage />);
+
+    expect(await screen.findByRole('link', { name: /Experience library/i })).toBeInTheDocument();
+    expect(screen.getAllByTestId('dashboard-filler')).toHaveLength(7);
+  });
 });

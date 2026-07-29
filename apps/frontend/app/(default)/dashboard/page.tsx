@@ -568,6 +568,7 @@ export default function DashboardPage() {
         {Array.from({ length: fillerCount }).map((_, index) => (
           <Card
             key={`filler-${index}`}
+            data-testid="dashboard-filler"
             variant="ghost"
             noPadding
             className="hidden md:block bg-canvas aspect-square h-full opacity-50 pointer-events-none"
@@ -577,6 +578,7 @@ export default function DashboardPage() {
         {Array.from({ length: extraFillerCount }).map((_, index) => (
           <Card
             key={`extra-filler-${index}`}
+            data-testid="dashboard-filler"
             variant="ghost"
             noPadding
             className={`hidden md:block ${fillerPalette[index % fillerPalette.length]} aspect-square h-full opacity-70 pointer-events-none`}

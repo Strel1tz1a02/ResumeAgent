@@ -46,13 +46,13 @@ export function ExperienceQuestionPanel({
     dirtyRef.current = hasUnsavedChanges;
   }, [hasUnsavedChanges]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
       generationRef.current += 1;
-    },
-    []
-  );
+    };
+  }, []);
 
   const canUseResponse = (generation: number) =>
     mountedRef.current && generation === generationRef.current && !dirtyRef.current;

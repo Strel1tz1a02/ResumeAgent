@@ -323,6 +323,19 @@ export function ExperienceLibraryPage() {
     });
   };
 
+  const handleViewKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const nextView =
+      event.key === 'ArrowRight' || event.key === 'End'
+        ? 'archived'
+        : event.key === 'ArrowLeft' || event.key === 'Home'
+          ? 'active'
+          : null;
+    if (!nextView) return;
+    event.preventDefault();
+    switchView(nextView);
+    document.getElementById(`experience-view-${nextView}-tab`)?.focus();
+  };
+
   const handleReady = async () => {
     if (!selectedDetail || readySubmitting) return;
     const targetId = selectedDetail.experience_id;
@@ -461,8 +474,10 @@ export function ExperienceLibraryPage() {
             role="tab"
             aria-selected={view === 'active'}
             aria-controls="experience-view-active-panel"
+            tabIndex={view === 'active' ? 0 : -1}
             variant={view === 'active' ? 'default' : 'outline'}
             onClick={() => switchView('active')}
+            onKeyDown={handleViewKeyDown}
           >
             {t('experiences.active')}
           </Button>
@@ -471,9 +486,11 @@ export function ExperienceLibraryPage() {
             role="tab"
             aria-selected={view === 'archived'}
             aria-controls="experience-view-archived-panel"
+            tabIndex={view === 'archived' ? 0 : -1}
             className="ml-2"
             variant={view === 'archived' ? 'default' : 'outline'}
             onClick={() => switchView('archived')}
+            onKeyDown={handleViewKeyDown}
           >
             {t('experiences.archive')}
           </Button>
