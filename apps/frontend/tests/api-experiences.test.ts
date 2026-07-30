@@ -140,11 +140,19 @@ describe('experience API client', () => {
     await archiveExperience(7);
     await restoreExperience(7);
     await requestNextExperienceQuestion(7);
-    await submitExperienceAnswer(7, { question_id: 'q1', answer: 'I delivered it.' });
+    await submitExperienceAnswer(7, {
+      question_id: 'metrics',
+      answer: 'It served 500 users.',
+      evidence_id: 3,
+    });
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ affected_matches: [2], affected_resumes: ['resume-1'] }), {
-        status: 200,
-      })
+      new Response(
+        JSON.stringify({
+          affected_matches: [{ match_id: 2, job_title: 'AI Engineer' }],
+          affected_resumes: ['resume-1'],
+        }),
+        { status: 200 }
+      )
     );
     await getDeletionImpact(7);
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
@@ -163,7 +171,11 @@ describe('experience API client', () => {
       ['/api/v1/experiences/7/permanent', 'DELETE'],
     ]);
     expect((fetchMock.mock.calls[5][1] as RequestInit).body).toBe(
-      JSON.stringify({ question_id: 'q1', answer: 'I delivered it.' })
+      JSON.stringify({
+        question_id: 'metrics',
+        answer: 'It served 500 users.',
+        evidence_id: 3,
+      })
     );
   });
 

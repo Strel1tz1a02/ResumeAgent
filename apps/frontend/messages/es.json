@@ -112,6 +112,9 @@
     "active": "Activas",
     "archive": "Papelera",
     "refresh": "Actualizar",
+    "backToDashboard": "Volver al panel",
+    "create": "Nueva experiencia",
+    "creating": "Creando…",
     "search": "Buscar experiencias",
     "loading": "Cargando experiencias",
     "empty": "No hay experiencias",
@@ -175,7 +178,17 @@
       "title": "Completitud",
       "score": "{score}% completo",
       "missing": "Aún falta",
-      "guidance": "Preguntas sugeridas"
+      "guidance": "Preguntas sugeridas",
+      "dimension": {
+        "identity": "Título y tipo",
+        "organization": "Organización",
+        "role": "Función",
+        "dates": "Fechas",
+        "background": "Contexto",
+        "action": "Acción",
+        "result": "Resultado",
+        "metrics": "Métricas"
+      }
     },
     "ready": {
       "action": "Marcar como listo",

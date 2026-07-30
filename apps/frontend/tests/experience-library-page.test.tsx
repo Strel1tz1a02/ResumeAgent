@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
   listExperiences: vi.fn(),
   fetchExperience: vi.fn(),
   importExperienceText: vi.fn(),
+  createExperience: vi.fn(),
   patchExperience: vi.fn(),
   createEvidence: vi.fn(),
   patchEvidence: vi.fn(),
@@ -31,6 +32,9 @@ const translate = vi.hoisted(
       'experiences.kind.project': 'Project',
       'experiences.kind.volunteer': 'Volunteer',
       'experiences.import': 'Import',
+      'experiences.create': 'New experience',
+      'experiences.creating': 'Creating',
+      'experiences.backToDashboard': 'Back to dashboard',
       'experiences.import.title': 'Import experience',
       'experiences.import.description': 'Paste your experience notes.',
       'experiences.import.text': 'Experience text',
@@ -48,7 +52,9 @@ const translate = vi.hoisted(
       'experiences.editor.titleField': 'Title',
       'experiences.editor.is_current': 'Current experience',
       'experiences.editor.save': 'Save experience',
+      'experiences.editor.raw_input': 'Raw input',
       'experiences.completeness.score': '72% complete',
+      'experiences.completeness.dimension.metrics': 'metrics',
       'experiences.active': 'Active',
       'experiences.archive': 'Recycle bin',
       'experiences.lifecycle.archive': 'Archive experience',
@@ -181,6 +187,29 @@ describe('ExperienceLibraryPage', () => {
     api.listExperiences.mockResolvedValueOnce({ items: [], total: 0 });
     render(<ExperienceLibraryPage />);
     expect(await screen.findAllByText('No experiences')).toHaveLength(2);
+  });
+
+  it('creates and selects a blank manual draft without requiring pasted text', async () => {
+    const blank: ExperienceDetail = {
+      ...listItem,
+      experience_id: 12,
+      title: '',
+      raw_input: '',
+      evidence_items: [],
+      missing_dimensions: ['identity'],
+      suggested_questions: ['What concise title best describes this experience?'],
+    };
+    api.createExperience.mockResolvedValue(blank);
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'New experience' }));
+
+    await waitFor(() => expect(api.createExperience).toHaveBeenCalledWith({}));
+    expect(await screen.findByRole('textbox', { name: 'Title' })).toHaveValue('');
+    expect(screen.getByRole('link', { name: 'Back to dashboard' })).toHaveAttribute(
+      'href',
+      '/dashboard'
+    );
   });
 
   it('filters the active list by query and kind', async () => {
@@ -403,7 +432,12 @@ describe('ExperienceLibraryPage', () => {
     await waitFor(() =>
       expect(api.patchExperience).toHaveBeenCalledWith(
         1,
-        expect.objectContaining({ title: 'Current platform', is_current: true, end_date: null })
+        expect.objectContaining({
+          title: 'Current platform',
+          is_current: true,
+          end_date: null,
+          expected_updated_at: listItem.updated_at,
+        })
       )
     );
     expect(screen.getByText('72% complete')).toBeInTheDocument();
@@ -536,7 +570,7 @@ describe('ExperienceLibraryPage', () => {
     api.listExperiences.mockResolvedValue({ items: [archived], total: 1 });
     api.fetchExperience.mockResolvedValue(archived);
     api.getDeletionImpact.mockResolvedValue({
-      affected_matches: [7],
+      affected_matches: [{ match_id: 7, job_title: 'AI Engineer' }],
       affected_resumes: ['resume-1'],
     });
     api.deleteExperiencePermanently.mockResolvedValue(undefined);
@@ -545,6 +579,7 @@ describe('ExperienceLibraryPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Delete permanently' }));
     expect(await screen.findByText('1 affected matches')).toBeInTheDocument();
+    expect(screen.getByText('AI Engineer (#7)')).toBeInTheDocument();
     expect(screen.getByText('resume-1')).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete permanently' }).at(-1)!);
     await waitFor(() => expect(api.deleteExperiencePermanently).toHaveBeenCalledWith(1));
@@ -704,6 +739,57 @@ describe('ExperienceLibraryPage', () => {
     await waitFor(() =>
       expect(screen.queryByDisplayValue('Stale A title')).not.toBeInTheDocument()
     );
+  });
+
+  it('does not let a late metadata save for A replace the draft shown for B', async () => {
+    const second = { ...listItem, experience_id: 2, title: 'Second experience' };
+    const pendingSave = deferred<ExperienceDetail>();
+    api.listExperiences.mockResolvedValue({ items: [listItem, second], total: 2 });
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve({
+        ...(id === 2 ? second : listItem),
+        evidence_items: [],
+        missing_dimensions: [],
+        suggested_questions: [],
+      })
+    );
+    api.patchExperience.mockReturnValue(pendingSave.promise);
+    render(<ExperienceLibraryPage />);
+
+    const title = await screen.findByRole('textbox', { name: 'Title' });
+    fireEvent.change(title, { target: { value: 'Saving A' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+    fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Discard edits' }));
+    expect(await screen.findByRole('textbox', { name: 'Title' })).toHaveValue('Second experience');
+
+    pendingSave.resolve({
+      ...listItem,
+      title: 'Saving A',
+      updated_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('Second experience')
+    );
+  });
+
+  it('stops Enter from escaping experience textareas', async () => {
+    const parentKeyDown = vi.fn();
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <ExperienceLibraryPage />
+      </div>
+    );
+
+    fireEvent.keyDown(await screen.findByRole('textbox', { name: 'Raw input' }), {
+      key: 'Enter',
+    });
+
+    expect(parentKeyDown).not.toHaveBeenCalled();
   });
 
   it('ignores a late ready conflict for A after B becomes selected', async () => {
@@ -902,14 +988,18 @@ describe('ExperienceLibraryPage', () => {
       missing_dimensions: [],
       suggested_questions: [],
       next_question: {
-        question_id: 'next-2',
+        question_id: 'result',
         question: 'What result did it achieve?',
+        target: 'evidence' as const,
+        evidence_id: 7,
         is_fallback: false,
       },
     };
     api.requestNextExperienceQuestion.mockResolvedValue({
-      question_id: 'start-1',
+      question_id: 'action',
       question: 'What did you personally build?',
+      target: 'evidence',
+      evidence_id: 7,
       is_fallback: true,
     });
     api.submitExperienceAnswer.mockResolvedValue(enriched);
@@ -928,8 +1018,9 @@ describe('ExperienceLibraryPage', () => {
 
     await waitFor(() =>
       expect(api.submitExperienceAnswer).toHaveBeenCalledWith(1, {
-        question_id: 'start-1',
+        question_id: 'action',
         answer: 'I designed the search service.',
+        evidence_id: 7,
       })
     );
     expect(await screen.findByRole('heading', { name: 'Organized project' })).toBeInTheDocument();

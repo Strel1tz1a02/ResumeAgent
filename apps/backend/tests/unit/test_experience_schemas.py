@@ -13,6 +13,8 @@ from app.schemas.experiences import (
     ExperienceRead,
     ExperienceStatus,
     ExperienceUpdate,
+    ExperienceEnrichmentAnswerRequest,
+    ExperienceEnrichmentQuestion,
     ReadyConflictResponse,
 )
 
@@ -129,3 +131,39 @@ def test_detail_and_conflict_responses_expose_derived_aggregates() -> None:
     ).missing_dimensions == ["metrics"]
     assert ReadyConflictResponse(completeness=65, missing_dimensions=["metrics"]).completeness == 65
     assert DeletionImpactResponse().affected_matches == []
+
+
+def test_enrichment_question_and_answer_preserve_the_evidence_target() -> None:
+    question = ExperienceEnrichmentQuestion(
+        question_id="metrics",
+        question="How many users were affected?",
+        target="evidence",
+        evidence_id=12,
+    )
+    answer = ExperienceEnrichmentAnswerRequest(
+        question_id="metrics", answer="500 users", evidence_id=12
+    )
+
+    assert question.target == "evidence"
+    assert question.evidence_id == 12
+    assert answer.evidence_id == 12
+    with pytest.raises(ValidationError):
+        ExperienceEnrichmentQuestion(
+            question_id="organization",
+            question="Which organization?",
+            target="experience",
+            evidence_id=12,
+        )
+    with pytest.raises(ValidationError):
+        ExperienceEnrichmentAnswerRequest(
+            question_id="organization", answer="Acme", evidence_id=12
+        )
+
+
+def test_deletion_impact_uses_the_forward_compatible_match_shape() -> None:
+    impact = DeletionImpactResponse(
+        affected_matches=[{"match_id": 31, "job_title": "AI Engineer"}],
+        affected_resumes=[],
+    )
+
+    assert impact.affected_matches[0].match_id == 31

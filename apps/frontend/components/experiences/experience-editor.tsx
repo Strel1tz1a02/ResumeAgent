@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -95,7 +95,7 @@ function normalizedDraft(draft: ExperienceDraft): string {
   });
 }
 
-function explicitUpdate(draft: ExperienceDraft): ExperienceUpdate {
+function explicitUpdate(draft: ExperienceDraft, expectedUpdatedAt: string): ExperienceUpdate {
   return {
     kind: draft.kind,
     title: draft.title.trim(),
@@ -110,6 +110,7 @@ function explicitUpdate(draft: ExperienceDraft): ExperienceUpdate {
     technologies: labels(draft.technologies),
     tags: labels(draft.tags),
     notes: draft.notes.trim() || null,
+    expected_updated_at: expectedUpdatedAt,
   };
 }
 
@@ -126,6 +127,7 @@ export function ExperienceEditor({
   const [error, setError] = useState<string | null>(null);
   const loadedExperienceIdRef = useRef(experience.experience_id);
   const loadedResetSignalRef = useRef(resetSignal);
+  const saveGenerationRef = useRef(0);
   const baseline = useMemo(() => normalizedDraft(draftFromExperience(experience)), [experience]);
   const dirty = normalizedDraft(draft) !== baseline;
   const archived = experience.status === 'archived';
@@ -138,6 +140,8 @@ export function ExperienceEditor({
       return;
     }
     setDraft(draftFromExperience(experience));
+    saveGenerationRef.current += 1;
+    setSaving(false);
     setError(null);
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
@@ -153,18 +157,30 @@ export function ExperienceEditor({
 
   const save = async () => {
     if (saving || archived || !draft.title.trim()) return;
+    const targetId = experience.experience_id;
+    const generation = ++saveGenerationRef.current;
     setSaving(true);
     setError(null);
-    onMutationStart(experience.experience_id);
+    onMutationStart(targetId);
     try {
-      const detail = await patchExperience(experience.experience_id, explicitUpdate(draft));
-      setDraft(draftFromExperience(detail));
+      const detail = await patchExperience(targetId, explicitUpdate(draft, experience.updated_at));
       onSaved(detail);
+      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
+        setDraft(draftFromExperience(detail));
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t('experiences.editor.error'));
+      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
+        setError(reason instanceof Error ? reason.message : t('experiences.editor.error'));
+      }
     } finally {
-      setSaving(false);
+      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
+        setSaving(false);
+      }
     }
+  };
+
+  const stopTextareaEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter') event.stopPropagation();
   };
 
   return (
@@ -282,6 +298,7 @@ export function ExperienceEditor({
             aria-label={t(`experiences.editor.${field}`)}
             value={draft[field]}
             onChange={(event) => change(field, event.target.value)}
+            onKeyDown={stopTextareaEnter}
             disabled={archived || saving}
             rows={field === 'raw_input' ? 5 : 3}
           />

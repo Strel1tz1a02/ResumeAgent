@@ -112,6 +112,9 @@
     "active": "Active",
     "archive": "Recycle bin",
     "refresh": "Refresh",
+    "backToDashboard": "Back to dashboard",
+    "create": "New experience",
+    "creating": "Creating…",
     "search": "Search experiences",
     "loading": "Loading experiences",
     "empty": "No experiences",
@@ -175,7 +178,17 @@
       "title": "Completeness",
       "score": "{score}% complete",
       "missing": "Still needed",
-      "guidance": "Suggested follow-ups"
+      "guidance": "Suggested follow-ups",
+      "dimension": {
+        "identity": "Title and type",
+        "organization": "Organization",
+        "role": "Role",
+        "dates": "Dates",
+        "background": "Background",
+        "action": "Action",
+        "result": "Result",
+        "metrics": "Metrics"
+      }
     },
     "ready": {
       "action": "Mark ready",

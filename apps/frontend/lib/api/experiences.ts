@@ -66,7 +66,9 @@ export interface ExperienceCreate {
   notes?: string | null;
 }
 
-export type ExperienceUpdate = ExperienceCreate;
+export interface ExperienceUpdate extends ExperienceCreate {
+  expected_updated_at?: string;
+}
 
 export interface EvidenceCreate {
   action: string;
@@ -93,7 +95,7 @@ export interface ExperienceListResponse {
 }
 
 export interface DeletionImpactResponse {
-  affected_matches: number[];
+  affected_matches: Array<{ match_id: number; job_title: string }>;
   affected_resumes: string[];
 }
 
@@ -112,12 +114,15 @@ export class ExperienceReadyConflictError extends Error {
 export interface ExperienceEnrichmentQuestion {
   question_id: string;
   question: string;
+  target: 'experience' | 'evidence';
+  evidence_id: number | null;
   is_fallback: boolean;
 }
 
 export interface ExperienceEnrichmentAnswerRequest {
   question_id: string;
   answer: string;
+  evidence_id?: number | null;
 }
 
 export interface ExperienceEnrichmentAnswerResponse extends ExperienceDetail {

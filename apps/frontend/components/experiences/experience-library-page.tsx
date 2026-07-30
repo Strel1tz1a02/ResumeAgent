@@ -3,12 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import Plus from 'lucide-react/dist/esm/icons/plus';
+import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dropdown } from '@/components/ui/dropdown';
 import { Input } from '@/components/ui/input';
 import {
   archiveExperience,
+  createExperience,
   fetchExperience,
   markExperienceReady,
   restoreExperience,
@@ -79,6 +82,7 @@ export function ExperienceLibraryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
   const [metadataDirty, setMetadataDirty] = useState(false);
   const [evidenceDirty, setEvidenceDirty] = useState(false);
@@ -306,6 +310,21 @@ export function ExperienceLibraryPage() {
     setMobilePane('detail');
   };
 
+  const handleCreate = async () => {
+    if (creating) return;
+    setCreating(true);
+    setError(null);
+    try {
+      handleImported(await createExperience({}));
+    } catch (reason) {
+      if (isMountedRef.current) {
+        setError(reason instanceof Error ? reason.message : t('experiences.error'));
+      }
+    } finally {
+      if (isMountedRef.current) setCreating(false);
+    }
+  };
+
   const handleSelectExperience = (experience: ExperienceRead) => {
     discardThen(() => {
       selectExperience(experience.experience_id);
@@ -447,6 +466,13 @@ export function ExperienceLibraryPage() {
       <div className="mx-auto w-full max-w-[104rem] border border-black bg-background shadow-sw-lg">
         <header className="flex flex-col gap-4 border-b border-black p-4 md:flex-row md:items-end md:justify-between md:p-6">
           <div>
+            <Link
+              href="/dashboard"
+              className="mb-3 inline-flex items-center gap-1 font-mono text-xs uppercase text-ink-soft hover:text-primary"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              {t('experiences.backToDashboard')}
+            </Link>
             <p className="font-mono text-xs uppercase tracking-widest text-primary">
               {t('experiences.kicker')}
             </p>
@@ -457,6 +483,14 @@ export function ExperienceLibraryPage() {
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void loadExperiences()} disabled={loading}>
               {t('experiences.refresh')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => discardThen(() => void handleCreate())}
+              disabled={creating}
+            >
+              <Plus className="h-4 w-4" />
+              {creating ? t('experiences.creating') : t('experiences.create')}
             </Button>
             <Button onClick={() => setImportOpen(true)}>
               <Plus className="h-4 w-4" />

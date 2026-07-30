@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -91,6 +91,7 @@ export function ExperienceQuestionPanel({
       const response = await submitExperienceAnswer(experienceId, {
         question_id: currentQuestion.question_id,
         answer: currentAnswer,
+        evidence_id: currentQuestion.evidence_id,
       });
       if (!canUseResponse(generation)) return;
       onApplied(response);
@@ -111,6 +112,9 @@ export function ExperienceQuestionPanel({
   };
 
   const controlsDisabled = Boolean(pending) || hasUnsavedChanges;
+  const stopTextareaEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter') event.stopPropagation();
+  };
 
   return (
     <section
@@ -149,6 +153,7 @@ export function ExperienceQuestionPanel({
             aria-label={t('experiences.ai.answer')}
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}
+            onKeyDown={stopTextareaEnter}
             disabled={controlsDisabled}
             rows={4}
           />

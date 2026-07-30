@@ -26,6 +26,7 @@ from app.schemas.experiences import (
 from app.services.experience_completeness_service import (
     READY_COMPLETENESS_THRESHOLD,
     calculate_completeness,
+    question_for_dimension,
 )
 from app.services.experience_service import (
     ExperienceConflictError,
@@ -142,18 +143,6 @@ _ENDED_STATUS_PATTERNS = (
     r"(?:\u7d42\u4e86|\u9000\u8077|\u3082\u3046.{0,8}\u306a\u3044).{0,16}(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3)",
     r"(?:\u4ed5\u4e8b|\u52e4\u52d9|\u8077|\u5f79\u5272|\u30d7\u30ed\u30b8\u30a7\u30af\u30c8|\u30a4\u30f3\u30bf\u30fc\u30f3).{0,16}(?:\u7d42\u4e86|\u9000\u8077|\u3082\u3046.{0,8}\u306a\u3044)",
 )
-_FALLBACK_QUESTIONS = {
-    "identity": "What concise title best describes this experience?",
-    "organization": "Which organization, team, or client was this experience with?",
-    "role": "What was your role or primary responsibility?",
-    "dates": "When did this experience start and end (YYYY-MM), or is it current?",
-    "background": "What problem, context, or goal did this work address?",
-    "action": "What specifically did you do?",
-    "result": "What outcome resulted from your work?",
-    "metrics": "What measurable result can you confirm, such as a percentage, count, time, cost, or scale?",
-}
-
-
 def _sanitize_untrusted_text(value: str) -> str:
     """Redact instruction-like and secret-like strings before they become prompt data."""
     sanitized = value
@@ -297,12 +286,21 @@ class ExperienceEnrichmentService:
                 schema_type="experience_enrichment",
             )
             question = ExperienceEnrichmentQuestionResponse.model_validate(raw).question
-            return question.model_copy(update={"is_fallback": False})
+            if not detail.missing_dimensions or question.question_id != detail.missing_dimensions[0]:
+                raise InvalidEnrichmentPatch("question must target the first missing dimension")
+            target, evidence_id = self._question_target(detail, question.question_id)
+            return question.model_copy(
+                update={"target": target, "evidence_id": evidence_id, "is_fallback": False}
+            )
         except Exception:
-            return self._fallback_question(detail.missing_dimensions)
+            return self._fallback_question(detail)
 
     async def apply_answer(
-        self, experience_id: int, question_id: str, answer: str
+        self,
+        experience_id: int,
+        question_id: str,
+        answer: str,
+        evidence_id: int | None = None,
     ) -> ExperienceEnrichmentAnswerResponse:
         """Validate and atomically apply an answer-derived patch without storing chat history."""
         snapshot = await self._get_or_raise(experience_id)
@@ -316,7 +314,12 @@ class ExperienceEnrichmentService:
             output_language=get_language_name(self._content_language()),
             experience_json=self._detail_json(detail),
             answer_json=json.dumps(
-                {"question_id": safe_question_id, "answer": safe_answer}, ensure_ascii=False
+                {
+                    "question_id": safe_question_id,
+                    "answer": safe_answer,
+                    "evidence_id": evidence_id,
+                },
+                ensure_ascii=False,
             ),
         )
         try:
@@ -327,6 +330,7 @@ class ExperienceEnrichmentService:
                 schema_type="experience_enrichment",
             )
             patch = ExperienceEnrichmentPatch.model_validate(raw)
+            self._validate_patch_target(question_id, evidence_id, patch)
         except ValidationError as error:
             raise InvalidEnrichmentPatch("Malformed or unsupported enrichment patch") from error
         except InvalidEnrichmentPatch:
@@ -339,6 +343,7 @@ class ExperienceEnrichmentService:
             current = await self._get_or_raise(experience_id)
             if current.updated_at != snapshot_version:
                 raise ExperienceStaleWriteError("experience changed while the answer was being processed")
+            current = await ExperienceService(self._session)._repair_evidence_references(current)
             await self._validate_patch_provenance(current, patch, answer, question_id)
             updated = await self._apply_patch(current, patch)
             updated = await self._recalculate_completeness(updated)
@@ -346,7 +351,7 @@ class ExperienceEnrichmentService:
             await self._session.commit()
             return ExperienceEnrichmentAnswerResponse(
                 **refreshed.model_dump(),
-                next_question=patch.next_question,
+                next_question=self._normalize_next_question(refreshed, patch.next_question),
             )
         except ExperienceStaleWriteError as error:
             await self._session.rollback()
@@ -369,6 +374,8 @@ class ExperienceEnrichmentService:
         updated = current
         if patch.experience_updates is not None:
             fields = patch.experience_updates.model_dump(exclude_unset=True)
+            if "kind" in fields and fields["kind"] is not None:
+                fields["kind"] = patch.experience_updates.kind.value
             ExperienceService._reject_null_non_nullable_fields(fields)
             ExperienceService._validate_merged_dates(updated, fields)
             updated = await self._experiences.update_fields_if_current(
@@ -400,7 +407,9 @@ class ExperienceEnrichmentService:
 
     async def _recalculate_completeness(self, item: ExperienceItem) -> ExperienceItem:
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        guidance = calculate_completeness(item, evidence_items)
+        guidance = calculate_completeness(
+            item, evidence_items, language=self._content_language()
+        )
         updated = await self._experiences.set_completeness(item.experience_id, guidance.completeness)
         if updated.status == "ready" and guidance.completeness < READY_COMPLETENESS_THRESHOLD:
             updated = await self._experiences.set_status(item.experience_id, "draft")
@@ -413,8 +422,16 @@ class ExperienceEnrichmentService:
         source = f"{current.raw_input}\n{answer}"
         experience_updates = patch.experience_updates
         if experience_updates is not None:
+            if "kind" in experience_updates.model_fields_set:
+                kind = experience_updates.kind
+                if kind is not None and not _is_supported_value(
+                    kind.value, source, current.kind
+                ):
+                    raise InvalidEnrichmentPatch(
+                        "Enrichment patch contains factual content not supported by raw input or answer"
+                    )
             for field_name in (
-                "organization", "role", "location", "start_date", "end_date", "background", "notes"
+                "title", "organization", "role", "location", "start_date", "end_date", "background", "notes"
             ):
                 if field_name not in experience_updates.model_fields_set:
                     continue
@@ -457,6 +474,38 @@ class ExperienceEnrichmentService:
             self._validate_evidence_fields(patch.new_evidence, source, None)
 
     @staticmethod
+    def _validate_patch_target(
+        question_id: str,
+        evidence_id: int | None,
+        patch: ExperienceEnrichmentPatch,
+    ) -> None:
+        """Bind the model patch to the target selected by the server-issued question."""
+        evidence_dimension = question_id in {"action", "result", "metrics"}
+        if evidence_dimension:
+            if patch.experience_updates is not None:
+                raise InvalidEnrichmentPatch("evidence questions cannot update experience fields")
+            if evidence_id is None:
+                if patch.evidence_update is not None or patch.new_evidence is None:
+                    raise InvalidEnrichmentPatch(
+                        "an untargeted evidence question may only create one evidence item"
+                    )
+            elif (
+                patch.new_evidence is not None
+                or patch.evidence_update is None
+                or patch.evidence_update.evidence_id != evidence_id
+            ):
+                raise InvalidEnrichmentPatch(
+                    "the enrichment patch does not match the requested evidence target"
+                )
+            return
+        if evidence_id is not None:
+            raise InvalidEnrichmentPatch("experience questions cannot target evidence")
+        if patch.evidence_update is not None or patch.new_evidence is not None:
+            raise InvalidEnrichmentPatch("experience questions cannot mutate evidence")
+        if patch.experience_updates is None:
+            raise InvalidEnrichmentPatch("experience question requires an experience patch")
+
+    @staticmethod
     def _validate_evidence_fields(
         fields: ExperienceEnrichmentEvidenceFields,
         source: str,
@@ -483,16 +532,42 @@ class ExperienceEnrichmentService:
     def _detail_json(detail: Any) -> str:
         return json.dumps(_sanitize_prompt_value(detail.model_dump()), ensure_ascii=False)
 
-    @staticmethod
-    def _fallback_question(missing_dimensions: list[str]) -> ExperienceEnrichmentQuestion:
-        dimension = missing_dimensions[0] if missing_dimensions else "follow_up"
+    def _fallback_question(self, detail: Any) -> ExperienceEnrichmentQuestion:
+        dimension = detail.missing_dimensions[0] if detail.missing_dimensions else "follow_up"
+        target, evidence_id = self._question_target(detail, dimension)
         return ExperienceEnrichmentQuestion(
             question_id=dimension,
-            question=_FALLBACK_QUESTIONS.get(
-                dimension, "What additional factual detail would make this experience clearer?"
-            ),
+            question=question_for_dimension(dimension, self._content_language()),
+            target=target,
+            evidence_id=evidence_id,
             is_fallback=True,
         )
+
+    def _normalize_next_question(
+        self,
+        detail: Any,
+        question: ExperienceEnrichmentQuestion | None,
+    ) -> ExperienceEnrichmentQuestion | None:
+        if question is None or not detail.missing_dimensions:
+            return None
+        expected_dimension = detail.missing_dimensions[0]
+        if question.question_id != expected_dimension:
+            return self._fallback_question(detail)
+        target, evidence_id = self._question_target(detail, expected_dimension)
+        return question.model_copy(update={"target": target, "evidence_id": evidence_id})
+
+    @staticmethod
+    def _question_target(detail: Any, dimension: str) -> tuple[str, int | None]:
+        if dimension not in {"action", "result", "metrics"}:
+            return "experience", None
+        if dimension == "action":
+            return "evidence", None
+        field_name = dimension
+        for evidence in detail.evidence_items:
+            value = getattr(evidence, field_name)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                return "evidence", evidence.id
+        return "evidence", None
 
     @staticmethod
     def _content_language() -> str:

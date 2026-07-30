@@ -109,7 +109,7 @@ async def apply_enrichment_answer(
     """Apply one typed answer patch atomically; conversation history is never stored."""
     try:
         return await ExperienceEnrichmentService(session).apply_answer(
-            experience_id, request.question_id, request.answer
+            experience_id, request.question_id, request.answer, request.evidence_id
         )
     except EnrichmentRetryableError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error

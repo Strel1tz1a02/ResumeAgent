@@ -105,6 +105,8 @@ class ExperienceUpdate(_ExperienceWritable):
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_updated_at: str | None = None
+
 
 class ExperienceRead(BaseModel):
     """Stored experience fields returned to clients."""
@@ -187,10 +189,17 @@ class ReadyConflictResponse(BaseModel):
     missing_dimensions: list[str] = Field(default_factory=list)
 
 
+class DeletionImpactMatch(BaseModel):
+    """One future matching record affected by permanent deletion."""
+
+    match_id: int
+    job_title: str
+
+
 class DeletionImpactResponse(BaseModel):
     """Stable forward-compatible impact contract for permanent deletion review."""
 
-    affected_matches: list[int] = Field(default_factory=list)
+    affected_matches: list[DeletionImpactMatch] = Field(default_factory=list)
     affected_resumes: list[str] = Field(default_factory=list)
 
 
@@ -201,7 +210,28 @@ class ExperienceEnrichmentQuestion(BaseModel):
 
     question_id: str = Field(min_length=1, max_length=80)
     question: str = Field(min_length=1, max_length=1_000)
+    target: Literal["experience", "evidence"]
+    evidence_id: int | None = Field(default=None, gt=0)
     is_fallback: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_legacy_llm_target(cls, value: object) -> object:
+        """Accept a legacy model response while always emitting the public target contract."""
+        if isinstance(value, dict) and "target" not in value:
+            value = dict(value)
+            value["target"] = (
+                "evidence"
+                if value.get("question_id") in {"action", "result", "metrics"}
+                else "experience"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "ExperienceEnrichmentQuestion":
+        if self.target == "experience" and self.evidence_id is not None:
+            raise ValueError("experience questions cannot target an evidence_id")
+        return self
 
 
 class ExperienceEnrichmentAnswerRequest(BaseModel):
@@ -211,6 +241,7 @@ class ExperienceEnrichmentAnswerRequest(BaseModel):
 
     question_id: str = Field(min_length=1, max_length=80)
     answer: str = Field(min_length=1, max_length=8_000)
+    evidence_id: int | None = Field(default=None, gt=0)
 
     @field_validator("answer")
     @classmethod
@@ -219,12 +250,24 @@ class ExperienceEnrichmentAnswerRequest(BaseModel):
             raise ValueError("answer must not be blank")
         return value
 
+    @model_validator(mode="after")
+    def _validate_evidence_target(self) -> "ExperienceEnrichmentAnswerRequest":
+        if self.evidence_id is not None and self.question_id not in {
+            "action",
+            "result",
+            "metrics",
+        }:
+            raise ValueError("only evidence questions may include evidence_id")
+        return self
+
 
 class ExperienceEnrichmentExperienceUpdate(BaseModel):
     """The narrow experience fields an LLM may propose from one answer."""
 
     model_config = ConfigDict(extra="forbid")
 
+    kind: ExperienceKind | None = None
+    title: str | None = None
     organization: str | None = None
     role: str | None = None
     location: str | None = None
@@ -235,6 +278,16 @@ class ExperienceEnrichmentExperienceUpdate(BaseModel):
     technologies: list[str] | None = None
     tags: list[str] | None = None
     notes: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _title_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("title must not be blank")
+        return value
 
     @field_validator("start_date", "end_date")
     @classmethod

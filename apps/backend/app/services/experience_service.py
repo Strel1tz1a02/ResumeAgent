@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config_cache import get_content_language
 from app.models import ExperienceItem
 from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository, ExperienceStaleWriteError
@@ -107,12 +108,18 @@ class ExperienceService:
     async def patch(self, experience_id: int, request: ExperienceUpdate) -> ExperienceDetail:
         """Update editable fields, validating merged state and refreshing completeness."""
         fields = request.model_dump(exclude_unset=True)
+        expected_updated_at = fields.pop("expected_updated_at", None)
         if "kind" in fields and fields["kind"] is not None:
             fields["kind"] = request.kind.value
 
         try:
             await self._experiences.acquire_ownership_write_lock()
             existing = await self._get_or_raise(experience_id)
+            if expected_updated_at is not None and existing.updated_at != expected_updated_at:
+                raise ExperienceStaleWriteError(
+                    f"stale experience update for {experience_id}: client snapshot is outdated"
+                )
+            existing = await self._repair_evidence_references(existing)
             observed_updated_at = existing.updated_at
             self._reject_null_non_nullable_fields(fields)
             self._validate_merged_dates(existing, fields)
@@ -145,6 +152,7 @@ class ExperienceService:
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_or_raise(experience_id)
+            item = await self._repair_evidence_references(item)
             if item.status == "archived":
                 raise ExperienceConflictError(
                     f"Experience {experience_id} is archived; restore it before marking ready"
@@ -181,7 +189,8 @@ class ExperienceService:
                 raise ExperienceConflictError(
                     f"Experience {experience_id} must be archived before it can be restored"
                 )
-            updated = await self._experiences.set_status(experience_id, "draft")
+            item = await self._repair_evidence_references(item)
+            updated = await self._experiences.set_status(item.experience_id, "draft")
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
@@ -234,7 +243,8 @@ class ExperienceService:
         """Serialize lifecycle writes so a stale action cannot silently overwrite another action."""
         try:
             await self._experiences.acquire_ownership_write_lock()
-            await self._get_or_raise(experience_id)
+            item = await self._get_or_raise(experience_id)
+            await self._repair_evidence_references(item)
             updated = await self._experiences.set_status(experience_id, target_status)
             detail = await self._detail(updated)
             await self._session.commit()
@@ -255,9 +265,21 @@ class ExperienceService:
             raise ExperienceNotFoundError(f"Experience {experience_id} was not found")
         return item
 
+    async def _repair_evidence_references(self, item: ExperienceItem) -> ExperienceItem:
+        """Normalize tolerated historical JSON corruption before any write propagates it."""
+        evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
+        valid_ids = list(dict.fromkeys(evidence.id for evidence in evidence_items))
+        return await self._experiences.set_evidence_ids_if_current(
+            item.experience_id,
+            item.updated_at,
+            valid_ids,
+        )
+
     async def _recalculate_completeness(self, item: ExperienceItem) -> None:
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        result = calculate_completeness(item, evidence_items)
+        result = calculate_completeness(
+            item, evidence_items, language=get_content_language()
+        )
         updated = await self._experiences.set_completeness(item.experience_id, result.completeness)
         if updated.status == "ready" and result.completeness < READY_COMPLETENESS_THRESHOLD:
             await self._experiences.set_status(item.experience_id, "draft")
@@ -278,7 +300,9 @@ class ExperienceService:
 
     async def _evidence_and_guidance(self, item: ExperienceItem):
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        return evidence_items, calculate_completeness(item, evidence_items)
+        return evidence_items, calculate_completeness(
+            item, evidence_items, language=get_content_language()
+        )
 
     @staticmethod
     def _validate_merged_dates(item: ExperienceItem, fields: dict[str, Any]) -> None:

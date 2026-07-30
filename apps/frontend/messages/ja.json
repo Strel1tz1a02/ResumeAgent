@@ -112,6 +112,9 @@
     "active": "アクティブ",
     "archive": "ごみ箱",
     "refresh": "更新",
+    "backToDashboard": "ダッシュボードに戻る",
+    "create": "新しい経歴",
+    "creating": "作成中…",
     "search": "経験を検索",
     "loading": "経験を読み込み中",
     "empty": "経験がありません",
@@ -175,7 +178,17 @@
       "title": "完全性",
       "score": "{score}% 完了",
       "missing": "不足している項目",
-      "guidance": "推奨される質問"
+      "guidance": "推奨される質問",
+      "dimension": {
+        "identity": "タイトルと種類",
+        "organization": "組織",
+        "role": "役割",
+        "dates": "期間",
+        "background": "背景",
+        "action": "行動",
+        "result": "成果",
+        "metrics": "指標"
+      }
     },
     "ready": {
       "action": "準備完了にする",

@@ -112,6 +112,9 @@
     "active": "进行中",
     "archive": "回收站",
     "refresh": "刷新",
+    "backToDashboard": "返回仪表板",
+    "create": "新建经历",
+    "creating": "正在创建…",
     "search": "搜索经历",
     "loading": "正在加载经历",
     "empty": "暂无经历",
@@ -175,7 +178,17 @@
       "title": "完整度",
       "score": "已完成 {score}%",
       "missing": "仍需补充",
-      "guidance": "建议追问"
+      "guidance": "建议追问",
+      "dimension": {
+        "identity": "标题与类型",
+        "organization": "组织",
+        "role": "角色",
+        "dates": "时间",
+        "background": "背景",
+        "action": "行动",
+        "result": "结果",
+        "metrics": "量化指标"
+      }
     },
     "ready": {
       "action": "标记为就绪",

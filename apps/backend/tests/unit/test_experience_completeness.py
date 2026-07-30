@@ -58,16 +58,50 @@ def test_placeholder_title_and_missing_facts_do_not_score() -> None:
         "result",
         "metrics",
     ]
-    assert result.suggested_questions == [
-        "identity",
-        "organization",
-        "role",
-        "dates",
-        "background",
-        "action",
-        "result",
-        "metrics",
-    ]
+    assert result.suggested_questions[0] == "What concise title best describes this experience?"
+    assert result.suggested_questions[-1].startswith("What measurable result")
+
+
+def test_suggested_questions_use_the_configured_content_language() -> None:
+    """Guidance must be user-facing copy, not internal keys or English-only fallback text."""
+    experience = SimpleNamespace(
+        kind="project",
+        title="Project",
+        organization=None,
+        role="Developer",
+        start_date="2026-01",
+        end_date=None,
+        is_current=True,
+        background="Context",
+    )
+
+    chinese = calculate_completeness(experience, [], language="zh")
+    japanese = calculate_completeness(experience, [], language="ja")
+
+    assert chinese.suggested_questions[0] == "这段经历对应哪个组织、团队或客户？"
+    assert japanese.suggested_questions[0] == "この経験はどの組織、チーム、顧客でのものですか？"
+    assert "organization" not in chinese.suggested_questions
+
+
+def test_every_supported_language_has_natural_guidance() -> None:
+    experience = SimpleNamespace(
+        kind="project",
+        title="Project",
+        organization=None,
+        role="Developer",
+        start_date="2026-01",
+        end_date=None,
+        is_current=True,
+        background="Context",
+    )
+
+    questions = {
+        language: calculate_completeness(experience, [], language=language).suggested_questions[0]
+        for language in ("en", "es", "fr", "ja", "pt", "zh")
+    }
+
+    assert len(set(questions.values())) == 6
+    assert all(question != "organization" for question in questions.values())
 
 
 def test_evidence_dimensions_can_be_satisfied_by_different_rows() -> None:

@@ -112,6 +112,9 @@
     "active": "Actives",
     "archive": "Corbeille",
     "refresh": "Actualiser",
+    "backToDashboard": "Retour au tableau de bord",
+    "create": "Nouvelle expérience",
+    "creating": "Création…",
     "search": "Rechercher des expériences",
     "loading": "Chargement des expériences",
     "empty": "Aucune expérience",
@@ -175,7 +178,17 @@
       "title": "Complétude",
       "score": "{score}% complété",
       "missing": "À compléter",
-      "guidance": "Questions suggérées"
+      "guidance": "Questions suggérées",
+      "dimension": {
+        "identity": "Titre et type",
+        "organization": "Organisation",
+        "role": "Rôle",
+        "dates": "Dates",
+        "background": "Contexte",
+        "action": "Action",
+        "result": "Résultat",
+        "metrics": "Indicateurs"
+      }
     },
     "ready": {
       "action": "Marquer comme prête",

@@ -68,7 +68,7 @@ listExperiences({ q?, kind?, status?, sort? }) → { items: ExperienceRead[]; to
 importExperienceText(text) → ExperienceDetail
 createExperience(payload) → ExperienceDetail
 fetchExperience(experienceId) → ExperienceDetail
-patchExperience(experienceId, payload) → ExperienceDetail
+patchExperience(experienceId, { ...editableFields, expected_updated_at? }) → ExperienceDetail
 
 // Evidence and lifecycle
 createEvidence(experienceId, { action, result?, metrics? }) → ExperienceDetail
@@ -82,22 +82,22 @@ getDeletionImpact(experienceId) → DeletionImpactResponse
 deleteExperiencePermanently(experienceId) → void
 
 // Stateless, one-question-at-a-time AI enrichment
-requestNextExperienceQuestion(experienceId) → ExperienceEnrichmentQuestion
-submitExperienceAnswer(experienceId, { question_id, answer }) → ExperienceDetail & { next_question }
+requestNextExperienceQuestion(experienceId) → { question_id, question, target, evidence_id, is_fallback }
+submitExperienceAnswer(experienceId, { question_id, answer, evidence_id? }) → ExperienceDetail & { next_question }
 ```
 
 Backend endpoints:
 
 - `GET /experiences` — accepts `q`, `kind`, `status=active|draft|ready|archived`, and `sort=updated_at_desc|created_at_desc|created_at_asc`.
-- `POST /experiences` and `PATCH /experiences/{experience_id}` — create or update editable fields. IDs, status, timestamps, evidence references, and completeness are server-owned.
+- `POST /experiences` and `PATCH /experiences/{experience_id}` — create or update editable fields. The frontend's “New experience” action posts `{}` and immediately selects the returned blank draft. PATCH may include `expected_updated_at` as an optimistic-concurrency token; a stale snapshot returns `409` instead of overwriting newer manual or AI facts. IDs, status, timestamps, evidence references, and completeness remain server-owned.
 - `POST /experiences/import-text` with `{ "text": string }` — stores the exact nonblank text (maximum 20,000 characters) as a draft before any AI call and returns `201` with expanded detail.
-- `GET /experiences/{experience_id}` — returns ordered `evidence_ids`, expanded `evidence_items`, persisted completeness, and derived missing dimensions/questions.
+- `GET /experiences/{experience_id}` — returns ordered `evidence_ids`, expanded `evidence_items`, persisted completeness, and natural-language derived questions in the configured content language. Missing-dimension keys remain stable machine-readable identifiers.
 - `POST /experiences/{experience_id}/evidence`, `PATCH|DELETE /experiences/{experience_id}/evidence/{evidence_id}`, and `PUT /experiences/{experience_id}/evidence-order` — keep action/result/metrics together. Reordering must be an exact, duplicate-free permutation of the currently owned IDs. Every mutation returns refreshed expanded detail.
 - `POST /experiences/{experience_id}/mark-ready` — requires server completeness of at least 60; otherwise returns `409` with `{ completeness, missing_dimensions }`.
 - `POST /experiences/{experience_id}/archive` — the normal delete action. `POST /restore` returns an archived item to `draft`.
-- `GET /experiences/{experience_id}/deletion-impact` — currently returns `{ affected_matches: [], affected_resumes: [] }`, preserving the future matching contract.
+- `GET /experiences/{experience_id}/deletion-impact` — currently returns empty arrays while preserving the future shape `affected_matches: Array<{ match_id, job_title }>` plus `affected_resumes`.
 - `DELETE /experiences/{experience_id}/permanent` — allowed only after archive and returns `204`. It deletes owned evidence transactionally but never edits or deletes existing resumes.
-- `POST /experiences/{experience_id}/questions/next` and `POST /experiences/{experience_id}/answers` — use current persisted facts plus the latest answer, validate a narrow typed patch, and never store conversation history. Question generation can return `is_fallback: true`; answer failures are retryable and leave stored state unchanged.
+- `POST /experiences/{experience_id}/questions/next` and `POST /experiences/{experience_id}/answers` — use current persisted facts plus the latest answer, validate a narrow typed patch, and never store conversation history. Every question identifies `target: "experience" | "evidence"` and an optional owned `evidence_id`; the answer echoes that ID, so model output cannot redirect a patch to another evidence row. Question generation can return localized `is_fallback: true` guidance; answer failures are retryable and leave stored state unchanged.
 
 Validation errors use `422`, missing resources use `404`, lifecycle conflicts use `409`, and retryable answer-enrichment failures use `503`.
 

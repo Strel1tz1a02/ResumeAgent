@@ -91,7 +91,13 @@ export function PermanentDeleteDialog({
                   count: impact.affected_matches.length,
                 })}
               </p>
-              {impact.affected_matches.length > 0 && <p>{impact.affected_matches.join(', ')}</p>}
+              {impact.affected_matches.length > 0 && (
+                <p>
+                  {impact.affected_matches
+                    .map((match) => `${match.job_title} (#${match.match_id})`)
+                    .join(', ')}
+                </p>
+              )}
               <p>
                 {t('experiences.permanent.affectedResumes', {
                   count: impact.affected_resumes.length,

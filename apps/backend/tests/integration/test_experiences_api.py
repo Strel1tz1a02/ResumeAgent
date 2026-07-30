@@ -7,7 +7,7 @@ import pytest
 
 from app.database import Database
 from app.main import app
-from app.models import Resume
+from app.models import ExperienceItem, Resume
 from app.repositories import evidence_repository as evidence_repository_module
 from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository
@@ -41,6 +41,8 @@ async def test_ai_questions_and_answers_are_stateless_and_return_typed_detail(is
     assert question.json() == {
         "question_id": "organization",
         "question": "Which organization was this with?",
+        "target": "experience",
+        "evidence_id": None,
         "is_fallback": False,
     }
     assert answer.status_code == 200
@@ -67,12 +69,46 @@ async def test_ai_answer_rejects_explicit_evidence_action_clear_without_mutating
         ):
             rejected = await client.post(
                 f"/api/v1/experiences/{experience_id}/answers",
-                json={"question_id": "action", "answer": "Clear it"},
+                json={"question_id": "action", "answer": "Clear it", "evidence_id": evidence_id},
             )
         stored = await client.get(f"/api/v1/experiences/{experience_id}")
 
     assert rejected.status_code == 422
     assert stored.json()["evidence_items"][0]["action"] == "Built API"
+
+
+async def test_ai_answer_cannot_redirect_an_evidence_question_to_another_owned_row(
+    isolated_db,
+) -> None:
+    """The request target, not the model, controls which evidence row may change."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
+        experience_id = created.json()["experience_id"]
+        first = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "First"}
+        )
+        second = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Second"}
+        )
+        first_id, second_id = second.json()["evidence_ids"]
+        with patch(
+            "app.services.experience_enrichment_service.complete_json",
+            new=AsyncMock(
+                return_value={
+                    "evidence_update": {
+                        "evidence_id": second_id,
+                        "updates": {"metrics": "500 users"},
+                    }
+                }
+            ),
+        ):
+            rejected = await client.post(
+                f"/api/v1/experiences/{experience_id}/answers",
+                json={"question_id": "metrics", "answer": "500 users", "evidence_id": first_id},
+            )
+
+    assert first.status_code == 201
+    assert rejected.status_code == 422
 
 
 def _client() -> AsyncClient:
@@ -538,6 +574,70 @@ async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolate
         stored = await client.get(f"/api/v1/experiences/{experience_id}")
     assert stored.status_code == 200
     assert stored.json()["title"] == "Winner"
+
+
+async def test_patch_rejects_a_stale_client_version_after_an_ai_or_manual_write(
+    isolated_db,
+) -> None:
+    """A client editing an old snapshot must not overwrite newer persisted facts."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Original"})
+        experience_id = created.json()["experience_id"]
+        stale_version = created.json()["updated_at"]
+        winner = await client.patch(
+            f"/api/v1/experiences/{experience_id}", json={"background": "New fact"}
+        )
+        stale = await client.patch(
+            f"/api/v1/experiences/{experience_id}",
+            json={"title": "Stale overwrite", "expected_updated_at": stale_version},
+        )
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+
+    assert winner.status_code == 200
+    assert stale.status_code == 409
+    assert stored.json()["title"] == "Original"
+    assert stored.json()["background"] == "New fact"
+
+
+async def test_patch_repairs_historical_missing_evidence_references(isolated_db) -> None:
+    """A tolerated dangling JSON ID must not survive the next ordinary write."""
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Before"})
+    experience_id = created.json()["experience_id"]
+    async with isolated_db.session() as session:
+        item = await session.get(ExperienceItem, experience_id)
+        assert item is not None
+        item.evidence_ids = [999]
+        await session.commit()
+
+    async with _client() as client:
+        patched = await client.patch(
+            f"/api/v1/experiences/{experience_id}", json={"title": "After"}
+        )
+
+    assert patched.status_code == 200
+    assert patched.json()["evidence_ids"] == []
+    async with isolated_db.session() as session:
+        stored = await session.get(ExperienceItem, experience_id)
+        assert stored is not None
+        assert stored.evidence_ids == []
+
+
+async def test_lifecycle_write_repairs_historical_missing_evidence_references(isolated_db) -> None:
+    async with _client() as client:
+        created = await client.post("/api/v1/experiences", json={"title": "Archive"})
+    experience_id = created.json()["experience_id"]
+    async with isolated_db.session() as session:
+        item = await session.get(ExperienceItem, experience_id)
+        assert item is not None
+        item.evidence_ids = [999]
+        await session.commit()
+
+    async with _client() as client:
+        archived = await client.post(f"/api/v1/experiences/{experience_id}/archive")
+
+    assert archived.status_code == 200
+    assert archived.json()["evidence_ids"] == []
 
 
 async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalculation(

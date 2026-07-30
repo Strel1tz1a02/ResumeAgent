@@ -46,7 +46,7 @@ export function CompletenessPanel({
           </p>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
             {experience.missing_dimensions.map((dimension) => (
-              <li key={dimension}>{dimension}</li>
+              <li key={dimension}>{t(`experiences.completeness.dimension.${dimension}`)}</li>
             ))}
           </ul>
         </div>

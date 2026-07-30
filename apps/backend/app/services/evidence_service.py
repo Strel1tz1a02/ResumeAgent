@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config_cache import get_content_language
 from app.models import EvidenceItem, ExperienceItem
 from app.repositories.evidence_repository import EvidenceRepository
 from app.repositories.experience_repository import ExperienceRepository, ExperienceStaleWriteError
@@ -147,7 +148,9 @@ class EvidenceService:
 
     async def _recalculate_completeness(self, item: ExperienceItem) -> ExperienceItem:
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        result = calculate_completeness(item, evidence_items)
+        result = calculate_completeness(
+            item, evidence_items, language=get_content_language()
+        )
         updated = await self._experiences.set_completeness(item.experience_id, result.completeness)
         if updated.status == "ready" and result.completeness < READY_COMPLETENESS_THRESHOLD:
             updated = await self._experiences.set_status(item.experience_id, "draft")
@@ -155,7 +158,9 @@ class EvidenceService:
 
     async def _detail(self, item: ExperienceItem) -> ExperienceDetail:
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        guidance = calculate_completeness(item, evidence_items)
+        guidance = calculate_completeness(
+            item, evidence_items, language=get_content_language()
+        )
         return ExperienceDetail(
             **ExperienceService._read(item).model_dump(),
             evidence_items=[ExperienceService._evidence_read(evidence) for evidence in evidence_items],
