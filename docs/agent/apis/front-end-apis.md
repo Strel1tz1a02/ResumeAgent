@@ -101,6 +101,16 @@ Backend endpoints:
 
 Validation errors use `422`, missing resources use `404`, lifecycle conflicts use `409`, and retryable answer-enrichment failures use `503`.
 
+### Personal Experience Library query ownership
+
+Only `/experiences` uses the feature-scoped TanStack Query v5 client under `lib/queries/experiences/`; no application-wide provider is installed. Its canonical caches are status lists, detail by `experience_id`, and deletion impact by `experience_id`.
+
+- List, detail, and deletion-impact query functions pass TanStack's `AbortSignal` through the API client. The client combines caller cancellation with its existing request timeout and does not report a caller cancellation as a timeout.
+- Window-focus and reconnect refetching, query retries, and mutation retries are disabled for this route. Cached authoritative responses remain fresh until a mutation, explicit refresh, or lifecycle invalidation changes them.
+- Manual create, text import, metadata, evidence, AI, ready, archive, restore, and permanent-delete calls are TanStack mutations. Mutations for one experience share `scope.id = "experience:{id}"` and execute serially; different experiences may mutate independently.
+- Before applying a successful write response, the query layer cancels status-list reads and only the matching experience's detail read; unrelated detail and deletion-impact reads continue independently. The returned `ExperienceDetail` then updates the matching detail and status-list caches immutably. Permanent deletion additionally cancels that experience's impact read and removes only its cache entries.
+- Form drafts, dirty-navigation guards, filters, dialogs, and transient AI question/answer UI remain component-local. Metadata saves still send `expected_updated_at`; TanStack serialization complements rather than replaces the backend `409` stale-write check.
+
 ## Application Tracker (`lib/api/tracker.ts`)
 
 ```typescript

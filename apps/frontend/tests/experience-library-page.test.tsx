@@ -537,6 +537,52 @@ describe('ExperienceLibraryPage', () => {
     expect(screen.getByLabelText('Metrics 4')).toHaveValue('40%');
   });
 
+  it('keeps the original metadata concurrency token when evidence updates the cache', async () => {
+    api.createEvidence.mockResolvedValue({
+      ...listItem,
+      updated_at: '2025-01-03T00:00:00Z',
+      evidence_ids: [4],
+      evidence_items: [
+        {
+          id: 4,
+          action: 'Added evidence',
+          result: null,
+          metrics: null,
+          created_at: '2025-01-03T00:00:00Z',
+          updated_at: '2025-01-03T00:00:00Z',
+        },
+      ],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+    api.patchExperience.mockResolvedValue({
+      ...listItem,
+      title: 'Unsaved local title',
+      updated_at: '2025-01-04T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Unsaved local title' },
+    });
+    fireEvent.change(screen.getByLabelText('Action new'), {
+      target: { value: 'Added evidence' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add evidence' }));
+    await screen.findByDisplayValue('Added evidence');
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+
+    await waitFor(() =>
+      expect(api.patchExperience).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ expected_updated_at: listItem.updated_at })
+      )
+    );
+  });
+
   it('keeps the edited metadata visible after a save failure', async () => {
     api.patchExperience.mockRejectedValue(new Error('offline'));
     render(<ExperienceLibraryPage />);
@@ -637,6 +683,45 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Delete permanently' }).at(-1)!);
     await waitFor(() => expect(api.deleteExperiencePermanently).toHaveBeenCalledWith(1));
     expect(screen.queryByRole('button', { name: /Searchable project/ })).not.toBeInTheDocument();
+  });
+
+  it('does not carry a permanent-delete error to a different experience', async () => {
+    const first = {
+      ...listItem,
+      status: 'archived' as const,
+      archived_at: '2025-02-01T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    };
+    const second = { ...first, experience_id: 2, title: 'Second archived experience' };
+    api.listExperiences.mockImplementation(({ status }: { status?: string }) =>
+      Promise.resolve(
+        status === 'archived' ? { items: [first, second], total: 2 } : { items: [], total: 0 }
+      )
+    );
+    api.fetchExperience.mockImplementation((id: number) =>
+      Promise.resolve(id === 1 ? first : second)
+    );
+    api.getDeletionImpact.mockResolvedValue({ affected_matches: [], affected_resumes: [] });
+    api.deleteExperiencePermanently.mockRejectedValueOnce(new Error('first delete failed'));
+    render(<ExperienceLibraryPage />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Recycle bin' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete permanently' }));
+    await waitFor(() =>
+      expect(api.getDeletionImpact).toHaveBeenCalledWith(1, expect.any(AbortSignal))
+    );
+    await screen.findByText('1 affected matches');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete permanently' }).at(-1)!);
+    expect(await screen.findByText('first delete failed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /Second archived experience/ }));
+    await screen.findByRole('heading', { name: 'Second archived experience' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete permanently' }));
+
+    expect(screen.queryByText('first delete failed')).not.toBeInTheDocument();
   });
 
   it('prompts before changing selection with a dirty draft and registers beforeunload only while dirty', async () => {
@@ -1348,5 +1433,52 @@ describe('ExperienceLibraryPage', () => {
       expect(screen.queryByRole('heading', { name: 'Late AI overwrite' })).not.toBeInTheDocument()
     );
     expect(screen.getByRole('textbox', { name: 'Title' })).toHaveValue('Unsaved local title');
+  });
+
+  it('saves a dirty metadata draft with its original concurrency token after an AI update', async () => {
+    const pendingAnswer = deferred<ExperienceDetail & { next_question: null }>();
+    api.requestNextExperienceQuestion.mockResolvedValue({
+      question_id: 'metadata-token-1',
+      question: 'What changed?',
+      is_fallback: false,
+    });
+    api.submitExperienceAnswer.mockReturnValue(pendingAnswer.promise);
+    api.patchExperience.mockResolvedValue({
+      ...listItem,
+      title: 'Unsaved local title',
+      updated_at: '2025-01-04T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+    });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Help me organize with AI' }));
+    await screen.findByText('What changed?');
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: 'Improved the description.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply answer' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Unsaved local title' },
+    });
+
+    pendingAnswer.resolve({
+      ...listItem,
+      updated_at: '2025-01-03T00:00:00Z',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: null,
+    });
+    await waitFor(() => expect(screen.queryByText('Applying answer...')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+
+    await waitFor(() =>
+      expect(api.patchExperience).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ expected_updated_at: listItem.updated_at })
+      )
+    );
   });
 });

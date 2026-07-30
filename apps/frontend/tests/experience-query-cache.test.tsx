@@ -249,6 +249,36 @@ describe('experience query cache', () => {
     second.resolve(detail({ experience_id: 2, title: 'Second' }));
   });
 
+  it('does not cancel another experience detail read when a mutation succeeds', async () => {
+    const pendingOtherDetail = deferred<ExperienceDetail>();
+    let otherSignal: AbortSignal | undefined;
+    api.fetchExperience.mockImplementation((experienceId: number, signal?: AbortSignal) => {
+      expect(experienceId).toBe(2);
+      otherSignal = signal;
+      return pendingOtherDetail.promise;
+    });
+    api.patchExperience.mockResolvedValue(
+      detail({ title: 'Saved A', updated_at: '2025-01-06T00:00:00Z' })
+    );
+    const { wrapper } = queryWrapper();
+    const { result } = renderHook(
+      () => ({
+        otherDetail: useExperienceDetail(2),
+        patchA: usePatchExperienceMutation(1),
+      }),
+      { wrapper }
+    );
+
+    await waitFor(() => expect(api.fetchExperience).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await result.current.patchA.mutateAsync({ title: 'Saved A' });
+    });
+
+    expect(otherSignal?.aborted).toBe(false);
+    pendingOtherDetail.resolve(detail({ experience_id: 2, title: 'Loaded B' }));
+    await waitFor(() => expect(result.current.otherDetail.data?.title).toBe('Loaded B'));
+  });
+
   it('writes an authoritative mutation response into detail and list caches without refetching', async () => {
     const updated = detail({ title: 'Saved title', updated_at: '2025-01-06T00:00:00Z' });
     api.patchExperience.mockResolvedValue(updated);

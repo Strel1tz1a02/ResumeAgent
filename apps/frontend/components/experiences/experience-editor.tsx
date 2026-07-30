@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -33,6 +33,14 @@ interface ExperienceDraft {
   technologies: string;
   tags: string;
   notes: string;
+}
+
+interface ExperienceEditorState {
+  draft: ExperienceDraft;
+  baseline: {
+    normalized: string;
+    updatedAt: string;
+  };
 }
 
 interface ExperienceEditorProps {
@@ -89,6 +97,17 @@ function normalizedDraft(draft: ExperienceDraft): string {
   });
 }
 
+function editorStateFromExperience(experience: ExperienceDetail): ExperienceEditorState {
+  const draft = draftFromExperience(experience);
+  return {
+    draft,
+    baseline: {
+      normalized: normalizedDraft(draft),
+      updatedAt: experience.updated_at,
+    },
+  };
+}
+
 function explicitUpdate(draft: ExperienceDraft, expectedUpdatedAt: string): ExperienceUpdate {
   return {
     kind: draft.kind,
@@ -114,12 +133,12 @@ export function ExperienceEditor({
   resetSignal,
 }: ExperienceEditorProps) {
   const { t } = useTranslations();
-  const [draft, setDraft] = useState(() => draftFromExperience(experience));
+  const [editorState, setEditorState] = useState(() => editorStateFromExperience(experience));
+  const { draft, baseline } = editorState;
   const patchMutation = usePatchExperienceMutation(experience.experience_id);
   const loadedExperienceIdRef = useRef(experience.experience_id);
   const loadedResetSignalRef = useRef(resetSignal);
-  const baseline = useMemo(() => normalizedDraft(draftFromExperience(experience)), [experience]);
-  const dirty = normalizedDraft(draft) !== baseline;
+  const dirty = normalizedDraft(draft) !== baseline.normalized;
   const archived = experience.status === 'archived';
   const saving = patchMutation.isPending;
   const resetPatch = patchMutation.reset;
@@ -131,25 +150,41 @@ export function ExperienceEditor({
     ) {
       return;
     }
-    setDraft(draftFromExperience(experience));
+    setEditorState(editorStateFromExperience(experience));
     resetPatch();
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
   }, [experience, resetPatch, resetSignal]);
 
   useEffect(() => {
+    if (dirty) return;
+    const nextDraft = draftFromExperience(experience);
+    const nextNormalized = normalizedDraft(nextDraft);
+    if (baseline.normalized === nextNormalized && baseline.updatedAt === experience.updated_at)
+      return;
+    setEditorState(editorStateFromExperience(experience));
+  }, [baseline.normalized, baseline.updatedAt, dirty, experience]);
+
+  useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
   const change = <K extends keyof ExperienceDraft>(key: K, value: ExperienceDraft[K]) => {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setEditorState((current) => ({
+      ...current,
+      draft: { ...current.draft, [key]: value },
+    }));
   };
 
   const save = () => {
     if (saving || archived || !draft.title.trim()) return;
-    patchMutation.mutate(explicitUpdate(draft, experience.updated_at), {
+    const submittedDraft = normalizedDraft(draft);
+    patchMutation.mutate(explicitUpdate(draft, baseline.updatedAt), {
       onSuccess: (detail) => {
-        setDraft(draftFromExperience(detail));
+        setEditorState((current) => {
+          if (normalizedDraft(current.draft) !== submittedDraft) return current;
+          return editorStateFromExperience(detail);
+        });
       },
     });
   };
@@ -234,10 +269,13 @@ export function ExperienceEditor({
             type="checkbox"
             checked={draft.is_current}
             onChange={(event) =>
-              setDraft((current) => ({
+              setEditorState((current) => ({
                 ...current,
-                is_current: event.target.checked,
-                end_date: event.target.checked ? '' : current.end_date,
+                draft: {
+                  ...current.draft,
+                  is_current: event.target.checked,
+                  end_date: event.target.checked ? '' : current.draft.end_date,
+                },
               }))
             }
             disabled={archived || saving}

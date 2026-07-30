@@ -48,7 +48,10 @@ async function storeAuthoritativeDetail(
   client: QueryClient,
   detail: Parameters<typeof writeExperienceDetail>[1]
 ): Promise<void> {
-  await client.cancelQueries({ queryKey: experienceKeys.all });
+  await Promise.all([
+    client.cancelQueries({ queryKey: experienceKeys.lists() }),
+    client.cancelQueries({ queryKey: experienceKeys.detail(detail.experience_id), exact: true }),
+  ]);
   writeExperienceDetail(client, detail);
 }
 
@@ -202,7 +205,14 @@ export function usePermanentDeleteExperienceMutation(experienceId: number) {
     mutationFn: () => deleteExperiencePermanently(experienceId),
     scope: experienceMutationScope(experienceId),
     onSuccess: async () => {
-      await client.cancelQueries({ queryKey: experienceKeys.all });
+      await Promise.all([
+        client.cancelQueries({ queryKey: experienceKeys.lists() }),
+        client.cancelQueries({ queryKey: experienceKeys.detail(experienceId), exact: true }),
+        client.cancelQueries({
+          queryKey: experienceKeys.deletionImpact(experienceId),
+          exact: true,
+        }),
+      ]);
       removeExperienceFromCache(client, experienceId);
     },
   });
