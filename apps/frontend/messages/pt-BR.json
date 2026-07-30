@@ -113,7 +113,7 @@
     "archive": "Lixeira",
     "refresh": "Atualizar",
     "backToDashboard": "Voltar ao painel",
-    "create": "Nova experiência",
+    "createFromTemplate": "Criar a partir de modelo",
     "creating": "Criando…",
     "search": "Pesquisar experiências",
     "loading": "Carregando experiências",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "Rascunho", "ready": "Pronto", "archived": "Arquivado" },
     "import": {
+      "button": "Importar texto",
       "title": "Importar experiência",
       "description": "Cole suas anotações para criar um rascunho.",
       "text": "Texto da experiência",

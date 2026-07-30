@@ -113,7 +113,7 @@
     "archive": "Papelera",
     "refresh": "Actualizar",
     "backToDashboard": "Volver al panel",
-    "create": "Nueva experiencia",
+    "createFromTemplate": "Crear desde plantilla",
     "creating": "Creando…",
     "search": "Buscar experiencias",
     "loading": "Cargando experiencias",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "Borrador", "ready": "Listo", "archived": "Archivado" },
     "import": {
+      "button": "Importar texto",
       "title": "Importar experiencia",
       "description": "Pega tus notas para crear un borrador.",
       "text": "Texto de la experiencia",

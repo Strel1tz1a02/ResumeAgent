@@ -113,7 +113,7 @@
     "archive": "ごみ箱",
     "refresh": "更新",
     "backToDashboard": "ダッシュボードに戻る",
-    "create": "新しい経歴",
+    "createFromTemplate": "テンプレートから作成",
     "creating": "作成中…",
     "search": "経験を検索",
     "loading": "経験を読み込み中",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "下書き", "ready": "準備完了", "archived": "アーカイブ済み" },
     "import": {
+      "button": "テキストをインポート",
       "title": "経験をインポート",
       "description": "メモを貼り付けて下書きを作成します。",
       "text": "経験のテキスト",

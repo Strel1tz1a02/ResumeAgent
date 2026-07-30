@@ -113,7 +113,7 @@
     "archive": "Corbeille",
     "refresh": "Actualiser",
     "backToDashboard": "Retour au tableau de bord",
-    "create": "Nouvelle expérience",
+    "createFromTemplate": "Créer depuis un modèle",
     "creating": "Création…",
     "search": "Rechercher des expériences",
     "loading": "Chargement des expériences",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "Brouillon", "ready": "Prêt", "archived": "Archivé" },
     "import": {
+      "button": "Importer du texte",
       "title": "Importer une expérience",
       "description": "Collez vos notes pour créer un brouillon.",
       "text": "Texte de l’expérience",

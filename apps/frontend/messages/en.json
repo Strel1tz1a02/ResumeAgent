@@ -113,7 +113,7 @@
     "archive": "Recycle bin",
     "refresh": "Refresh",
     "backToDashboard": "Back to dashboard",
-    "create": "New experience",
+    "createFromTemplate": "Create from Template",
     "creating": "Creating…",
     "search": "Search experiences",
     "loading": "Loading experiences",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "Draft", "ready": "Ready", "archived": "Archived" },
     "import": {
+      "button": "Import Text",
       "title": "Import experience",
       "description": "Paste your experience notes to create a draft.",
       "text": "Experience text",

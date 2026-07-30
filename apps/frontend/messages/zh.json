@@ -113,7 +113,7 @@
     "archive": "回收站",
     "refresh": "刷新",
     "backToDashboard": "返回仪表板",
-    "create": "新建经历",
+    "createFromTemplate": "模板创建",
     "creating": "正在创建…",
     "search": "搜索经历",
     "loading": "正在加载经历",
@@ -135,6 +135,7 @@
     },
     "status": { "draft": "草稿", "ready": "已就绪", "archived": "已归档" },
     "import": {
+      "button": "文本导入",
       "title": "导入经历",
       "description": "粘贴经历笔记以创建草稿。",
       "text": "经历文本",

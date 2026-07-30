@@ -413,11 +413,13 @@ function ExperienceLibraryContent() {
               disabled={creationPending}
             >
               <Plus className="h-4 w-4" />
-              {createMutation.isPending ? t('experiences.creating') : t('experiences.create')}
+              {createMutation.isPending
+                ? t('experiences.creating')
+                : t('experiences.createFromTemplate')}
             </Button>
             <Button onClick={() => setImportOpen(true)} disabled={creationPending}>
               <Plus className="h-4 w-4" />
-              {t('experiences.import')}
+              {t('experiences.import.button')}
             </Button>
           </div>
         </header>

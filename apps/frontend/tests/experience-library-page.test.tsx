@@ -31,8 +31,8 @@ const translate = vi.hoisted(
       'experiences.kind.all': 'All kinds',
       'experiences.kind.project': 'Project',
       'experiences.kind.volunteer': 'Volunteer',
-      'experiences.import': 'Import',
-      'experiences.create': 'New experience',
+      'experiences.createFromTemplate': 'Create from Template',
+      'experiences.import.button': 'Import Text',
       'experiences.creating': 'Creating',
       'experiences.backToDashboard': 'Back to dashboard',
       'experiences.import.title': 'Import experience',
@@ -178,6 +178,13 @@ describe('ExperienceLibraryPage', () => {
     expect((await screen.findAllByText('Searchable project')).length).toBeGreaterThan(0);
   });
 
+  it('labels both creation entry points by their input method', async () => {
+    render(<ExperienceLibraryPage />);
+
+    expect(await screen.findByRole('button', { name: 'Create from Template' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Import Text' })).toBeInTheDocument();
+  });
+
   it('shows a loading state before the experience list resolves', () => {
     api.listExperiences.mockReturnValue(new Promise(() => {}));
 
@@ -217,7 +224,7 @@ describe('ExperienceLibraryPage', () => {
     api.createExperience.mockResolvedValue(blank);
     render(<ExperienceLibraryPage />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'New experience' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create from Template' }));
 
     await waitFor(() => expect(api.createExperience).toHaveBeenCalledWith({}));
     expect(await screen.findByRole('textbox', { name: 'Title' })).toHaveValue('');
@@ -233,10 +240,10 @@ describe('ExperienceLibraryPage', () => {
     render(<ExperienceLibraryPage />);
     await screen.findAllByText('Searchable project');
 
-    fireEvent.click(screen.getByRole('button', { name: 'New experience' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create from Template' }));
     await waitFor(() => expect(api.createExperience).toHaveBeenCalledWith({}));
 
-    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Import Text' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Creating' })).toBeDisabled();
     pending.resolve(imported);
     await screen.findAllByText('Imported experience');
@@ -332,7 +339,7 @@ describe('ExperienceLibraryPage', () => {
     api.importExperienceText.mockResolvedValue(imported);
     render(<ExperienceLibraryPage />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
@@ -370,7 +377,7 @@ describe('ExperienceLibraryPage', () => {
       target: { value: 'only-existing-item' },
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
@@ -402,7 +409,7 @@ describe('ExperienceLibraryPage', () => {
     await screen.findByRole('button', { name: /Searchable project/ });
     expect(screen.getByText(/Draft status/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Experience text' }), { key: 'Enter' });
     expect(documentKeydown).not.toHaveBeenCalled();
     document.removeEventListener('keydown', documentKeydown);
@@ -410,7 +417,7 @@ describe('ExperienceLibraryPage', () => {
 
   it('returns focus to Import when the dialog closes with Escape', async () => {
     render(<ExperienceLibraryPage />);
-    const importButton = screen.getByRole('button', { name: 'Import' });
+    const importButton = screen.getByRole('button', { name: 'Import Text' });
     importButton.focus();
     fireEvent.click(importButton);
     await screen.findByRole('textbox', { name: 'Experience text' });
@@ -425,7 +432,7 @@ describe('ExperienceLibraryPage', () => {
     render(<ExperienceLibraryPage />);
     await screen.findByRole('button', { name: /Searchable project/ });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
@@ -448,7 +455,7 @@ describe('ExperienceLibraryPage', () => {
     render(<ExperienceLibraryPage />);
     await screen.findByRole('button', { name: /Searchable project/ });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
