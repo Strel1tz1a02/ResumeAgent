@@ -58,7 +58,7 @@ interface UseRegenerateWizardReturn {
  */
 export function useRegenerateWizard({
   resumeId,
-  outputLanguage = 'en',
+  outputLanguage = 'zh',
   onSuccess,
   onError,
 }: UseRegenerateWizardProps): UseRegenerateWizardReturn {

@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+from app.prompts.templates import get_language_name
 from app.services.experience_completeness_service import calculate_completeness
 
 
@@ -45,7 +46,7 @@ def test_placeholder_title_and_missing_facts_do_not_score() -> None:
         background=None,
     )
 
-    result = calculate_completeness(experience, [])
+    result = calculate_completeness(experience, [], language="en")
 
     assert result.completeness == 0
     assert result.missing_dimensions == [
@@ -76,10 +77,12 @@ def test_suggested_questions_use_the_configured_content_language() -> None:
     )
 
     chinese = calculate_completeness(experience, [], language="zh")
-    japanese = calculate_completeness(experience, [], language="ja")
+    english = calculate_completeness(experience, [], language="en")
+    unknown = calculate_completeness(experience, [], language="unknown")
 
     assert chinese.suggested_questions[0] == "这段经历对应哪个组织、团队或客户？"
-    assert japanese.suggested_questions[0] == "この経験はどの組織、チーム、顧客でのものですか？"
+    assert english.suggested_questions[0] == "Which organization, team, or client was this experience with?"
+    assert unknown.suggested_questions == chinese.suggested_questions
     assert "organization" not in chinese.suggested_questions
 
 
@@ -97,11 +100,15 @@ def test_every_supported_language_has_natural_guidance() -> None:
 
     questions = {
         language: calculate_completeness(experience, [], language=language).suggested_questions[0]
-        for language in ("en", "es", "fr", "ja", "pt", "zh")
+        for language in ("zh", "en")
     }
 
-    assert len(set(questions.values())) == 6
+    assert len(set(questions.values())) == 2
     assert all(question != "organization" for question in questions.values())
+
+
+def test_unknown_prompt_language_defaults_to_chinese() -> None:
+    assert get_language_name("unknown") == "Chinese (Simplified)"
 
 
 def test_evidence_dimensions_can_be_satisfied_by_different_rows() -> None:

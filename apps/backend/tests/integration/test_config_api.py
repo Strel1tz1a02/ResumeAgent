@@ -339,14 +339,25 @@ class TestLanguageConfig:
 
     @patch("app.routers.config._load_config")
     async def test_get_language(self, mock_load, client):
-        mock_load.return_value = {"ui_language": "en", "content_language": "es"}
+        mock_load.return_value = {}
         async with client:
             resp = await client.get("/api/v1/config/language")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["ui_language"] == "en"
-        assert data["content_language"] == "es"
-        assert "en" in data["supported_languages"]
+        assert data["ui_language"] == "zh"
+        assert data["content_language"] == "zh"
+        assert data["supported_languages"] == ["zh", "en"]
+
+    @patch("app.routers.config._save_config")
+    @patch("app.routers.config._load_config")
+    async def test_put_removed_language_returns_400(self, mock_load, mock_save, client):
+        mock_load.return_value = {}
+        async with client:
+            resp = await client.put("/api/v1/config/language", json={
+                "content_language": "es",
+            })
+        assert resp.status_code == 400
+        mock_save.assert_not_called()
 
     @patch("app.routers.config._save_config")
     @patch("app.routers.config._load_config")

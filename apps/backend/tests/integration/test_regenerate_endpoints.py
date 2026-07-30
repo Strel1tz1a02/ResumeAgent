@@ -1,4 +1,5 @@
 import unittest
+from inspect import signature
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import HTTPException
@@ -6,9 +7,41 @@ from pydantic import ValidationError
 
 from app.routers import enrichment as enrichment_router
 from app.schemas.enrichment import RegenerateItemInput, RegenerateRequest, RegeneratedItem
+from app.services.cover_letter import (
+    generate_cover_letter,
+    generate_outreach_message,
+    generate_resume_title,
+)
+from app.services.improver import generate_resume_diffs, generate_skill_target_plan, improve_resume
+from app.services.interview_prep import generate_interview_prep
 
 
 class TestRegenerateSchemas(unittest.TestCase):
+    def test_language_defaults_are_chinese(self) -> None:
+        item = RegenerateItemInput(
+            item_id="skills",
+            item_type="skills",
+            title="Skills",
+            current_content=["Python"],
+        )
+        request = RegenerateRequest(
+            resume_id="resume_1",
+            items=[item],
+            instruction="Improve clarity",
+        )
+
+        self.assertEqual(request.output_language, "zh")
+        for function in (
+            generate_cover_letter,
+            generate_outreach_message,
+            generate_resume_title,
+            generate_resume_diffs,
+            generate_skill_target_plan,
+            improve_resume,
+            generate_interview_prep,
+        ):
+            self.assertEqual(signature(function).parameters["language"].default, "zh")
+
     def test_regenerate_request_instruction_max_length(self) -> None:
         item = RegenerateItemInput(
             item_id="skills",

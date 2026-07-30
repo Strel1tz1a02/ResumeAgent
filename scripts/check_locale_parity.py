@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Verify every frontend locale file structurally matches ``en.json``.
+"""Verify the Chinese and English frontend locale files have matching structure.
 
-The frontend declares ``type Messages = typeof en`` and
+The frontend supports only ``zh`` and ``en``, and declares ``type Messages = typeof en`` and
 ``const allMessages: Record<Locale, Messages>``, so a locale JSON that is
 *missing* a key present in ``en.json`` - or that has a key of a *different shape*
 (an object where ``en`` has a string, or vice versa) - makes ``tsc`` /

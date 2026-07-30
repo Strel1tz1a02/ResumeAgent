@@ -35,8 +35,8 @@ describe('translate (server-side)', () => {
     expect(translate('en', 'totally.missing.key')).toBe('totally.missing.key');
   });
 
-  it('falls back to en for an unknown locale', () => {
-    expect(translate('xx' as unknown as Locale, leaf.path)).toBe(translate('en', leaf.path));
+  it('falls back to zh for an unknown locale', () => {
+    expect(translate('xx' as unknown as Locale, leaf.path)).toBe(translate('zh', leaf.path));
   });
 
   it('composes lookup + param substitution (missing path still gets params applied)', () => {

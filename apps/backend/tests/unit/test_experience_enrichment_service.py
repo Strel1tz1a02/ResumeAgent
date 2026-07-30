@@ -279,7 +279,7 @@ async def test_question_llm_failure_returns_first_missing_dimension_fallback(enr
     assert question.target == "experience"
     assert question.evidence_id is None
     assert question.is_fallback is True
-    assert "organization" in question.question.lower()
+    assert question.question == "这段经历对应哪个组织、团队或客户？"
     assert (await service.get_detail(experience_id)).evidence_items == []
 
 

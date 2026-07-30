@@ -58,7 +58,7 @@ lib/
   constants/page-dimensions.ts
 hooks/               # use-file-upload, use-regenerate-wizard, use-enrichment-wizard
 i18n/config.ts       # locale list + names/flags (NOTE: distinct from lib/i18n)
-messages/            # en/es/zh/ja/pt-BR JSON (see i18n)
+messages/            # zh/en JSON (see i18n)
 tests/               # vitest (see Testing)
 ```
 
@@ -93,10 +93,10 @@ Two distinct settings, configured independently in Settings:
 - **UI language** — interface text, client-only (`uiLanguage`, localStorage).
 - **Content language** — language the LLM writes resumes/cover letters in (`contentLanguage`, persisted to backend).
 
-**Supported locales (source of truth = `i18n/config.ts`):** `en`, `es`, `zh`, `ja`, `pt` (the file is `messages/pt-BR.json`, imported as `pt`). The `docs/agent/features/i18n.md` table is stale — it omits `pt`; trust the code.
+**Supported locales (source of truth = `i18n/config.ts`):** `zh`, `en`. Chinese is the default for UI, generated content, and unknown-locale fallback.
 
 Engine (no external i18n lib, plain JSON):
-- `i18n/config.ts` — `locales`, `defaultLocale='en'`, `localeNames`, `localeFlags`.
+- `i18n/config.ts` — `locales`, `defaultLocale='zh'`, `localeNames`, `localeFlags`.
 - `lib/i18n/messages.ts` — static-imports every locale JSON; the critical types live here.
 - `lib/i18n/translations.ts` — `useTranslations()` returns `{ t, messages, locale }`; `t('a.b.c', params)` does dot-path lookup + `{placeholder}` substitution. Missing key returns the key string (no throw).
 - `lib/i18n/server.ts` — `translate(locale, key, params)` for server/print pages.
@@ -106,13 +106,13 @@ Engine (no external i18n lib, plain JSON):
 `lib/i18n/messages.ts`:
 ```ts
 export type Messages = typeof en;                       // shape derived from en.json
-const allMessages: Record<Locale, Messages> = { en, es, zh, ja, pt };
+const allMessages: Record<Locale, Messages> = { zh, en };
 ```
-Because every locale is typed as `Messages` (= the exact shape of `en.json`), **every locale JSON must structurally match `en.json` exactly.** Add a key to `en.json` and the production `tsc` / `next build` FAILS until that same key path exists in `es`, `zh`, `ja`, and `pt-BR`. (A real build break was caused by exactly this.)
+Because every locale is typed as `Messages` (= the exact shape of `en.json`), **`zh.json` and `en.json` must structurally match exactly.** A missing or shape-mismatched key makes production `tsc` / `next build` fail.
 
-**When editing translations:** any key you add/remove/rename in `en.json` MUST be mirrored in all 5 files (`en`, `es`, `zh`, `ja`, `pt-BR`) with identical structure. `npm run dev` may tolerate drift; the build will not.
+**When editing translations:** any key added, removed, or renamed in one message file MUST be mirrored in the other with identical structure. `npm run dev` may tolerate drift; the build will not.
 
-The tracker ships a `tracker.*` key tree (`columns`, `modal`, `manualAdd`, `bulk`, `errors`, `scroll`) plus `nav.applicationTracker`, present in all 5 locale files — subject to the same parity rule.
+The tracker ships a `tracker.*` key tree (`columns`, `modal`, `manualAdd`, `bulk`, `errors`, `scroll`) plus `nav.applicationTracker`, present in both locale files and subject to the same parity rule.
 
 See [i18n.md](../../docs/agent/features/i18n.md), [i18n-preparation.md](../../docs/agent/features/i18n-preparation.md).
 
@@ -161,7 +161,7 @@ Backend must run separately on :8000 (see root CLAUDE.md). Frontend proxies `/ap
 
 1. All UI MUST follow Swiss International Style (links above). `rounded-none`, 1px black borders, hard shadows, brand tokens.
 2. Run `npm run lint` and `npm run format` before committing frontend changes.
-3. Any `en.json` key change MUST be mirrored across all 5 locale files (see i18n) or the build breaks.
+3. Any translation key change MUST be mirrored in both `zh.json` and `en.json` (see i18n) or the build breaks.
 4. **Textarea Enter-key pattern** — confirmed in code (e.g. `app/(default)/tailor/page.tsx`): when a textarea sits inside a dialog/form that submits on Enter, stop propagation:
    ```tsx
    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

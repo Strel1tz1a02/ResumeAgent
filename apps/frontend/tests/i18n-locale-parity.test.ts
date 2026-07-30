@@ -1,19 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import en from '@/messages/en.json';
-import es from '@/messages/es.json';
 import zh from '@/messages/zh.json';
-import ja from '@/messages/ja.json';
-import pt from '@/messages/pt-BR.json';
-import fr from '@/messages/fr.json';
 
 import { getMessages } from '@/lib/i18n/messages';
-import { locales, type Locale } from '@/i18n/config';
+import { defaultLocale, locales, type Locale } from '@/i18n/config';
 
 /**
  * `lib/i18n/messages.ts` declares `type Messages = typeof en` and
- * `Record<Locale, Messages>`, so every locale JSON must structurally match
- * en.json — a *missing* key makes `tsc` / `next build` fail. That exact drift
+ * `Record<Locale, Messages>`, so zh.json must structurally match en.json — a
+ * *missing* key makes `tsc` / `next build` fail. That exact drift
  * once shipped to main and only surfaced post-merge in the Docker build.
  *
  * This catches it in-suite (and mirrors scripts/check_locale_parity.py, which
@@ -46,7 +42,7 @@ function keyKinds(
 }
 
 const REFERENCE = keyKinds(en);
-const LOCALES: Record<string, unknown> = { es, zh, ja, pt, fr };
+const LOCALES: Record<string, unknown> = { zh };
 
 describe('i18n locale parity (guards the next build break)', () => {
   it.each(Object.keys(LOCALES))('%s.json has every en.json key with a matching shape', (name) => {
@@ -115,6 +111,11 @@ describe('i18n locale parity (guards the next build break)', () => {
 });
 
 describe('getMessages', () => {
+  it('supports exactly Chinese and English with Chinese as the default', () => {
+    expect(locales).toEqual(['zh', 'en']);
+    expect(defaultLocale).toBe('zh');
+  });
+
   it('resolves every locale declared in i18n/config to a populated object', () => {
     for (const locale of locales) {
       const msgs = getMessages(locale) as Record<string, unknown>;
@@ -122,7 +123,7 @@ describe('getMessages', () => {
     }
   });
 
-  it('falls back to en for an unknown locale', () => {
-    expect(getMessages('xx' as unknown as Locale)).toBe(getMessages('en'));
+  it('falls back to zh for an unknown locale', () => {
+    expect(getMessages('xx' as unknown as Locale)).toBe(getMessages('zh'));
   });
 });

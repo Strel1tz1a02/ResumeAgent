@@ -101,7 +101,7 @@ def _serialize_resume_data_for_prompt(resume_data: dict[str, Any]) -> str:
 async def generate_interview_prep(
     resume_data: dict[str, Any],
     job_description: str,
-    language: str = "en",
+    language: str = "zh",
 ) -> InterviewPrepData:
     """Generate structured interview preparation for a tailored resume."""
     prompt = INTERVIEW_PREP_PROMPT.format(

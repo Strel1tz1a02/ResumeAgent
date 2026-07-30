@@ -36,14 +36,14 @@ def _resolve_feature_prompt(
 async def generate_cover_letter(
     resume_data: dict[str, Any],
     job_description: str,
-    language: str = "en",
+    language: str = "zh",
 ) -> str:
     """Generate a cover letter based on resume and job description.
 
     Args:
         resume_data: Structured resume data (ResumeData format)
         job_description: Target job description text
-        language: Output language code (en, es, zh, ja)
+        language: Output language code (zh or en)
 
     Returns:
         Generated cover letter as plain text
@@ -90,14 +90,14 @@ async def generate_cover_letter(
 async def generate_outreach_message(
     resume_data: dict[str, Any],
     job_description: str,
-    language: str = "en",
+    language: str = "zh",
 ) -> str:
     """Generate a cold outreach message for networking.
 
     Args:
         resume_data: Structured resume data (ResumeData format)
         job_description: Target job description text
-        language: Output language code (en, es, zh, ja)
+        language: Output language code (zh or en)
 
     Returns:
         Generated outreach message as plain text
@@ -138,13 +138,13 @@ async def generate_outreach_message(
 
 async def generate_resume_title(
     job_description: str,
-    language: str = "en",
+    language: str = "zh",
 ) -> str:
     """Generate a short descriptive title from a job description.
 
     Args:
         job_description: Target job description text
-        language: Output language code (en, es, zh, ja)
+        language: Output language code (zh or en)
 
     Returns:
         Generated title like "Senior Frontend Engineer @ Stripe"

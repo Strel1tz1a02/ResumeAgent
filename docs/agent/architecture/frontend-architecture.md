@@ -74,7 +74,7 @@ const { status, refreshStatus, incrementResumes, decrementResumes } = useStatusC
 ```typescript
 const { contentLanguage, setContentLanguage } = useLanguage();
 ```
-- Content generation language (en, es, zh, ja)
+- UI and content generation language (`zh`, `en`; default `zh`)
 
 ## API Client (`lib/api/`)
 

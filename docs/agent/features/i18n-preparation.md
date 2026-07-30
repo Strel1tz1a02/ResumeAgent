@@ -1,31 +1,24 @@
-# i18n Preparation Guide
+# i18n Maintenance Guide
 
-> Plan for internationalizing Resume Matcher.
+> Current Chinese/English localization contract for Resume Matcher.
 
 ## Current State
 
-- UI uses `next-intl` with locale files in `messages/`
+- UI uses statically imported JSON locale files in `messages/`
 - Content language preference stored via `LanguageProvider`
-- Supported: en, es, zh, ja
+- Supported: zh, en (default: zh)
 
 ## Translation File Location
 
 ```
 apps/frontend/messages/
-├── en.json
-├── es.json
 ├── zh.json
-└── ja.json
+└── en.json
 ```
 
-## Adding New Locale
+## Supported Locale Contract
 
-1. Create `messages/{locale}.json`
-2. Add locale to `i18n/config.ts`:
-   ```typescript
-   export const locales = ['en', 'es', 'zh', 'ja', 'de'] as const;
-   ```
-3. Add to `SUPPORTED_LANGUAGES` in backend `config.py`
+Only `zh` and `en` are supported. Adding another locale requires an explicit product decision and coordinated frontend messages, locale registration, backend validation, prompt-language mapping, and parity tests.
 
 ## Translation Keys
 

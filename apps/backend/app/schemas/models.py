@@ -674,16 +674,16 @@ class FeatureConfigResponse(BaseModel):
 class LanguageConfigRequest(BaseModel):
     """Request to update language settings."""
 
-    ui_language: str | None = None  # en, es, zh, ja - for interface
-    content_language: str | None = None  # en, es, zh, ja - for generated content
+    ui_language: str | None = None  # zh or en - for interface
+    content_language: str | None = None  # zh or en - for generated content
 
 
 class LanguageConfigResponse(BaseModel):
     """Response for language settings."""
 
-    ui_language: str = "en"  # Interface language
-    content_language: str = "en"  # Generated content language
-    supported_languages: list[str] = ["en", "es", "zh", "ja"]
+    ui_language: str = "zh"  # Interface language
+    content_language: str = "zh"  # Generated content language
+    supported_languages: list[str] = ["zh", "en"]
 
 
 class PromptOption(BaseModel):

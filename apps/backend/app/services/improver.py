@@ -507,7 +507,7 @@ async def generate_resume_diffs(
     original_resume: str,
     job_description: str,
     job_keywords: dict[str, Any],
-    language: str = "en",
+    language: str = "zh",
     prompt_id: str | None = None,
     original_resume_data: dict[str, Any] | None = None,
     skill_targets: list[dict[str, Any]] | None = None,
@@ -521,7 +521,7 @@ async def generate_resume_diffs(
         original_resume: Resume content (markdown)
         job_description: Target job description
         job_keywords: Extracted job keywords
-        language: Output language code (en, es, zh, ja)
+        language: Output language code (zh or en)
         prompt_id: Strategy id (nudge/keywords/full)
         original_resume_data: Structured resume JSON
         skill_targets: Verified skill targets from the planning pass
@@ -840,7 +840,7 @@ async def generate_skill_target_plan(
     original_resume_data: dict[str, Any],
     job_description: str,
     job_keywords: dict[str, Any],
-    language: str = "en",
+    language: str = "zh",
 ) -> dict[str, Any]:
     """Ask the LLM for a compact skill target plan before editing diffs."""
     output_language = get_language_name(language)
@@ -911,7 +911,7 @@ async def improve_resume(
     original_resume: str,
     job_description: str,
     job_keywords: dict[str, Any],
-    language: str = "en",
+    language: str = "zh",
     prompt_id: str | None = None,
     original_resume_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -921,7 +921,7 @@ async def improve_resume(
         original_resume: Original resume content (markdown)
         job_description: Target job description
         job_keywords: Extracted job keywords
-        language: Output language code (en, es, zh, ja)
+        language: Output language code (zh or en)
         prompt_id: Which tailor prompt to use
         original_resume_data: Structured resume JSON; used instead of
             markdown when available for higher-fidelity LLM input

@@ -253,7 +253,11 @@ async def update_feature_config(request: FeatureConfigRequest) -> FeatureConfigR
 
 
 # Supported languages for i18n
-SUPPORTED_LANGUAGES = ["en", "es", "zh", "ja", "pt", "fr"]
+SUPPORTED_LANGUAGES = ["zh", "en"]
+
+
+def _supported_language_or_default(value: object) -> str:
+    return value if isinstance(value, str) and value in SUPPORTED_LANGUAGES else "zh"
 
 
 @router.get("/language", response_model=LanguageConfigResponse)
@@ -262,11 +266,13 @@ async def get_language_config() -> LanguageConfigResponse:
     stored = _load_config()
 
     # Support legacy single 'language' field migration
-    legacy_language = stored.get("language", "en")
+    legacy_language = _supported_language_or_default(stored.get("language"))
 
     return LanguageConfigResponse(
-        ui_language=stored.get("ui_language", legacy_language),
-        content_language=stored.get("content_language", legacy_language),
+        ui_language=_supported_language_or_default(stored.get("ui_language", legacy_language)),
+        content_language=_supported_language_or_default(
+            stored.get("content_language", legacy_language)
+        ),
         supported_languages=SUPPORTED_LANGUAGES,
     )
 
@@ -300,11 +306,13 @@ async def update_language_config(
     _save_config(stored)
 
     # Support legacy single 'language' field migration
-    legacy_language = stored.get("language", "en")
+    legacy_language = _supported_language_or_default(stored.get("language"))
 
     return LanguageConfigResponse(
-        ui_language=stored.get("ui_language", legacy_language),
-        content_language=stored.get("content_language", legacy_language),
+        ui_language=_supported_language_or_default(stored.get("ui_language", legacy_language)),
+        content_language=_supported_language_or_default(
+            stored.get("content_language", legacy_language)
+        ),
         supported_languages=SUPPORTED_LANGUAGES,
     )
 

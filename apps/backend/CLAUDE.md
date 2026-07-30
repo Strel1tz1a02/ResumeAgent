@@ -72,7 +72,7 @@ Prompts are **plain Python string constants** — no Jinja, no external prompt f
 
 **Custom feature prompts (user-editable):** cover-letter & outreach prompts can be overridden in `config.json` (`cover_letter_prompt`, `outreach_message_prompt`). On save (`PUT /config/feature-prompts`) they are validated by `validate_prompt_placeholders()` to contain all of `REQUIRED_FEATURE_PROMPT_PLACEHOLDERS` = `{job_description}`, `{resume_data}`, `{output_language}`; missing → HTTP 422. Empty string = "use default". At runtime `cover_letter.py::_resolve_feature_prompt` picks custom-or-default and falls back to the built-in default (with a warning) if a custom prompt fails `.format()`.
 
-**Language:** every generative prompt takes `{output_language}` (full name from `get_language_name(code)`), so all output is produced in the configured content language (`en`/`es`/`zh`/`ja`/`pt`).
+**Language:** every generative prompt takes `{output_language}` (full name from `get_language_name(code)`), so all output is produced in the configured content language (`zh`/`en`, default `zh`).
 
 ---
 
