@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { PropsWithChildren } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExperienceDetail, ExperienceListResponse } from '@/lib/api/experiences';
@@ -10,14 +10,29 @@ import {
   writeExperienceDetail,
 } from '@/lib/queries/experiences/cache';
 import { useExperienceDetail } from '@/lib/queries/experiences/queries';
+import {
+  useCreateEvidenceMutation,
+  useCreateExperienceMutation,
+  useExperienceCreationPending,
+  useImportExperienceMutation,
+  usePatchExperienceMutation,
+} from '@/lib/queries/experiences/mutations';
 
 const api = vi.hoisted(() => ({
   fetchExperience: vi.fn(),
+  patchExperience: vi.fn(),
+  createEvidence: vi.fn(),
+  createExperience: vi.fn(),
+  importExperienceText: vi.fn(),
 }));
 
 vi.mock('@/lib/api/experiences', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/experiences')>()),
   fetchExperience: api.fetchExperience,
+  patchExperience: api.patchExperience,
+  createEvidence: api.createEvidence,
+  createExperience: api.createExperience,
+  importExperienceText: api.importExperienceText,
 }));
 
 const detail = (overrides: Partial<ExperienceDetail> = {}): ExperienceDetail => ({
@@ -51,6 +66,23 @@ const list = (items: ExperienceDetail[]): ExperienceListResponse => ({
   items,
   total: items.length,
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function queryWrapper(client = createExperienceQueryClient()) {
+  return {
+    client,
+    wrapper: ({ children }: PropsWithChildren) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  };
+}
 
 describe('experience query cache', () => {
   beforeEach(() => {
@@ -167,5 +199,105 @@ describe('experience query cache', () => {
     await waitFor(() => expect(result.current.data?.title).toBe('Selected B'));
     expect(firstSignal?.aborted).toBe(true);
     expect(result.current.data?.experience_id).toBe(2);
+  });
+
+  it('serializes different writes for the same experience', async () => {
+    const metadata = deferred<ExperienceDetail>();
+    api.patchExperience.mockReturnValue(metadata.promise);
+    api.createEvidence.mockResolvedValue(detail({ updated_at: '2025-01-04T00:00:00Z' }));
+    const { wrapper } = queryWrapper();
+    const { result } = renderHook(
+      () => ({
+        patch: usePatchExperienceMutation(1),
+        evidence: useCreateEvidenceMutation(1),
+      }),
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.patch.mutate({ title: 'Queued metadata' });
+      result.current.evidence.mutate({ action: 'Queued evidence' });
+    });
+
+    await waitFor(() => expect(api.patchExperience).toHaveBeenCalledTimes(1));
+    expect(api.createEvidence).not.toHaveBeenCalled();
+
+    await act(async () => {
+      metadata.resolve(detail({ title: 'Queued metadata', updated_at: '2025-01-03T00:00:00Z' }));
+      await metadata.promise;
+    });
+    await waitFor(() => expect(api.createEvidence).toHaveBeenCalledTimes(1));
+  });
+
+  it('allows writes for different experiences to run independently', async () => {
+    const first = deferred<ExperienceDetail>();
+    const second = deferred<ExperienceDetail>();
+    api.patchExperience.mockImplementation((experienceId: number) =>
+      experienceId === 1 ? first.promise : second.promise
+    );
+    const { wrapper } = queryWrapper();
+    const { result } = renderHook(
+      () => ({
+        first: usePatchExperienceMutation(1),
+        second: usePatchExperienceMutation(2),
+      }),
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.first.mutate({ title: 'First' });
+      result.current.second.mutate({ title: 'Second' });
+    });
+
+    await waitFor(() => expect(api.patchExperience).toHaveBeenCalledTimes(2));
+    first.resolve(detail({ title: 'First' }));
+    second.resolve(detail({ experience_id: 2, title: 'Second' }));
+  });
+
+  it('writes an authoritative mutation response into detail and list caches without refetching', async () => {
+    const updated = detail({ title: 'Saved title', updated_at: '2025-01-06T00:00:00Z' });
+    api.patchExperience.mockResolvedValue(updated);
+    const { client, wrapper } = queryWrapper();
+    client.setQueryData(experienceKeys.list('active'), list([detail()]));
+    const { result } = renderHook(() => usePatchExperienceMutation(1), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({ title: 'Saved title' });
+    });
+
+    expect(client.getQueryData<ExperienceDetail>(experienceKeys.detail(1))?.title).toBe(
+      'Saved title'
+    );
+    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title).toBe(
+      'Saved title'
+    );
+    expect(api.fetchExperience).not.toHaveBeenCalled();
+  });
+
+  it('shares one creation queue and pending state between manual create and text import', async () => {
+    const manual = deferred<ExperienceDetail>();
+    api.createExperience.mockReturnValue(manual.promise);
+    api.importExperienceText.mockResolvedValue(
+      detail({ experience_id: 2, title: 'Imported', raw_input: 'Imported text' })
+    );
+    const { wrapper } = queryWrapper();
+    const { result } = renderHook(
+      () => ({
+        create: useCreateExperienceMutation(),
+        importText: useImportExperienceMutation(),
+        creationPending: useExperienceCreationPending(),
+      }),
+      { wrapper }
+    );
+
+    act(() => {
+      result.current.create.mutate({});
+      result.current.importText.mutate('Imported text');
+    });
+
+    await waitFor(() => expect(result.current.creationPending).toBe(true));
+    expect(api.importExperienceText).not.toHaveBeenCalled();
+    manual.resolve(detail());
+    await waitFor(() => expect(api.importExperienceText).toHaveBeenCalledWith('Imported text'));
   });
 });
