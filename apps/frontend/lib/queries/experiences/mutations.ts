@@ -1,4 +1,9 @@
-import { useIsMutating, useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  useIsMutating,
+  useMutation,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query';
 import {
   archiveExperience,
   createEvidence,
@@ -16,6 +21,7 @@ import {
   type EvidenceCreate,
   type EvidenceUpdate,
   type ExperienceCreate,
+  type ExperienceListResponse,
   type ExperienceUpdate,
 } from '@/lib/api/experiences';
 import { removeExperienceFromCache, writeExperienceDetail } from './cache';
@@ -38,13 +44,32 @@ export function useExperienceCreationPending(): boolean {
   return useIsMutating({ mutationKey: experienceMutationKeys.creation() }) > 0;
 }
 
+async function storeAuthoritativeDetail(
+  client: QueryClient,
+  detail: Parameters<typeof writeExperienceDetail>[1]
+): Promise<void> {
+  await client.cancelQueries({ queryKey: experienceKeys.all });
+  writeExperienceDetail(client, detail);
+}
+
+async function storeCreatedDetail(
+  client: QueryClient,
+  detail: Parameters<typeof writeExperienceDetail>[1]
+): Promise<void> {
+  await storeAuthoritativeDetail(client, detail);
+  const activeKey = experienceKeys.list('active');
+  if (!client.getQueryData(activeKey)) {
+    client.setQueryData<ExperienceListResponse>(activeKey, { items: [detail], total: 1 });
+  }
+}
+
 export function useCreateExperienceMutation() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: experienceMutationKeys.creation(),
     mutationFn: (payload: ExperienceCreate) => createExperience(payload),
     scope: { id: EXPERIENCE_CREATION_SCOPE },
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeCreatedDetail(client, detail),
   });
 }
 
@@ -54,7 +79,7 @@ export function useImportExperienceMutation() {
     mutationKey: experienceMutationKeys.creation(),
     mutationFn: (text: string) => importExperienceText(text),
     scope: { id: EXPERIENCE_CREATION_SCOPE },
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeCreatedDetail(client, detail),
   });
 }
 
@@ -64,7 +89,7 @@ export function usePatchExperienceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'patch'),
     mutationFn: (payload: ExperienceUpdate) => patchExperience(experienceId, payload),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -74,7 +99,7 @@ export function useCreateEvidenceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-create'),
     mutationFn: (payload: EvidenceCreate) => createEvidence(experienceId, payload),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -85,7 +110,7 @@ export function usePatchEvidenceMutation(experienceId: number) {
     mutationFn: ({ evidenceId, payload }: { evidenceId: number; payload: EvidenceUpdate }) =>
       patchEvidence(experienceId, evidenceId, payload),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -95,7 +120,7 @@ export function useDeleteEvidenceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-delete'),
     mutationFn: (evidenceId: number) => deleteEvidence(experienceId, evidenceId),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -105,7 +130,7 @@ export function useReorderEvidenceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-reorder'),
     mutationFn: (evidenceIds: number[]) => reorderEvidence(experienceId, evidenceIds),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -124,7 +149,7 @@ export function useSubmitExperienceAnswerMutation(experienceId: number) {
     mutationFn: (payload: Parameters<typeof submitExperienceAnswer>[1]) =>
       submitExperienceAnswer(experienceId, payload),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -134,7 +159,7 @@ export function useMarkExperienceReadyMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'ready'),
     mutationFn: () => markExperienceReady(experienceId),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => writeExperienceDetail(client, detail),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
 }
 
@@ -144,8 +169,8 @@ export function useArchiveExperienceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'archive'),
     mutationFn: () => archiveExperience(experienceId),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => {
-      writeExperienceDetail(client, detail);
+    onSuccess: async (detail) => {
+      await storeAuthoritativeDetail(client, detail);
       client.removeQueries({
         queryKey: experienceKeys.deletionImpact(experienceId),
         exact: true,
@@ -160,8 +185,8 @@ export function useRestoreExperienceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'restore'),
     mutationFn: () => restoreExperience(experienceId),
     scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => {
-      writeExperienceDetail(client, detail);
+    onSuccess: async (detail) => {
+      await storeAuthoritativeDetail(client, detail);
       client.removeQueries({
         queryKey: experienceKeys.deletionImpact(experienceId),
         exact: true,
@@ -176,6 +201,9 @@ export function usePermanentDeleteExperienceMutation(experienceId: number) {
     mutationKey: experienceMutationKeys.item(experienceId, 'permanent-delete'),
     mutationFn: () => deleteExperiencePermanently(experienceId),
     scope: experienceMutationScope(experienceId),
-    onSuccess: () => removeExperienceFromCache(client, experienceId),
+    onSuccess: async () => {
+      await client.cancelQueries({ queryKey: experienceKeys.all });
+      removeExperienceFromCache(client, experienceId);
+    },
   });
 }

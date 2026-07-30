@@ -1,6 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -10,20 +9,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  deleteExperiencePermanently,
-  getDeletionImpact,
-  type DeletionImpactResponse,
-} from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import { usePermanentDeleteExperienceMutation } from '@/lib/queries/experiences/mutations';
+import { useDeletionImpact } from '@/lib/queries/experiences/queries';
 
 interface PermanentDeleteDialogProps {
   experienceId: number | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDeleted: (experienceId: number) => void;
-  onMutationStart: (experienceId: number) => void;
-  onSubmittingChange: (submitting: boolean) => void;
 }
 
 export function PermanentDeleteDialog({
@@ -31,47 +25,22 @@ export function PermanentDeleteDialog({
   open,
   onOpenChange,
   onDeleted,
-  onMutationStart,
-  onSubmittingChange,
 }: PermanentDeleteDialogProps) {
   const { t } = useTranslations();
-  const [impact, setImpact] = useState<DeletionImpactResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (!open || experienceId === null) return;
-    let active = true;
-    setImpact(null);
-    setError(null);
-    void getDeletionImpact(experienceId)
-      .then((value) => {
-        if (active) setImpact(value);
-      })
-      .catch((reason) => {
-        if (active)
-          setError(reason instanceof Error ? reason.message : t('experiences.permanent.error'));
-      });
-    return () => {
-      active = false;
-    };
-  }, [experienceId, open, t]);
+  const impactQuery = useDeletionImpact(experienceId, open);
+  const deleteMutation = usePermanentDeleteExperienceMutation(experienceId ?? 0);
+  const impact = impactQuery.data ?? null;
+  const error = impactQuery.error ?? deleteMutation.error;
+  const submitting = deleteMutation.isPending;
 
   const remove = async () => {
     if (experienceId === null || !impact || submitting) return;
-    setSubmitting(true);
-    onSubmittingChange(true);
-    setError(null);
-    onMutationStart(experienceId);
     try {
-      await deleteExperiencePermanently(experienceId);
+      await deleteMutation.mutateAsync();
       onDeleted(experienceId);
       onOpenChange(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t('experiences.permanent.error'));
-    } finally {
-      setSubmitting(false);
-      onSubmittingChange(false);
+    } catch {
+      // Mutation error remains visible and retryable in this dialog.
     }
   };
 
@@ -83,7 +52,7 @@ export function PermanentDeleteDialog({
           <DialogDescription>{t('experiences.permanent.description')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-3 px-6 pb-4 text-sm">
-          {!impact && !error && <p>{t('experiences.permanent.loadingImpact')}</p>}
+          {impactQuery.isPending && <p>{t('experiences.permanent.loadingImpact')}</p>}
           {impact && (
             <>
               <p>
@@ -106,7 +75,11 @@ export function PermanentDeleteDialog({
               {impact.affected_resumes.length > 0 && <p>{impact.affected_resumes.join(', ')}</p>}
             </>
           )}
-          {error && <p className="font-mono text-xs text-destructive">{error}</p>}
+          {error && (
+            <p className="font-mono text-xs text-destructive">
+              {error instanceof Error ? error.message : t('experiences.permanent.error')}
+            </p>
+          )}
         </div>
         <DialogFooter className="border-t border-black bg-secondary p-4">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>

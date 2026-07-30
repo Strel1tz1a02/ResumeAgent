@@ -13,8 +13,12 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { importExperienceText, type ExperienceDetail } from '@/lib/api/experiences';
+import type { ExperienceDetail } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import {
+  useExperienceCreationPending,
+  useImportExperienceMutation,
+} from '@/lib/queries/experiences/mutations';
 
 interface TextImportDialogProps {
   open: boolean;
@@ -25,28 +29,25 @@ interface TextImportDialogProps {
 export function TextImportDialog({ open, onOpenChange, onImported }: TextImportDialogProps) {
   const { t } = useTranslations();
   const [text, setText] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const importMutation = useImportExperienceMutation();
+  const creationPending = useExperienceCreationPending();
+  const resetImport = importMutation.reset;
 
   useEffect(() => {
     if (!open) {
       setText('');
-      setError(null);
+      resetImport();
     }
-  }, [open]);
+  }, [open, resetImport]);
 
   const handleSubmit = async () => {
     if (!text.trim()) return;
-    setSubmitting(true);
-    setError(null);
     try {
-      const experience = await importExperienceText(text);
+      const experience = await importMutation.mutateAsync(text);
       onImported(experience);
       onOpenChange(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t('experiences.import.error'));
-    } finally {
-      setSubmitting(false);
+    } catch {
+      // Mutation error is rendered below and remains retryable.
     }
   };
 
@@ -69,16 +70,22 @@ export function TextImportDialog({ open, onOpenChange, onImported }: TextImportD
             onChange={(event) => setText(event.target.value)}
             onKeyDown={handleTextKeyDown}
             rows={12}
-            disabled={submitting}
+            disabled={creationPending}
           />
-          {error && <p className="font-mono text-xs text-destructive">{error}</p>}
+          {importMutation.error && (
+            <p className="font-mono text-xs text-destructive">
+              {importMutation.error instanceof Error
+                ? importMutation.error.message
+                : t('experiences.import.error')}
+            </p>
+          )}
         </div>
         <DialogFooter className="mt-6 gap-2">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creationPending}>
             {t('experiences.import.cancel')}
           </Button>
-          <Button onClick={handleSubmit} disabled={submitting || !text.trim()}>
-            {submitting ? (
+          <Button onClick={handleSubmit} disabled={creationPending || !text.trim()}>
+            {importMutation.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               t('experiences.import.submit')

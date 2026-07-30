@@ -10,6 +10,7 @@ export function useExperienceList(view: ExperienceLibraryView) {
   return useQuery({
     queryKey: experienceKeys.list(view),
     queryFn: ({ signal }) => listExperiences({ status: view }, signal),
+    staleTime: Infinity,
   });
 }
 
@@ -18,6 +19,7 @@ export function useExperienceDetail(experienceId: number | null) {
     queryKey: experienceKeys.detail(experienceId ?? 'none'),
     queryFn: ({ signal }) => fetchExperience(experienceId as number, signal),
     enabled: experienceId !== null,
+    staleTime: Infinity,
   });
 }
 
@@ -26,5 +28,6 @@ export function useDeletionImpact(experienceId: number | null, enabled: boolean)
     queryKey: experienceKeys.deletionImpact(experienceId ?? 'none'),
     queryFn: ({ signal }) => getDeletionImpact(experienceId as number, signal),
     enabled: enabled && experienceId !== null,
+    staleTime: Infinity,
   });
 }

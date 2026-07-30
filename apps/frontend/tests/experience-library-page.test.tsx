@@ -227,6 +227,46 @@ describe('ExperienceLibraryPage', () => {
     );
   });
 
+  it('disables both creation entry points while either creation mutation is pending', async () => {
+    const pending = deferred<ExperienceDetail>();
+    api.createExperience.mockReturnValue(pending.promise);
+    render(<ExperienceLibraryPage />);
+    await screen.findAllByText('Searchable project');
+
+    fireEvent.click(screen.getByRole('button', { name: 'New experience' }));
+    await waitFor(() => expect(api.createExperience).toHaveBeenCalledWith({}));
+
+    expect(screen.getByRole('button', { name: 'Import' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Creating' })).toBeDisabled();
+    pending.resolve(imported);
+    await screen.findAllByText('Imported experience');
+  });
+
+  it('aborts the obsolete list request when switching library views', async () => {
+    const active = deferred<{ items: ExperienceRead[]; total: number }>();
+    let activeSignal: AbortSignal | undefined;
+    api.listExperiences.mockImplementation(
+      (query: { status?: string }, signal?: AbortSignal) => {
+        if (query.status === 'active') {
+          activeSignal = signal;
+          return active.promise;
+        }
+        return Promise.resolve({ items: [], total: 0 });
+      }
+    );
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Recycle bin' }));
+    await waitFor(() =>
+      expect(api.listExperiences).toHaveBeenCalledWith(
+        { status: 'archived' },
+        expect.any(AbortSignal)
+      )
+    );
+
+    expect(activeSignal?.aborted).toBe(true);
+  });
+
   it('filters the active list by query and kind', async () => {
     const volunteer = {
       ...listItem,
@@ -849,7 +889,7 @@ describe('ExperienceLibraryPage', () => {
     const archive = await screen.findByRole('button', { name: 'Archive experience' });
     fireEvent.click(archive);
     fireEvent.click(archive);
-    expect(api.archiveExperience).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.archiveExperience).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
     await screen.findByRole('heading', { name: 'Second experience' });
     pendingArchive.resolve({
@@ -862,6 +902,7 @@ describe('ExperienceLibraryPage', () => {
     });
 
     expect(await screen.findByRole('heading', { name: 'Second experience' })).toBeInTheDocument();
+    expect(api.archiveExperience).toHaveBeenCalledTimes(1);
   });
 
   it('preserves a dirty evidence card through an unrelated metadata save and still guards navigation', async () => {

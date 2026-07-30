@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import Plus from 'lucide-react/dist/esm/icons/plus';
 import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left';
@@ -9,20 +10,28 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dropdown } from '@/components/ui/dropdown';
 import { Input } from '@/components/ui/input';
-import {
-  archiveExperience,
-  createExperience,
-  fetchExperience,
-  markExperienceReady,
-  restoreExperience,
-  type ExperienceDetail,
-  type ExperienceKind,
-  type ExperienceRead,
-  type ExperienceReadyConflictError,
-  listExperiences,
+import type {
+  ExperienceDetail,
+  ExperienceKind,
+  ExperienceRead,
+  ExperienceReadyConflictError,
 } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import { writeExperienceDetail } from '@/lib/queries/experiences/cache';
+import { experienceKeys } from '@/lib/queries/experiences/keys';
+import {
+  useArchiveExperienceMutation,
+  useCreateExperienceMutation,
+  useExperienceCreationPending,
+  useMarkExperienceReadyMutation,
+  useRestoreExperienceMutation,
+  experienceMutationKeys,
+} from '@/lib/queries/experiences/mutations';
 import { ExperienceQueryProvider } from '@/lib/queries/experiences/provider';
+import {
+  useExperienceDetail,
+  useExperienceList,
+} from '@/lib/queries/experiences/queries';
 import { CompletenessPanel } from './completeness-panel';
 import { EvidenceListEditor } from './evidence-list-editor';
 import { ExperienceEditor } from './experience-editor';
@@ -64,26 +73,14 @@ function filterExperiences(
   });
 }
 
-function isOlderDetail(current: ExperienceDetail | null, next: ExperienceDetail): boolean {
-  return Boolean(
-    current &&
-    current.experience_id === next.experience_id &&
-    current.updated_at.localeCompare(next.updated_at) > 0
-  );
-}
-
 function ExperienceLibraryContent() {
   const { t } = useTranslations();
-  const [experiences, setExperiences] = useState<ExperienceRead[]>([]);
+  const queryClient = useQueryClient();
   const [selectedExperienceId, setSelectedExperienceId] = useState<number | null>(null);
-  const [selectedDetail, setSelectedDetail] = useState<ExperienceDetail | null>(null);
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<ExperienceKind | 'all'>('all');
   const [view, setView] = useState<LibraryView>('active');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
   const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
   const [metadataDirty, setMetadataDirty] = useState(false);
   const [evidenceDirty, setEvidenceDirty] = useState(false);
@@ -92,19 +89,21 @@ function ExperienceLibraryContent() {
   const [readyError, setReadyError] = useState<{ experienceId: number; message: string } | null>(
     null
   );
-  const [readySubmitting, setReadySubmitting] = useState(false);
-  const [lifecycleSubmitting, setLifecycleSubmitting] = useState<{
-    experienceId: number;
-    action: 'archive' | 'restore' | 'permanent';
-  } | null>(null);
   const [permanentExperienceId, setPermanentExperienceId] = useState<number | null>(null);
-  const isMountedRef = useRef(false);
-  const listRequestGenerationRef = useRef(0);
-  const detailRequestGenerationRef = useRef(0);
   const pendingDiscardActionRef = useRef<(() => void) | null>(null);
   const selectedExperienceIdRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
   const hasUnsavedChanges = metadataDirty || evidenceDirty;
+  const listQuery = useExperienceList(view);
+  const experiences = listQuery.data?.items ?? [];
+  const detailQuery = useExperienceDetail(selectedExperienceId);
+  const selectedDetail = detailQuery.data ?? null;
+  const mutationExperienceId = selectedDetail?.experience_id ?? selectedExperienceId ?? 0;
+  const createMutation = useCreateExperienceMutation();
+  const creationPending = useExperienceCreationPending();
+  const readyMutation = useMarkExperienceReadyMutation(mutationExperienceId);
+  const archiveMutation = useArchiveExperienceMutation(mutationExperienceId);
+  const restoreMutation = useRestoreExperienceMutation(mutationExperienceId);
 
   useEffect(() => {
     selectedExperienceIdRef.current = selectedExperienceId;
@@ -115,73 +114,21 @@ function ExperienceLibraryContent() {
   }, [hasUnsavedChanges]);
 
   useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-      listRequestGenerationRef.current += 1;
-      detailRequestGenerationRef.current += 1;
+    if (!listQuery.data) return;
+    const currentId = selectedExperienceIdRef.current;
+    if (listQuery.data.items.some((item) => item.experience_id === currentId)) return;
+    const replacementId = listQuery.data.items[0]?.experience_id ?? null;
+    const selectReplacement = () => {
+      selectedExperienceIdRef.current = replacementId;
+      setSelectedExperienceId(replacementId);
     };
-  }, []);
-
-  const loadExperiences = useCallback(
-    async (targetView = view) => {
-      const requestGeneration = ++listRequestGenerationRef.current;
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await listExperiences({ status: targetView });
-        if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
-        setExperiences(response.items);
-        const currentId = selectedExperienceIdRef.current;
-        if (response.items.some((item) => item.experience_id === currentId)) return;
-        const replacementId = response.items[0]?.experience_id ?? null;
-        const selectReplacement = () => {
-          selectedExperienceIdRef.current = replacementId;
-          detailRequestGenerationRef.current += 1;
-          setSelectedExperienceId(replacementId);
-          setSelectedDetail(null);
-        };
-        if (currentId !== null && dirtyRef.current) {
-          pendingDiscardActionRef.current = selectReplacement;
-          setDiscardDialogOpen(true);
-        } else {
-          selectReplacement();
-        }
-      } catch (reason) {
-        if (!isMountedRef.current || requestGeneration !== listRequestGenerationRef.current) return;
-        setError(reason instanceof Error ? reason.message : t('experiences.error'));
-      } finally {
-        if (isMountedRef.current && requestGeneration === listRequestGenerationRef.current)
-          setLoading(false);
-      }
-    },
-    [t, view]
-  );
-
-  useEffect(() => {
-    void loadExperiences(view);
-  }, [loadExperiences, view]);
-
-  useEffect(() => {
-    if (selectedExperienceId === null) {
-      setSelectedDetail(null);
-      return;
+    if (currentId !== null && dirtyRef.current) {
+      pendingDiscardActionRef.current = selectReplacement;
+      setDiscardDialogOpen(true);
+    } else {
+      selectReplacement();
     }
-    const requestGeneration = ++detailRequestGenerationRef.current;
-    void fetchExperience(selectedExperienceId)
-      .then((detail) => {
-        if (
-          !isMountedRef.current ||
-          requestGeneration !== detailRequestGenerationRef.current ||
-          detail.experience_id !== selectedExperienceIdRef.current
-        )
-          return;
-        setSelectedDetail(detail);
-      })
-      .catch(() => {
-        // The list item remains usable if a detail refresh races or fails.
-      });
-  }, [selectedExperienceId]);
+  }, [listQuery.data]);
 
   const filteredExperiences = useMemo(
     () => filterExperiences(experiences, query, kind),
@@ -229,27 +176,18 @@ function ExperienceLibraryContent() {
   }, [hasUnsavedChanges]);
 
   const replaceDetail = useCallback((detail: ExperienceDetail) => {
-    setExperiences((current) =>
-      current.map((item) => (item.experience_id === detail.experience_id ? detail : item))
-    );
-    setSelectedDetail((current) =>
-      selectedExperienceIdRef.current === detail.experience_id && !isOlderDetail(current, detail)
-        ? detail
-        : current
-    );
+    writeExperienceDetail(queryClient, detail);
     setReadyError((current) => (current?.experienceId === detail.experience_id ? null : current));
-  }, []);
+  }, [queryClient]);
 
   const invalidateDetailRequest = useCallback((experienceId: number) => {
-    if (selectedExperienceIdRef.current === experienceId) detailRequestGenerationRef.current += 1;
-  }, []);
+    void queryClient.cancelQueries({ queryKey: experienceKeys.detail(experienceId), exact: true });
+  }, [queryClient]);
 
   const selectExperience = useCallback((experienceId: number | null) => {
     selectedExperienceIdRef.current = experienceId;
-    detailRequestGenerationRef.current += 1;
     setSelectedExperienceId(experienceId);
     setReadyError(null);
-    if (experienceId === null) setSelectedDetail(null);
   }, []);
 
   const discardThen = (action: () => void) => {
@@ -292,37 +230,23 @@ function ExperienceLibraryContent() {
   };
 
   const handleImported = (experience: ExperienceDetail) => {
-    listRequestGenerationRef.current += 1;
-    setLoading(false);
-    setError(null);
     setQuery('');
     setKind('all');
     setView('active');
-    setExperiences((current) => {
-      const index = current.findIndex((item) => item.experience_id === experience.experience_id);
-      return index === -1
-        ? [experience, ...current]
-        : current.map((item) =>
-            item.experience_id === experience.experience_id ? experience : item
-          );
-    });
     selectExperience(experience.experience_id);
-    setSelectedDetail(experience);
     setMobilePane('detail');
   };
 
   const handleCreate = async () => {
-    if (creating) return;
-    setCreating(true);
-    setError(null);
+    if (
+      creationPending ||
+      queryClient.isMutating({ mutationKey: experienceMutationKeys.creation(), exact: true }) > 0
+    )
+      return;
     try {
-      handleImported(await createExperience({}));
-    } catch (reason) {
-      if (isMountedRef.current) {
-        setError(reason instanceof Error ? reason.message : t('experiences.error'));
-      }
-    } finally {
-      if (isMountedRef.current) setCreating(false);
+      handleImported(await createMutation.mutateAsync({}));
+    } catch {
+      // The mutation exposes its localized error surface below.
     }
   };
 
@@ -338,7 +262,6 @@ function ExperienceLibraryContent() {
     discardThen(() => {
       setView(nextView);
       selectExperience(null);
-      setSelectedDetail(null);
       setMobilePane('list');
       if (moveFocus) document.getElementById(`experience-view-${nextView}-tab`)?.focus();
     });
@@ -357,19 +280,25 @@ function ExperienceLibraryContent() {
   };
 
   const handleReady = async () => {
-    if (!selectedDetail || readySubmitting) return;
+    if (!selectedDetail) return;
     const targetId = selectedDetail.experience_id;
-    invalidateDetailRequest(targetId);
-    setReadySubmitting(true);
+    if (
+      readyMutation.isPending ||
+      queryClient.isMutating({
+        mutationKey: experienceMutationKeys.item(targetId, 'ready'),
+        exact: true,
+      }) > 0
+    )
+      return;
     setReadyError(null);
     try {
-      replaceDetail(await markExperienceReady(targetId));
+      await readyMutation.mutateAsync();
     } catch (reason) {
       if (selectedExperienceIdRef.current !== targetId) return;
       const conflict = reason as ExperienceReadyConflictError;
       if (conflict?.conflict) {
-        setSelectedDetail((current) =>
-          current?.experience_id === targetId
+        queryClient.setQueryData<ExperienceDetail>(experienceKeys.detail(targetId), (current) =>
+          current
             ? {
                 ...current,
                 completeness: conflict.conflict.completeness,
@@ -390,21 +319,22 @@ function ExperienceLibraryContent() {
           message: reason instanceof Error ? reason.message : t('experiences.ready.error'),
         });
       }
-    } finally {
-      setReadySubmitting(false);
     }
   };
 
   const archive = async () => {
-    if (!selectedDetail || lifecycleSubmitting) return;
+    if (!selectedDetail) return;
     const targetId = selectedDetail.experience_id;
-    invalidateDetailRequest(targetId);
-    setLifecycleSubmitting({ experienceId: targetId, action: 'archive' });
+    if (
+      archiveMutation.isPending ||
+      queryClient.isMutating({
+        mutationKey: experienceMutationKeys.item(targetId, 'archive'),
+        exact: true,
+      }) > 0
+    )
+      return;
     try {
-      const archived = await archiveExperience(targetId);
-      setExperiences((current) =>
-        current.filter((item) => item.experience_id !== archived.experience_id)
-      );
+      await archiveMutation.mutateAsync();
       if (selectedExperienceIdRef.current === targetId) {
         selectExperience(null);
         setMobilePane('list');
@@ -416,21 +346,22 @@ function ExperienceLibraryContent() {
           message: reason instanceof Error ? reason.message : t('experiences.lifecycle.error'),
         });
       }
-    } finally {
-      setLifecycleSubmitting(null);
     }
   };
 
   const restore = async () => {
-    if (!selectedDetail || lifecycleSubmitting) return;
+    if (!selectedDetail) return;
     const targetId = selectedDetail.experience_id;
-    invalidateDetailRequest(targetId);
-    setLifecycleSubmitting({ experienceId: targetId, action: 'restore' });
+    if (
+      restoreMutation.isPending ||
+      queryClient.isMutating({
+        mutationKey: experienceMutationKeys.item(targetId, 'restore'),
+        exact: true,
+      }) > 0
+    )
+      return;
     try {
-      const restored = await restoreExperience(targetId);
-      setExperiences((current) =>
-        current.filter((item) => item.experience_id !== restored.experience_id)
-      );
+      await restoreMutation.mutateAsync();
       if (selectedExperienceIdRef.current === targetId) {
         selectExperience(null);
         setMobilePane('list');
@@ -442,13 +373,10 @@ function ExperienceLibraryContent() {
           message: reason instanceof Error ? reason.message : t('experiences.lifecycle.error'),
         });
       }
-    } finally {
-      setLifecycleSubmitting(null);
     }
   };
 
   const handleDeletedPermanently = (experienceId: number) => {
-    setExperiences((current) => current.filter((item) => item.experience_id !== experienceId));
     if (selectedExperienceIdRef.current === experienceId) {
       selectExperience(null);
       setMobilePane('list');
@@ -482,18 +410,25 @@ function ExperienceLibraryContent() {
             </h1>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => void loadExperiences()} disabled={loading}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                void listQuery.refetch();
+                if (selectedExperienceId !== null) void detailQuery.refetch();
+              }}
+              disabled={listQuery.isFetching}
+            >
               {t('experiences.refresh')}
             </Button>
             <Button
               variant="outline"
               onClick={() => discardThen(() => void handleCreate())}
-              disabled={creating}
+              disabled={creationPending}
             >
               <Plus className="h-4 w-4" />
-              {creating ? t('experiences.creating') : t('experiences.create')}
+              {createMutation.isPending ? t('experiences.creating') : t('experiences.create')}
             </Button>
-            <Button onClick={() => setImportOpen(true)}>
+            <Button onClick={() => setImportOpen(true)} disabled={creationPending}>
               <Plus className="h-4 w-4" />
               {t('experiences.import')}
             </Button>
@@ -552,7 +487,7 @@ function ExperienceLibraryContent() {
             ]}
           />
         </div>
-        {loading && experiences.length === 0 ? (
+        {listQuery.isPending && experiences.length === 0 ? (
           <div className="flex min-h-80 items-center justify-center gap-3 p-8 font-mono text-sm uppercase">
             <Loader2 className="h-5 w-5 animate-spin" /> {t('experiences.loading')}
           </div>
@@ -567,10 +502,10 @@ function ExperienceLibraryContent() {
               data-testid="experience-list-pane"
               className={`${mobilePane === 'list' ? 'block' : 'hidden'} border-b border-black p-4 md:block md:border-b-0 md:border-r md:p-6`}
             >
-              {error && (
+              {(listQuery.error || createMutation.error) && (
                 <div className="mb-4 flex items-center justify-between gap-3 border border-destructive bg-red-50 p-3">
                   <p className="font-mono text-xs text-destructive">{t('experiences.error')}</p>
-                  <Button size="sm" variant="outline" onClick={() => void loadExperiences()}>
+                  <Button size="sm" variant="outline" onClick={() => void listQuery.refetch()}>
                     {t('experiences.retry')}
                   </Button>
                 </div>
@@ -647,7 +582,7 @@ function ExperienceLibraryContent() {
                       <CompletenessPanel
                         experience={selectedDetail}
                         onMarkReady={() => void handleReady()}
-                        submitting={readySubmitting}
+                        submitting={readyMutation.isPending}
                         error={
                           readyError?.experienceId === selectedDetail.experience_id
                             ? readyError.message
@@ -658,7 +593,7 @@ function ExperienceLibraryContent() {
                         <Button
                           variant="destructive"
                           onClick={() => void archive()}
-                          disabled={Boolean(lifecycleSubmitting)}
+                          disabled={archiveMutation.isPending}
                         >
                           {t('experiences.lifecycle.archive')}
                         </Button>
@@ -666,14 +601,14 @@ function ExperienceLibraryContent() {
                         <div className="flex flex-wrap gap-2">
                           <Button
                             onClick={() => void restore()}
-                            disabled={Boolean(lifecycleSubmitting)}
+                            disabled={restoreMutation.isPending}
                           >
                             {t('experiences.lifecycle.restore')}
                           </Button>
                           <Button
                             variant="destructive"
                             onClick={() => setPermanentExperienceId(selectedDetail.experience_id)}
-                            disabled={Boolean(lifecycleSubmitting)}
+                            disabled={restoreMutation.isPending}
                           >
                             {t('experiences.lifecycle.permanent')}
                           </Button>
@@ -726,14 +661,6 @@ function ExperienceLibraryContent() {
           if (!open) setPermanentExperienceId(null);
         }}
         onDeleted={handleDeletedPermanently}
-        onMutationStart={invalidateDetailRequest}
-        onSubmittingChange={(submitting) => {
-          setLifecycleSubmitting(
-            submitting && permanentExperienceId !== null
-              ? { experienceId: permanentExperienceId, action: 'permanent' }
-              : null
-          );
-        }}
       />
     </main>
   );
