@@ -71,12 +71,23 @@ export async function apiFetch(
   // must agree or the shortest aborts first).
   const timeout = timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const callerSignal = options?.signal;
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeout);
 
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (timedOut && error instanceof Error && error.name === 'AbortError') {
       throw new Error(
         'Request timed out. If you are running a local LLM, increase NEXT_PUBLIC_REQUEST_TIMEOUT_MS (and the backend REQUEST_TIMEOUT_SECONDS to match); otherwise try a shorter job description or check your connection.'
       );
@@ -84,6 +95,7 @@ export async function apiFetch(
     throw error;
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', abortFromCaller);
   }
 }
 

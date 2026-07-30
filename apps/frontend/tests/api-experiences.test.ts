@@ -82,6 +82,29 @@ describe('experience API client', () => {
     expect(options.method).toBeUndefined();
   });
 
+  it('forwards caller cancellation to list, detail, and deletion-impact reads', async () => {
+    const controller = new AbortController();
+    controller.abort('obsolete query');
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ items: [experience], total: 1 }), { status: 200 })
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(experience), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ affected_matches: [], affected_resumes: [] }), {
+          status: 200,
+        })
+      );
+
+    await listExperiences({ status: 'active' }, controller.signal);
+    await fetchExperience(7, controller.signal);
+    await getDeletionImpact(7, controller.signal);
+
+    expect(fetchMock.mock.calls.map(([, options]) => (options as RequestInit).signal?.aborted)).toEqual(
+      [true, true, true]
+    );
+  });
+
   it('imports exact raw text through the central API path', async () => {
     await expect(importExperienceText('Built an agent')).resolves.toEqual(experience);
 

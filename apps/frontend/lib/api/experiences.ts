@@ -176,7 +176,8 @@ function experiencePath(experienceId: number): string {
 }
 
 export async function listExperiences(
-  query: ExperienceListQuery = {}
+  query: ExperienceListQuery = {},
+  signal?: AbortSignal
 ): Promise<ExperienceListResponse> {
   const params = new URLSearchParams();
   if (query.q) params.set('q', query.q);
@@ -185,7 +186,7 @@ export async function listExperiences(
   if (query.sort) params.set('sort', query.sort);
   const suffix = params.size ? `?${params.toString()}` : '';
   return parseResponse<ExperienceListResponse>(
-    await apiFetch(`/experiences${suffix}`),
+    await apiFetch(`/experiences${suffix}`, signal ? { signal } : undefined),
     'Failed to load experiences'
   );
 }
@@ -204,9 +205,12 @@ export async function createExperience(payload: ExperienceCreate): Promise<Exper
   );
 }
 
-export async function fetchExperience(experienceId: number): Promise<ExperienceDetail> {
+export async function fetchExperience(
+  experienceId: number,
+  signal?: AbortSignal
+): Promise<ExperienceDetail> {
   return parseResponse<ExperienceDetail>(
-    await apiFetch(experiencePath(experienceId)),
+    await apiFetch(experiencePath(experienceId), signal ? { signal } : undefined),
     'Failed to load experience'
   );
 }
@@ -244,9 +248,15 @@ export async function restoreExperience(experienceId: number): Promise<Experienc
   );
 }
 
-export async function getDeletionImpact(experienceId: number): Promise<DeletionImpactResponse> {
+export async function getDeletionImpact(
+  experienceId: number,
+  signal?: AbortSignal
+): Promise<DeletionImpactResponse> {
   return parseResponse<DeletionImpactResponse>(
-    await apiFetch(`${experiencePath(experienceId)}/deletion-impact`),
+    await apiFetch(
+      `${experiencePath(experienceId)}/deletion-impact`,
+      signal ? { signal } : undefined
+    ),
     'Failed to load deletion impact'
   );
 }

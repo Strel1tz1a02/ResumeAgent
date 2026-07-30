@@ -59,11 +59,30 @@ describe('api client', () => {
   });
 
   describe('timeout / error handling', () => {
-    it('maps an AbortError to a friendly timeout message', async () => {
+    it('propagates an external abort without reporting a timeout', async () => {
+      const external = new AbortController();
+      external.abort('selection changed');
+      fetchMock.mockImplementationOnce((_url: string, init: RequestInit) => {
+        expect(init.signal?.aborted).toBe(true);
+        const abortError = new Error('caller aborted');
+        abortError.name = 'AbortError';
+        return Promise.reject(abortError);
+      });
+
+      await expect(apiFetch('/detail', { signal: external.signal })).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'caller aborted',
+      });
+    });
+
+    it('does not mislabel an unrelated AbortError as a timeout', async () => {
       const abortErr = new Error('aborted');
       abortErr.name = 'AbortError';
       fetchMock.mockRejectedValueOnce(abortErr);
-      await expect(apiFetch('/slow')).rejects.toThrow(/timed out/i);
+      await expect(apiFetch('/slow')).rejects.toMatchObject({
+        name: 'AbortError',
+        message: 'aborted',
+      });
     });
 
     it('rethrows non-abort errors unchanged', async () => {
