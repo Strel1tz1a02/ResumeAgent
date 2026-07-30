@@ -103,6 +103,7 @@ vi.mock('@/lib/i18n', () => ({
 }));
 
 import { ExperienceLibraryPage } from '@/components/experiences/experience-library-page';
+import { createExperienceQueryClient } from '@/lib/queries/experiences/provider';
 
 const listItem: ExperienceRead = {
   experience_id: 1,
@@ -161,6 +162,20 @@ describe('ExperienceLibraryPage', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('provides a route-scoped query client with safe request defaults', async () => {
+    const client = createExperienceQueryClient();
+
+    expect(client.getDefaultOptions().queries).toMatchObject({
+      retry: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    });
+    expect(client.getDefaultOptions().mutations).toMatchObject({ retry: false });
+
+    render(<ExperienceLibraryPage />);
+    expect((await screen.findAllByText('Searchable project')).length).toBeGreaterThan(0);
   });
 
   it('shows a loading state before the experience list resolves', () => {

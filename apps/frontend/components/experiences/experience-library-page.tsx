@@ -22,6 +22,7 @@ import {
   listExperiences,
 } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import { ExperienceQueryProvider } from '@/lib/queries/experiences/provider';
 import { CompletenessPanel } from './completeness-panel';
 import { EvidenceListEditor } from './evidence-list-editor';
 import { ExperienceEditor } from './experience-editor';
@@ -71,7 +72,7 @@ function isOlderDetail(current: ExperienceDetail | null, next: ExperienceDetail)
   );
 }
 
-export function ExperienceLibraryPage() {
+function ExperienceLibraryContent() {
   const { t } = useTranslations();
   const [experiences, setExperiences] = useState<ExperienceRead[]>([]);
   const [selectedExperienceId, setSelectedExperienceId] = useState<number | null>(null);
@@ -735,5 +736,13 @@ export function ExperienceLibraryPage() {
         }}
       />
     </main>
+  );
+}
+
+export function ExperienceLibraryPage() {
+  return (
+    <ExperienceQueryProvider>
+      <ExperienceLibraryContent />
+    </ExperienceQueryProvider>
   );
 }
