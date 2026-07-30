@@ -245,15 +245,13 @@ describe('ExperienceLibraryPage', () => {
   it('aborts the obsolete list request when switching library views', async () => {
     const active = deferred<{ items: ExperienceRead[]; total: number }>();
     let activeSignal: AbortSignal | undefined;
-    api.listExperiences.mockImplementation(
-      (query: { status?: string }, signal?: AbortSignal) => {
-        if (query.status === 'active') {
-          activeSignal = signal;
-          return active.promise;
-        }
-        return Promise.resolve({ items: [], total: 0 });
+    api.listExperiences.mockImplementation((query: { status?: string }, signal?: AbortSignal) => {
+      if (query.status === 'active') {
+        activeSignal = signal;
+        return active.promise;
       }
-    );
+      return Promise.resolve({ items: [], total: 0 });
+    });
     render(<ExperienceLibraryPage />);
 
     fireEvent.click(screen.getByRole('tab', { name: 'Recycle bin' }));
@@ -953,6 +951,52 @@ describe('ExperienceLibraryPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('serializes metadata and evidence saves through the shared experience mutation scope', async () => {
+    const pendingMetadata = deferred<ExperienceDetail>();
+    const withEvidence: ExperienceDetail = {
+      ...listItem,
+      evidence_ids: [7],
+      evidence_items: [
+        {
+          id: 7,
+          action: 'Original action',
+          result: null,
+          metrics: null,
+          created_at: '2025-01-01T00:00:00Z',
+          updated_at: '2025-01-01T00:00:00Z',
+        },
+      ],
+      missing_dimensions: ['result'],
+      suggested_questions: ['What changed?'],
+    };
+    api.fetchExperience.mockResolvedValue(withEvidence);
+    api.patchExperience.mockReturnValue(pendingMetadata.promise);
+    api.patchEvidence.mockResolvedValue({
+      ...withEvidence,
+      updated_at: '2025-01-04T00:00:00Z',
+      evidence_items: [{ ...withEvidence.evidence_items[0], action: 'Edited action' }],
+    });
+    render(<ExperienceLibraryPage />);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Edited metadata' },
+    });
+    fireEvent.change(screen.getByLabelText('Action 7'), {
+      target: { value: 'Edited action' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save experience' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save evidence' }));
+
+    await waitFor(() => expect(api.patchExperience).toHaveBeenCalledTimes(1));
+    expect(api.patchEvidence).not.toHaveBeenCalled();
+    pendingMetadata.resolve({
+      ...withEvidence,
+      title: 'Edited metadata',
+      updated_at: '2025-01-03T00:00:00Z',
+    });
+    await waitFor(() => expect(api.patchEvidence).toHaveBeenCalledTimes(1));
+  });
+
   it('preserves a dirty evidence card through mark-ready and resets it on explicit discard', async () => {
     const detail = {
       ...listItem,
@@ -1257,6 +1301,16 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(submit);
     fireEvent.click(submit);
 
+    await waitFor(() => expect(api.submitExperienceAnswer).toHaveBeenCalledTimes(1));
+    pendingAnswer.resolve({
+      ...listItem,
+      title: 'Single answer update',
+      evidence_items: [],
+      missing_dimensions: [],
+      suggested_questions: [],
+      next_question: null,
+    });
+    await screen.findByRole('heading', { name: 'Single answer update' });
     expect(api.submitExperienceAnswer).toHaveBeenCalledTimes(1);
   });
 

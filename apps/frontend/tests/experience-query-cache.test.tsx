@@ -5,10 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExperienceDetail, ExperienceListResponse } from '@/lib/api/experiences';
 import { createExperienceQueryClient } from '@/lib/queries/experiences/provider';
 import { experienceKeys } from '@/lib/queries/experiences/keys';
-import {
-  removeExperienceFromCache,
-  writeExperienceDetail,
-} from '@/lib/queries/experiences/cache';
+import { removeExperienceFromCache, writeExperienceDetail } from '@/lib/queries/experiences/cache';
 import { useExperienceDetail } from '@/lib/queries/experiences/queries';
 import {
   useCreateEvidenceMutation,
@@ -95,11 +92,7 @@ describe('experience query cache', () => {
     expect(experienceKeys.list('active')).toEqual(['experiences', 'list', 'active']);
     expect(experienceKeys.list('archived')).toEqual(['experiences', 'list', 'archived']);
     expect(experienceKeys.detail(7)).toEqual(['experiences', 'detail', 7]);
-    expect(experienceKeys.deletionImpact(7)).toEqual([
-      'experiences',
-      'deletion-impact',
-      7,
-    ]);
+    expect(experienceKeys.deletionImpact(7)).toEqual(['experiences', 'deletion-impact', 7]);
   });
 
   it('moves an authoritative detail between status lists without accepting an older version', () => {
@@ -114,10 +107,12 @@ describe('experience query cache', () => {
       detail({ title: 'Late old title', updated_at: '2025-01-03T00:00:00Z' })
     );
 
-    expect(client.getQueryData<ExperienceDetail>(experienceKeys.detail(1))?.title).toBe('New title');
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title).toBe(
+    expect(client.getQueryData<ExperienceDetail>(experienceKeys.detail(1))?.title).toBe(
       'New title'
     );
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title
+    ).toBe('New title');
 
     const archived = detail({
       status: 'archived',
@@ -127,12 +122,12 @@ describe('experience query cache', () => {
     });
     writeExperienceDetail(client, archived);
 
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items).toEqual(
-      []
-    );
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('archived'))?.items[0].title).toBe(
-      'Archived title'
-    );
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items
+    ).toEqual([]);
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('archived'))?.items[0].title
+    ).toBe('Archived title');
   });
 
   it('uses the newest detail when a late response fills a previously empty list cache', () => {
@@ -146,9 +141,9 @@ describe('experience query cache', () => {
       detail({ title: 'Late old title', updated_at: '2025-01-03T00:00:00Z' })
     );
 
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title).toBe(
-      'Newest title'
-    );
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title
+    ).toBe('Newest title');
   });
 
   it('removes every cache entry owned by a permanently deleted experience', () => {
@@ -163,9 +158,9 @@ describe('experience query cache', () => {
 
     removeExperienceFromCache(client, 1);
 
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items).toEqual(
-      []
-    );
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items
+    ).toEqual([]);
     expect(client.getQueryData(experienceKeys.detail(1))).toBeUndefined();
     expect(client.getQueryData(experienceKeys.deletionImpact(1))).toBeUndefined();
   });
@@ -268,9 +263,9 @@ describe('experience query cache', () => {
     expect(client.getQueryData<ExperienceDetail>(experienceKeys.detail(1))?.title).toBe(
       'Saved title'
     );
-    expect(client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title).toBe(
-      'Saved title'
-    );
+    expect(
+      client.getQueryData<ExperienceListResponse>(experienceKeys.list('active'))?.items[0].title
+    ).toBe('Saved title');
     expect(api.fetchExperience).not.toHaveBeenCalled();
   });
 

@@ -100,9 +100,9 @@ describe('experience API client', () => {
     await fetchExperience(7, controller.signal);
     await getDeletionImpact(7, controller.signal);
 
-    expect(fetchMock.mock.calls.map(([, options]) => (options as RequestInit).signal?.aborted)).toEqual(
-      [true, true, true]
-    );
+    expect(
+      fetchMock.mock.calls.map(([, options]) => (options as RequestInit).signal?.aborted)
+    ).toEqual([true, true, true]);
   });
 
   it('imports exact raw text through the central API path', async () => {

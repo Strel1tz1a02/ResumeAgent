@@ -5,8 +5,7 @@ export const experienceKeys = {
   lists: () => ['experiences', 'list'] as const,
   list: (view: ExperienceLibraryView) => ['experiences', 'list', view] as const,
   details: () => ['experiences', 'detail'] as const,
-  detail: (experienceId: number | 'none') =>
-    ['experiences', 'detail', experienceId] as const,
+  detail: (experienceId: number | 'none') => ['experiences', 'detail', experienceId] as const,
   deletionImpact: (experienceId: number | 'none') =>
     ['experiences', 'deletion-impact', experienceId] as const,
 };

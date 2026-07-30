@@ -4,19 +4,16 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  requestNextExperienceQuestion,
-  submitExperienceAnswer,
-  type ExperienceDetail,
-  type ExperienceEnrichmentQuestion,
-} from '@/lib/api/experiences';
+import type { ExperienceEnrichmentQuestion } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import {
+  useNextExperienceQuestionMutation,
+  useSubmitExperienceAnswerMutation,
+} from '@/lib/queries/experiences/mutations';
 
 interface ExperienceQuestionPanelProps {
   experienceId: number;
   hasUnsavedChanges: boolean;
-  onMutationStart: (experienceId: number) => void;
-  onApplied: (experience: ExperienceDetail) => void;
 }
 
 type RetryAction = 'question' | 'answer' | null;
@@ -28,82 +25,64 @@ type RetryAction = 'question' | 'answer' | null;
 export function ExperienceQuestionPanel({
   experienceId,
   hasUnsavedChanges,
-  onMutationStart,
-  onApplied,
 }: ExperienceQuestionPanelProps) {
   const { t } = useTranslations();
   const [question, setQuestion] = useState<ExperienceEnrichmentQuestion | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const [answer, setAnswer] = useState('');
-  const [pending, setPending] = useState<RetryAction>(null);
   const [retryAction, setRetryAction] = useState<RetryAction>(null);
-  const [error, setError] = useState<string | null>(null);
-  const mountedRef = useRef(true);
-  const generationRef = useRef(0);
   const dirtyRef = useRef(hasUnsavedChanges);
+  const questionMutation = useNextExperienceQuestionMutation(experienceId);
+  const answerMutation = useSubmitExperienceAnswerMutation(experienceId);
+  const pending: RetryAction = questionMutation.isPending
+    ? 'question'
+    : answerMutation.isPending
+      ? 'answer'
+      : null;
+  const error = questionMutation.error ?? answerMutation.error;
 
   useEffect(() => {
     dirtyRef.current = hasUnsavedChanges;
   }, [hasUnsavedChanges]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      generationRef.current += 1;
-    };
-  }, []);
-
-  const canUseResponse = (generation: number) =>
-    mountedRef.current && generation === generationRef.current && !dirtyRef.current;
-
-  const loadQuestion = async () => {
+  const loadQuestion = () => {
     if (pending || hasUnsavedChanges) return;
     setHasStarted(true);
-    const generation = ++generationRef.current;
-    setPending('question');
-    setError(null);
     setRetryAction(null);
-    try {
-      const nextQuestion = await requestNextExperienceQuestion(experienceId);
-      if (!canUseResponse(generation)) return;
-      setQuestion(nextQuestion);
-      setAnswer('');
-    } catch {
-      if (!canUseResponse(generation)) return;
-      setError(t('experiences.ai.error'));
-      setRetryAction('question');
-    } finally {
-      if (mountedRef.current && generation === generationRef.current) setPending(null);
-    }
+    questionMutation.mutate(undefined, {
+      onSuccess: (nextQuestion) => {
+        if (dirtyRef.current) return;
+        setQuestion(nextQuestion);
+        setAnswer('');
+      },
+      onError: () => {
+        if (!dirtyRef.current) setRetryAction('question');
+      },
+    });
   };
 
-  const submitAnswer = async () => {
+  const submitAnswer = () => {
     if (pending || hasUnsavedChanges || !question || !answer.trim()) return;
     const currentQuestion = question;
     const currentAnswer = answer.trim();
-    const generation = ++generationRef.current;
-    setPending('answer');
-    setError(null);
     setRetryAction(null);
-    onMutationStart(experienceId);
-    try {
-      const response = await submitExperienceAnswer(experienceId, {
+    answerMutation.mutate(
+      {
         question_id: currentQuestion.question_id,
         answer: currentAnswer,
         evidence_id: currentQuestion.evidence_id,
-      });
-      if (!canUseResponse(generation)) return;
-      onApplied(response);
-      setQuestion(response.next_question);
-      setAnswer('');
-    } catch {
-      if (!canUseResponse(generation)) return;
-      setError(t('experiences.ai.error'));
-      setRetryAction('answer');
-    } finally {
-      if (mountedRef.current && generation === generationRef.current) setPending(null);
-    }
+      },
+      {
+        onSuccess: (response) => {
+          if (dirtyRef.current) return;
+          setQuestion(response.next_question);
+          setAnswer('');
+        },
+        onError: () => {
+          if (!dirtyRef.current) setRetryAction('answer');
+        },
+      }
+    );
   };
 
   const retry = () => {
@@ -187,7 +166,7 @@ export function ExperienceQuestionPanel({
       )}
       {error && (
         <div className="mt-4 flex flex-wrap items-center gap-3 border border-destructive bg-red-50 p-3">
-          <p className="flex-1 font-mono text-xs text-destructive">{error}</p>
+          <p className="flex-1 font-mono text-xs text-destructive">{t('experiences.ai.error')}</p>
           <Button size="sm" variant="outline" onClick={retry} disabled={controlsDisabled}>
             {t('experiences.ai.retry')}
           </Button>

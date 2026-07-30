@@ -1,9 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import {
-  fetchExperience,
-  getDeletionImpact,
-  listExperiences,
-} from '@/lib/api/experiences';
+import { fetchExperience, getDeletionImpact, listExperiences } from '@/lib/api/experiences';
 import { experienceKeys, type ExperienceLibraryView } from './keys';
 
 export function useExperienceList(view: ExperienceLibraryView) {

@@ -5,13 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  patchExperience,
-  type ExperienceDetail,
-  type ExperienceKind,
-  type ExperienceUpdate,
-} from '@/lib/api/experiences';
+import type { ExperienceDetail, ExperienceKind, ExperienceUpdate } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
+import { usePatchExperienceMutation } from '@/lib/queries/experiences/mutations';
 
 const kinds: ExperienceKind[] = [
   'work',
@@ -41,8 +37,6 @@ interface ExperienceDraft {
 
 interface ExperienceEditorProps {
   experience: ExperienceDetail;
-  onSaved: (experience: ExperienceDetail) => void;
-  onMutationStart: (experienceId: number) => void;
   onDirtyChange: (dirty: boolean) => void;
   resetSignal: number;
 }
@@ -116,21 +110,19 @@ function explicitUpdate(draft: ExperienceDraft, expectedUpdatedAt: string): Expe
 
 export function ExperienceEditor({
   experience,
-  onSaved,
-  onMutationStart,
   onDirtyChange,
   resetSignal,
 }: ExperienceEditorProps) {
   const { t } = useTranslations();
   const [draft, setDraft] = useState(() => draftFromExperience(experience));
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const patchMutation = usePatchExperienceMutation(experience.experience_id);
   const loadedExperienceIdRef = useRef(experience.experience_id);
   const loadedResetSignalRef = useRef(resetSignal);
-  const saveGenerationRef = useRef(0);
   const baseline = useMemo(() => normalizedDraft(draftFromExperience(experience)), [experience]);
   const dirty = normalizedDraft(draft) !== baseline;
   const archived = experience.status === 'archived';
+  const saving = patchMutation.isPending;
+  const resetPatch = patchMutation.reset;
 
   useEffect(() => {
     if (
@@ -140,12 +132,10 @@ export function ExperienceEditor({
       return;
     }
     setDraft(draftFromExperience(experience));
-    saveGenerationRef.current += 1;
-    setSaving(false);
-    setError(null);
+    resetPatch();
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
-  }, [experience, resetSignal]);
+  }, [experience, resetPatch, resetSignal]);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -155,28 +145,13 @@ export function ExperienceEditor({
     setDraft((current) => ({ ...current, [key]: value }));
   };
 
-  const save = async () => {
+  const save = () => {
     if (saving || archived || !draft.title.trim()) return;
-    const targetId = experience.experience_id;
-    const generation = ++saveGenerationRef.current;
-    setSaving(true);
-    setError(null);
-    onMutationStart(targetId);
-    try {
-      const detail = await patchExperience(targetId, explicitUpdate(draft, experience.updated_at));
-      onSaved(detail);
-      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
+    patchMutation.mutate(explicitUpdate(draft, experience.updated_at), {
+      onSuccess: (detail) => {
         setDraft(draftFromExperience(detail));
-      }
-    } catch (reason) {
-      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
-        setError(reason instanceof Error ? reason.message : t('experiences.editor.error'));
-      }
-    } finally {
-      if (loadedExperienceIdRef.current === targetId && generation === saveGenerationRef.current) {
-        setSaving(false);
-      }
-    }
+      },
+    });
   };
 
   const stopTextareaEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -304,7 +279,13 @@ export function ExperienceEditor({
           />
         </div>
       ))}
-      {error && <p className="font-mono text-xs text-destructive">{error}</p>}
+      {patchMutation.error && (
+        <p className="font-mono text-xs text-destructive">
+          {patchMutation.error instanceof Error
+            ? patchMutation.error.message
+            : t('experiences.editor.error')}
+        </p>
+      )}
     </section>
   );
 }

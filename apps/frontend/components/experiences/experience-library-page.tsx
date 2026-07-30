@@ -17,7 +17,6 @@ import type {
   ExperienceReadyConflictError,
 } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
-import { writeExperienceDetail } from '@/lib/queries/experiences/cache';
 import { experienceKeys } from '@/lib/queries/experiences/keys';
 import {
   useArchiveExperienceMutation,
@@ -28,10 +27,7 @@ import {
   experienceMutationKeys,
 } from '@/lib/queries/experiences/mutations';
 import { ExperienceQueryProvider } from '@/lib/queries/experiences/provider';
-import {
-  useExperienceDetail,
-  useExperienceList,
-} from '@/lib/queries/experiences/queries';
+import { useExperienceDetail, useExperienceList } from '@/lib/queries/experiences/queries';
 import { CompletenessPanel } from './completeness-panel';
 import { EvidenceListEditor } from './evidence-list-editor';
 import { ExperienceEditor } from './experience-editor';
@@ -95,7 +91,7 @@ function ExperienceLibraryContent() {
   const dirtyRef = useRef(false);
   const hasUnsavedChanges = metadataDirty || evidenceDirty;
   const listQuery = useExperienceList(view);
-  const experiences = listQuery.data?.items ?? [];
+  const experiences = useMemo(() => listQuery.data?.items ?? [], [listQuery.data?.items]);
   const detailQuery = useExperienceDetail(selectedExperienceId);
   const selectedDetail = detailQuery.data ?? null;
   const mutationExperienceId = selectedDetail?.experience_id ?? selectedExperienceId ?? 0;
@@ -174,15 +170,6 @@ function ExperienceLibraryContent() {
     document.addEventListener('click', handleInAppNavigation, true);
     return () => document.removeEventListener('click', handleInAppNavigation, true);
   }, [hasUnsavedChanges]);
-
-  const replaceDetail = useCallback((detail: ExperienceDetail) => {
-    writeExperienceDetail(queryClient, detail);
-    setReadyError((current) => (current?.experienceId === detail.experience_id ? null : current));
-  }, [queryClient]);
-
-  const invalidateDetailRequest = useCallback((experienceId: number) => {
-    void queryClient.cancelQueries({ queryKey: experienceKeys.detail(experienceId), exact: true });
-  }, [queryClient]);
 
   const selectExperience = useCallback((experienceId: number | null) => {
     selectedExperienceIdRef.current = experienceId;
@@ -559,16 +546,14 @@ function ExperienceLibraryContent() {
                         </p>
                       </div>
                       <ExperienceEditor
+                        key={`metadata-${selectedDetail.experience_id}`}
                         experience={selectedDetail}
-                        onSaved={replaceDetail}
-                        onMutationStart={invalidateDetailRequest}
                         onDirtyChange={setMetadataDirty}
                         resetSignal={resetSignal}
                       />
                       <EvidenceListEditor
+                        key={`evidence-${selectedDetail.experience_id}`}
                         experience={selectedDetail}
-                        onMutated={replaceDetail}
-                        onMutationStart={invalidateDetailRequest}
                         onDirtyChange={setEvidenceDirty}
                         resetSignal={resetSignal}
                       />
@@ -576,8 +561,6 @@ function ExperienceLibraryContent() {
                         key={selectedDetail.experience_id}
                         experienceId={selectedDetail.experience_id}
                         hasUnsavedChanges={hasUnsavedChanges}
-                        onMutationStart={invalidateDetailRequest}
-                        onApplied={replaceDetail}
                       />
                       <CompletenessPanel
                         experience={selectedDetail}
