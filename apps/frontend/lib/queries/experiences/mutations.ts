@@ -15,12 +15,12 @@ import {
   patchEvidence,
   patchExperience,
   reorderEvidence,
-  requestNextExperienceQuestion,
+  saveExperience,
   restoreExperience,
-  submitExperienceAnswer,
   type EvidenceCreate,
   type EvidenceUpdate,
   type ExperienceCreate,
+  type ExperienceGlobalSave,
   type ExperienceListResponse,
   type ExperienceUpdate,
 } from '@/lib/api/experiences';
@@ -96,6 +96,16 @@ export function usePatchExperienceMutation(experienceId: number) {
   });
 }
 
+export function useSaveExperienceMutation(experienceId: number) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationKey: experienceMutationKeys.item(experienceId, 'save'),
+    mutationFn: (payload: ExperienceGlobalSave) => saveExperience(experienceId, payload),
+    scope: experienceMutationScope(experienceId),
+    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
+  });
+}
+
 export function useCreateEvidenceMutation(experienceId: number) {
   const client = useQueryClient();
   return useMutation({
@@ -132,25 +142,6 @@ export function useReorderEvidenceMutation(experienceId: number) {
   return useMutation({
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-reorder'),
     mutationFn: (evidenceIds: number[]) => reorderEvidence(experienceId, evidenceIds),
-    scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
-  });
-}
-
-export function useNextExperienceQuestionMutation(experienceId: number) {
-  return useMutation({
-    mutationKey: experienceMutationKeys.item(experienceId, 'question'),
-    mutationFn: () => requestNextExperienceQuestion(experienceId),
-    scope: experienceMutationScope(experienceId),
-  });
-}
-
-export function useSubmitExperienceAnswerMutation(experienceId: number) {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: experienceMutationKeys.item(experienceId, 'answer'),
-    mutationFn: (payload: Parameters<typeof submitExperienceAnswer>[1]) =>
-      submitExperienceAnswer(experienceId, payload),
     scope: experienceMutationScope(experienceId),
     onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });

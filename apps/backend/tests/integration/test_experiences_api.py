@@ -18,108 +18,23 @@ from app.services.evidence_service import EvidenceService
 from app.services.experience_service import ExperienceConflictError, ExperienceService
 
 
-async def test_ai_questions_and_answers_are_stateless_and_return_typed_detail(isolated_db) -> None:
-    """Removing enrichment routes or saving a chat transcript would break this stateless contract."""
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
-        experience_id = created.json()["experience_id"]
-        with patch(
-            "app.services.experience_enrichment_service.complete_json",
-            new=AsyncMock(return_value={"question": {"question_id": "organization", "question": "Which organization was this with?"}}),
-        ):
-            question = await client.post(f"/api/v1/experiences/{experience_id}/questions/next")
-        with patch(
-            "app.services.experience_enrichment_service.complete_json",
-            new=AsyncMock(return_value={"experience_updates": {"organization": "Campus Lab"}}),
-        ):
-            answer = await client.post(
-                f"/api/v1/experiences/{experience_id}/answers",
-                json={"question_id": "organization", "answer": "It was with Campus Lab."},
-            )
-
-    assert question.status_code == 200
-    assert question.json() == {
-        "question_id": "organization",
-        "question": "Which organization was this with?",
-        "target": "experience",
-        "evidence_id": None,
-        "is_fallback": False,
-    }
-    assert answer.status_code == 200
-    assert answer.json()["organization"] == "Campus Lab"
-    assert "history" not in answer.json()
-
-
-async def test_ai_answer_rejects_explicit_evidence_action_clear_without_mutating(isolated_db) -> None:
-    """A nullable model action would otherwise become an invalid stored evidence row."""
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
-        experience_id = created.json()["experience_id"]
-        evidence = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Built API"}
-        )
-        evidence_id = evidence.json()["evidence_ids"][0]
-        with patch(
-            "app.services.experience_enrichment_service.complete_json",
-            new=AsyncMock(
-                return_value={
-                    "evidence_update": {"evidence_id": evidence_id, "updates": {"action": None}}
-                }
-            ),
-        ):
-            rejected = await client.post(
-                f"/api/v1/experiences/{experience_id}/answers",
-                json={"question_id": "action", "answer": "Clear it", "evidence_id": evidence_id},
-            )
-        stored = await client.get(f"/api/v1/experiences/{experience_id}")
-
-    assert rejected.status_code == 422
-    assert stored.json()["evidence_items"][0]["action"] == "Built API"
-
-
-async def test_ai_answer_cannot_redirect_an_evidence_question_to_another_owned_row(
-    isolated_db,
-) -> None:
-    """The request target, not the model, controls which evidence row may change."""
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "AI target"})
-        experience_id = created.json()["experience_id"]
-        first = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "First"}
-        )
-        second = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Second"}
-        )
-        first_id, second_id = second.json()["evidence_ids"]
-        with patch(
-            "app.services.experience_enrichment_service.complete_json",
-            new=AsyncMock(
-                return_value={
-                    "evidence_update": {
-                        "evidence_id": second_id,
-                        "updates": {"metrics": "500 users"},
-                    }
-                }
-            ),
-        ):
-            rejected = await client.post(
-                f"/api/v1/experiences/{experience_id}/answers",
-                json={"question_id": "metrics", "answer": "500 users", "evidence_id": first_id},
-            )
-
-    assert first.status_code == 201
-    assert rejected.status_code == 422
-
-
 def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def test_import_text_persists_exact_raw_input_without_llm(isolated_db) -> None:
-    """Changing import to parse, trim, or skip persistence must fail this contract."""
+async def test_import_text_persists_only_structured_llm_output(isolated_db) -> None:
+    """导入原文只用于解析，持久化响应不得包含原始文本。"""
     raw_text = "  Built a campus recruiting assistant.\n"
-
-    with patch("app.llm.complete_json") as llm:
+    parsed = {
+        "kind": "project",
+        "title": "Recruiting assistant",
+        "background": "Built a campus recruiting assistant.",
+        "evidence_items": [{"action": "Built assistant", "result": None, "metrics": None}],
+    }
+    with patch(
+        "app.services.experience_import_service.complete_json",
+        new=AsyncMock(return_value=parsed),
+    ):
         async with _client() as client:
             response = await client.post(
                 "/api/v1/experiences/import-text", json={"text": raw_text}
@@ -127,19 +42,17 @@ async def test_import_text_persists_exact_raw_input_without_llm(isolated_db) -> 
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["raw_input"] == raw_text
-    assert payload["kind"] == "other"
-    assert payload["title"] == ""
+    assert "raw_input" not in payload
+    assert payload["kind"] == "project"
+    assert payload["title"] == "Recruiting assistant"
     assert payload["status"] == "draft"
-    assert payload["evidence_ids"] == []
-    assert payload["evidence_items"] == []
-    assert payload["completeness"] == 0
-    llm.assert_not_called()
+    assert len(payload["evidence_ids"]) == 1
+    assert payload["evidence_items"][0]["action"] == "Built assistant"
 
     async with _client() as client:
         stored = await client.get(f"/api/v1/experiences/{payload['experience_id']}")
     assert stored.status_code == 200
-    assert stored.json()["raw_input"] == raw_text
+    assert "raw_input" not in stored.json()
 
 
 async def test_import_text_rejects_blank_and_oversized_requests(isolated_db) -> None:
@@ -163,7 +76,6 @@ async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
         "role": "Backend developer",
         "start_date": "2025-01",
         "is_current": True,
-        "raw_input": "Hand-entered project",
         "background": "Built a real-time matching service.",
         "technologies": [" Python ", "FastAPI", "python"],
         "tags": [" ai ", "AI", "career"],
@@ -497,12 +409,95 @@ async def test_patch_rejects_current_and_end_date_conflicts_in_merged_state(isol
     assert mark_current.status_code == 422
 
 
+async def test_global_save_updates_all_units_in_one_transaction(isolated_db) -> None:
+    """全局保存必须同时写入主字段、现有 Evidence 和待追加 Evidence。"""
+    async with _client() as client:
+        created = await client.post(
+            "/api/v1/experiences", json={"kind": "project", "title": "Before"}
+        )
+        experience_id = created.json()["experience_id"]
+        with_evidence = await client.post(
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={"action": "Old action"},
+        )
+        detail = with_evidence.json()
+        evidence_id = detail["evidence_ids"][0]
+        revisions = {
+            state["key"]: state["revision"]
+            for state in detail["field_states"]
+            if state["ref_id"] is None
+        }
+        evidence_revision = next(
+            state["revision"]
+            for state in detail["field_states"]
+            if state["key"] == "action" and state["ref_id"] == evidence_id
+        )
+
+        saved = await client.put(
+            f"/api/v1/experiences/{experience_id}/save",
+            json={
+                "experience": {
+                    "title": "After",
+                    "expected_field_revisions": {"title": revisions["title"]},
+                },
+                "evidence_items": [
+                    {
+                        "evidence_id": evidence_id,
+                        "action": "Updated action",
+                        "result": "Released",
+                        "metrics": "20%",
+                        "expected_revision": evidence_revision,
+                    }
+                ],
+                "new_evidence": {"action": "Appended action"},
+                "expected_collection_revision": revisions["evidence_new"],
+            },
+        )
+
+    assert saved.status_code == 200
+    payload = saved.json()
+    assert payload["title"] == "After"
+    assert [item["action"] for item in payload["evidence_items"]] == [
+        "Updated action",
+        "Appended action",
+    ]
+
+
+async def test_global_save_rolls_back_all_units_on_revision_conflict(isolated_db) -> None:
+    """任一保存单元 revision 过期时不能留下部分主字段写入。"""
+    async with _client() as client:
+        created = await client.post(
+            "/api/v1/experiences", json={"kind": "project", "title": "Stable"}
+        )
+        detail = created.json()
+        experience_id = detail["experience_id"]
+        conflict = await client.put(
+            f"/api/v1/experiences/{experience_id}/save",
+            json={
+                "experience": {
+                    "title": "Must roll back",
+                    "expected_field_revisions": {"title": 999},
+                },
+                "evidence_items": [],
+                "new_evidence": None,
+                "expected_collection_revision": 0,
+            },
+        )
+        stored = await client.get(f"/api/v1/experiences/{experience_id}")
+
+    assert conflict.status_code == 409
+    assert stored.json()["title"] == "Stable"
+
+
 async def test_failed_import_rolls_back_its_uncommitted_record(isolated_db) -> None:
     """Dropping service rollback after a post-insert failure would leave a ghost draft."""
     with patch(
-        "app.services.experience_service.ExperienceRepository.set_completeness",
+        "app.services.experience_import_service.ExperienceRepository.set_completeness",
         new_callable=AsyncMock,
         side_effect=RuntimeError("score write failed"),
+    ), patch(
+        "app.services.experience_import_service.complete_json",
+        new=AsyncMock(return_value={"kind": "other", "title": "Transient import"}),
     ):
         async with AsyncClient(
             transport=ASGITransport(app=app, raise_app_exceptions=False),
@@ -524,7 +519,7 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
     async with _client() as client:
         created = await client.post(
             "/api/v1/experiences",
-            json={"kind": "project", "title": "Stable", "raw_input": "source"},
+            json={"kind": "project", "title": "Stable"},
         )
         experience_id = created.json()["experience_id"]
 
@@ -533,7 +528,6 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
         {"kind": None},
         {"title": None},
         {"is_current": None},
-        {"raw_input": None},
         {"technologies": None},
         {"tags": None},
     ):
@@ -545,12 +539,11 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
                 await client.patch(f"/api/v1/experiences/{experience_id}", json=payload)
             )
 
-    assert [response.status_code for response in responses] == [422] * 6
+    assert [response.status_code for response in responses] == [422] * 5
     async with _client() as client:
         detail = await client.get(f"/api/v1/experiences/{experience_id}")
     assert detail.json()["kind"] == "project"
     assert detail.json()["title"] == "Stable"
-    assert detail.json()["raw_input"] == "source"
 
 
 async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolated_db) -> None:
@@ -576,26 +569,33 @@ async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolate
     assert stored.json()["title"] == "Winner"
 
 
-async def test_patch_rejects_a_stale_client_version_after_an_ai_or_manual_write(
+async def test_patch_allows_disjoint_fields_after_another_field_changes(
     isolated_db,
 ) -> None:
-    """A client editing an old snapshot must not overwrite newer persisted facts."""
+    """字段级 revision 允许不同保存单元并发落库。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Original"})
         experience_id = created.json()["experience_id"]
-        stale_version = created.json()["updated_at"]
+        title_revision = next(
+            state["revision"]
+            for state in created.json()["field_states"]
+            if state["key"] == "title" and state["ref_id"] is None
+        )
         winner = await client.patch(
             f"/api/v1/experiences/{experience_id}", json={"background": "New fact"}
         )
         stale = await client.patch(
             f"/api/v1/experiences/{experience_id}",
-            json={"title": "Stale overwrite", "expected_updated_at": stale_version},
+            json={
+                "title": "Independent edit",
+                "expected_field_revisions": {"title": title_revision},
+            },
         )
         stored = await client.get(f"/api/v1/experiences/{experience_id}")
 
     assert winner.status_code == 200
-    assert stale.status_code == 409
-    assert stored.json()["title"] == "Original"
+    assert stale.status_code == 200
+    assert stored.json()["title"] == "Independent edit"
     assert stored.json()["background"] == "New fact"
 
 

@@ -25,8 +25,9 @@ record lifecycle changes.
 1. Development happens only in the `Resume-Matcher` repository.
 2. Importing parsed sections from the master resume is out of scope.
 3. The only initial import source is a user-pasted block of free-form text.
-4. Import persists the original text before any LLM call. AI failure must never lose the
-   user's input.
+4. Import text is transient. Parse and validate it, atomically persist only structured
+   experience and evidence data, then discard the source text. On failure no partial row
+   is created and the frontend retains the user's unsubmitted input.
 5. An imported draft is progressively corrected in place by AI questioning and manual
    editing; it is not copied into successive experience versions in this phase.
 6. The experience library is person-level data, not resume-level data.
@@ -43,8 +44,9 @@ record lifecycle changes.
 13. Once job matching exists, permanent deletion must disclose affected matches. On
     confirmation, the experience is removed only from each match's referenced experience
     IDs; all other match content remains intact.
-14. No database migration framework or migration script is required in this development
-    phase. New tables are created through the existing SQLAlchemy metadata initialization.
+14. No general database migration framework is introduced. Fresh databases still use
+    SQLAlchemy metadata initialization, while the later `experience_field_states` addition
+    must use one explicit, traceable schema/data migration instead of runtime backfilling.
 15. Experience persistence must use repositories under `app/repositories/`; new behavior
     must not be added to the monolithic `database.py` facade.
 16. AI conversation-history persistence is explicitly deferred.
@@ -89,8 +91,8 @@ service. Missing facts must result in a follow-up question, never fabrication.
 
 ```mermaid
 flowchart LR
-    A["Paste experience text"] --> B["Persist draft immediately"]
-    B --> C["Compute completeness"]
+    A["Paste experience text"] --> B["Parse and validate transient input"]
+    B --> C["Atomically persist structured data and discard source"]
     C --> D{"Choose enrichment path"}
     D --> E["AI asks one focused question"]
     D --> F["Manual structured editing"]
@@ -142,7 +144,6 @@ Table name: `experience_items`
 | `start_date` | String(7) | yes | null | `YYYY-MM`; validation occurs at the schema boundary |
 | `end_date` | String(7) | yes | null | `YYYY-MM`; mutually compatible with `is_current` |
 | `is_current` | Boolean | no | false | When true, `end_date` must be null |
-| `raw_input` | Text | no | `""` | Original user text; retained and editable |
 | `background` | Text | yes | null | Structured context/problem/goal |
 | `evidence_ids` | JSON | no | `[]` | Ordered, unique integer IDs pointing to `evidence_items` |
 | `technologies` | JSON | no | `[]` | Ordered, normalized strings |
@@ -250,7 +251,7 @@ DELETE /experiences/{experience_id}/permanent
 
 `GET /experiences` supports:
 
-- `q`: case-insensitive search over title, organization, role, raw input, technologies,
+- `q`: case-insensitive search over title, organization, role, background, technologies,
   and tags.
 - `kind`: one experience kind.
 - `status`: `active`, `draft`, `ready`, or `archived`; default `active` means draft plus
@@ -277,11 +278,13 @@ Content-Type: application/json
 Behavior:
 
 1. Reject blank text and text beyond the configured maximum length with `422`.
-2. Store the text in `raw_input` immediately.
-3. Create a `draft` using kind `other`, an empty title, no evidence, and computed
-   completeness.
-4. Return `201` with the expanded experience detail.
-5. Do not invoke an LLM as part of this transaction.
+2. Treat the text as transient input and parse it into structured experience fields and
+   ordered evidence items.
+3. Validate the parse result against strict schemas and business rules.
+4. Create the experience, evidence items, field states, and computed completeness in one
+   transaction.
+5. Discard the source text after commit and return `201` with the expanded experience
+   detail; parsing or persistence failure creates no record.
 
 ### 7.3 Evidence operations
 
@@ -327,7 +330,6 @@ Experience detail responses include both stored IDs and expanded evidence:
   "start_date": "2026-07",
   "end_date": "2026-08",
   "is_current": false,
-  "raw_input": "In my third year...",
   "background": "Students needed a consistent way to organize job information.",
   "evidence_ids": [12],
   "evidence_items": [
@@ -368,9 +370,9 @@ they are not duplicate database columns.
 
 ## 8. AI enrichment without conversation persistence
 
-The first implementation is stateless at the conversation level. The authoritative
-context for each turn is the current persisted experience, its evidence items, the raw
-input, and the latest submitted answer.
+The authoritative business-fact context for each turn is the current persisted experience,
+its evidence items, and the messages in the current conversation. Discarded import text is
+never restored into chat context.
 
 ### 8.1 Next question
 
@@ -415,7 +417,7 @@ Processing:
 2. Ask the LLM for a typed patch, not a full database object.
 3. Reject changes outside the requested experience or evidence item.
 4. Reject invented employers, dates, technologies, results, or metrics not supported by
-   `raw_input` plus the user's answer.
+   saved structured facts plus the user's current conversation answers.
 5. Apply the validated patch in one transaction.
 6. Recompute completeness.
 7. Return the updated expanded detail and optionally the next question.
@@ -544,8 +546,10 @@ commit or roll back together.
 ### 10.4 Database initialization
 
 The new ORM classes must be imported before the existing metadata `create_all` path runs,
-so fresh development databases create both tables automatically. No Alembic migration,
-legacy database rewrite, or TinyDB compatibility layer is part of this work.
+so fresh development databases create both tables automatically. This work does not add
+Alembic or a TinyDB compatibility layer. The one-time schema/data migration required for
+`experience_field_states` and removal of `raw_input` is specified by the ExperienceAdapter
+design.
 
 ## 11. Frontend design
 
@@ -591,8 +595,8 @@ Desktop uses a list/detail workspace with an optional assistance panel:
 │ Experience Library   Search   Filters   Paste text   + New   │
 ├────────────────┬───────────────────────────┬──────────────────┤
 │ Experience list│ Structured editor         │ Completeness/AI  │
-│                │ Original input            │ Missing facts    │
-│ Title          │ Context and metadata      │ One question     │
+│                │ Title and metadata        │ Missing facts    │
+│ Title          │ Structured context        │ One question     │
 │ Kind/org/date  │ Evidence cards            │ Answer box       │
 │ Completeness   │ Technologies and tags     │                  │
 └────────────────┴───────────────────────────┴──────────────────┘
@@ -607,9 +611,9 @@ After a successful `import-text` response:
 
 1. Close the dialog.
 2. Select the newly created draft.
-3. Display its original input immediately.
+3. Display its parsed structured fields and evidence immediately.
 4. Offer `Help me organize with AI` and `Edit manually`.
-5. Preserve the saved draft if any later AI request fails.
+5. Preserve the saved structured draft if any later AI request fails.
 
 ### 11.4 Editing
 
@@ -631,7 +635,7 @@ After a successful `import-text` response:
 
 ## 12. Security and truthfulness
 
-- `raw_input` and user answers are untrusted content, never system instructions.
+- Transient import text and user answers are untrusted content, never system instructions.
 - Prompts explicitly delimit user content and prohibit following instructions embedded
   in it.
 - AI output is parsed into a narrow schema; arbitrary field paths are not accepted.
@@ -665,7 +669,7 @@ After a successful `import-text` response:
 
 ### 13.3 API integration tests
 
-- Text import persists before any AI invocation and returns `201`.
+- Text import persists only validated structured data, discards the source text, and returns `201`.
 - Blank and oversized import text return `422` without creating rows.
 - Manual create, patch, list, detail, and filters.
 - Evidence ownership and reorder validation.
@@ -746,7 +750,8 @@ Phase 1 is complete only when:
 - Building semantic/vector retrieval or job matching in this phase.
 - Creating a standalone skills database or experience-skill relationship.
 - Sharing one evidence item across multiple experiences.
-- Adding a database migration tool or migration scripts.
+- Introducing a general migration framework; the one-time field-state and source-text
+  removal migration is explicitly allowed.
 - Reworking the entire application navigation shell.
 - Automatically setting an experience ready solely because its completeness is high.
 
@@ -758,9 +763,9 @@ The implementation plan derived from this spec must:
    before any user-visible flow.
 2. Complete Phase 1 before starting AI questioning.
 3. Keep repository, service, and router responsibilities separate in every task.
-4. Treat text persistence and AI enrichment as separate transactions and endpoints.
+4. Treat transient text parsing/import and later AI enrichment as separate transactions
+   and endpoints; never persist the import source text.
 5. Include explicit commands and expected results for backend tests, frontend tests,
    locale parity, lint, and production build.
 6. Preserve unrelated working-tree changes and avoid editing the existing resume CRUD
    facade unless required to register ORM metadata or shared session plumbing.
-

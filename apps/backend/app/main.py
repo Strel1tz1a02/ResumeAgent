@@ -11,13 +11,13 @@ from fastapi import FastAPI
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.ai_chat import close_ai_chat, start_ai_chat
 from app.config import settings
 from app.database import db
-from app.pdf import close_pdf_renderer, init_pdf_renderer
+from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
     config_router,
@@ -28,6 +28,21 @@ from app.routers import (
     resumes_router,
 )
 from app.routers.experiences import router as experiences_router
+from app.experience_ai_chat import ExperienceAdapter
+from app.experience_ai_chat.router import router as experience_ai_chat_router
+from app.ai_chat import register_adapter
+
+logger = logging.getLogger(__name__)
+
+_experience_adapter_registered = False
+
+
+def _register_business_adapters() -> None:
+    """在聊天运行库启动前注册唯一的生产业务 Adapter。"""
+    global _experience_adapter_registered
+    if not _experience_adapter_registered:
+        register_adapter(ExperienceAdapter())
+        _experience_adapter_registered = True
 
 
 def _configure_application_logging() -> None:
@@ -56,10 +71,17 @@ async def lifespan(app: FastAPI):
     from app.config import migrate_legacy_keys
 
     migrate_legacy_keys()
+    _register_business_adapters()
+    await start_ai_chat()
     # PDF renderer uses lazy initialization - will initialize on first use
     # await init_pdf_renderer()
     yield
     # Shutdown - wrap each cleanup in try-except to ensure all resources are released
+    try:
+        await close_ai_chat()
+    except Exception as e:
+        logger.error(f"Error closing AI Chat: {e}")
+
     try:
         await close_pdf_renderer()
     except Exception as e:
@@ -96,6 +118,7 @@ app.include_router(enrichment_router, prefix="/api/v1")
 app.include_router(applications_router, prefix="/api/v1")
 app.include_router(resume_wizard_router, prefix="/api/v1")
 app.include_router(experiences_router, prefix="/api/v1")
+app.include_router(experience_ai_chat_router, prefix="/api/v1")
 
 
 @app.get("/")

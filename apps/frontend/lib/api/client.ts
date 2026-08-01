@@ -100,6 +100,22 @@ export async function apiFetch(
 }
 
 /**
+ * Streaming request without the response-header timeout wrapper. The caller owns
+ * the AbortSignal for the entire body lifetime and must cancel it when leaving.
+ */
+export async function apiStream(endpoint: string, options: RequestInit): Promise<Response> {
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const isAbsoluteUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
+  const isApiPath = normalizedEndpoint.startsWith('/api/');
+  const url = isAbsoluteUrl
+    ? endpoint
+    : isApiPath
+      ? resolveRuntimeApiBase(normalizedEndpoint)
+      : `${API_BASE}${normalizedEndpoint}`;
+  return fetch(url, options);
+}
+
+/**
  * POST request with JSON body.
  */
 export async function apiPost<T>(endpoint: string, body: T, timeoutMs?: number): Promise<Response> {

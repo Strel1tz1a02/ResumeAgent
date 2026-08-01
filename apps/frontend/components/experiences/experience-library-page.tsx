@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import type {
   ExperienceDetail,
   ExperienceKind,
+  ExperienceGlobalSave,
   ExperienceRead,
   ExperienceReadyConflictError,
 } from '@/lib/api/experiences';
@@ -24,6 +25,7 @@ import {
   useExperienceCreationPending,
   useMarkExperienceReadyMutation,
   useRestoreExperienceMutation,
+  useSaveExperienceMutation,
   experienceMutationKeys,
 } from '@/lib/queries/experiences/mutations';
 import { ExperienceQueryProvider } from '@/lib/queries/experiences/provider';
@@ -33,8 +35,9 @@ import { EvidenceListEditor } from './evidence-list-editor';
 import { ExperienceEditor } from './experience-editor';
 import { ExperienceList } from './experience-list';
 import { PermanentDeleteDialog } from './permanent-delete-dialog';
-import { ExperienceQuestionPanel } from './experience-question-panel';
 import { TextImportDialog } from './text-import-dialog';
+import { ExperienceAiChatProvider } from './ai-chat/use-experience-ai-chat';
+import { ExperienceChatPanel } from './ai-chat/experience-chat-panel';
 
 const experienceKinds: ExperienceKind[] = [
   'work',
@@ -60,7 +63,7 @@ function filterExperiences(
       experience.title,
       experience.organization,
       experience.role,
-      experience.raw_input,
+      experience.background,
       ...experience.tags,
       ...experience.technologies,
     ]
@@ -80,6 +83,8 @@ function ExperienceLibraryContent() {
   const [mobilePane, setMobilePane] = useState<'list' | 'detail'>('list');
   const [metadataDirty, setMetadataDirty] = useState(false);
   const [evidenceDirty, setEvidenceDirty] = useState(false);
+  const [metadataDraftValid, setMetadataDraftValid] = useState(false);
+  const [evidenceDraftValid, setEvidenceDraftValid] = useState(false);
   const [discardDialogOpen, setDiscardDialogOpen] = useState(false);
   const [resetSignal, setResetSignal] = useState(0);
   const [readyError, setReadyError] = useState<{ experienceId: number; message: string } | null>(
@@ -100,6 +105,50 @@ function ExperienceLibraryContent() {
   const readyMutation = useMarkExperienceReadyMutation(mutationExperienceId);
   const archiveMutation = useArchiveExperienceMutation(mutationExperienceId);
   const restoreMutation = useRestoreExperienceMutation(mutationExperienceId);
+  const globalSaveMutation = useSaveExperienceMutation(mutationExperienceId);
+  const metadataSaveRef = useRef<ExperienceGlobalSave['experience'] | null>(null);
+  const evidenceSaveRef = useRef<Pick<
+    ExperienceGlobalSave,
+    'evidence_items' | 'new_evidence' | 'expected_collection_revision'
+  > | null>(null);
+  const metadataValidRef = useRef(false);
+  const evidenceValidRef = useRef(false);
+
+  const captureMetadataDraft = useCallback(
+    (value: ExperienceGlobalSave['experience'], valid: boolean) => {
+      metadataSaveRef.current = value;
+      metadataValidRef.current = valid;
+      setMetadataDraftValid(valid);
+    },
+    []
+  );
+  const captureEvidenceDraft = useCallback(
+    (
+      value: Pick<
+        ExperienceGlobalSave,
+        'evidence_items' | 'new_evidence' | 'expected_collection_revision'
+      >,
+      valid: boolean
+    ) => {
+      evidenceSaveRef.current = value;
+      evidenceValidRef.current = valid;
+      setEvidenceDraftValid(valid);
+    },
+    []
+  );
+  const saveAll = useCallback(() => {
+    const experience = metadataSaveRef.current;
+    const evidence = evidenceSaveRef.current;
+    if (
+      !experience ||
+      !evidence ||
+      !metadataValidRef.current ||
+      !evidenceValidRef.current ||
+      globalSaveMutation.isPending
+    )
+      return;
+    globalSaveMutation.mutate({ experience, ...evidence });
+  }, [globalSaveMutation]);
 
   useEffect(() => {
     selectedExperienceIdRef.current = selectedExperienceId;
@@ -538,32 +587,27 @@ function ExperienceLibraryContent() {
                     </h2>
                   </div>
                   {selectedDetail?.experience_id === selectedExperienceId ? (
-                    <>
-                      <div>
-                        <h3 className="font-mono text-xs font-bold uppercase tracking-widest text-ink-soft">
-                          {t('experiences.rawInput')}
-                        </h3>
-                        <p className="mt-2 whitespace-pre-wrap border-l-4 border-primary pl-4 text-sm leading-6">
-                          {selectedDetail.raw_input}
-                        </p>
-                      </div>
+                    <ExperienceAiChatProvider experienceId={selectedDetail.experience_id}>
                       <ExperienceEditor
                         key={`metadata-${selectedDetail.experience_id}`}
                         experience={selectedDetail}
                         onDirtyChange={setMetadataDirty}
                         resetSignal={resetSignal}
+                        globalDirty={hasUnsavedChanges && metadataDraftValid && evidenceDraftValid}
+                        globalSaving={globalSaveMutation.isPending}
+                        globalError={globalSaveMutation.error}
+                        onGlobalSave={saveAll}
+                        onGlobalDraftChange={captureMetadataDraft}
                       />
                       <EvidenceListEditor
                         key={`evidence-${selectedDetail.experience_id}`}
                         experience={selectedDetail}
                         onDirtyChange={setEvidenceDirty}
                         resetSignal={resetSignal}
+                        globalSaving={globalSaveMutation.isPending}
+                        onGlobalDraftChange={captureEvidenceDraft}
                       />
-                      <ExperienceQuestionPanel
-                        key={selectedDetail.experience_id}
-                        experienceId={selectedDetail.experience_id}
-                        hasUnsavedChanges={hasUnsavedChanges}
-                      />
+                      <ExperienceChatPanel />
                       <CompletenessPanel
                         experience={selectedDetail}
                         onMarkReady={() => void handleReady()}
@@ -599,14 +643,14 @@ function ExperienceLibraryContent() {
                           </Button>
                         </div>
                       )}
-                    </>
+                    </ExperienceAiChatProvider>
                   ) : (
                     <div>
                       <h3 className="font-mono text-xs font-bold uppercase tracking-widest text-ink-soft">
-                        {t('experiences.rawInput')}
+                        {t('experiences.editor.background')}
                       </h3>
                       <p className="mt-2 whitespace-pre-wrap border-l-4 border-primary pl-4 text-sm leading-6">
-                        {displayExperience.raw_input}
+                        {displayExperience.background || '—'}
                       </p>
                     </div>
                   )}

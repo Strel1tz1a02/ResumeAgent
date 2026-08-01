@@ -24,9 +24,13 @@ from app.services.experience_completeness_service import (
     READY_COMPLETENESS_THRESHOLD,
     calculate_completeness,
 )
+from app.services.experience_field_service import (
+    ExperienceFieldService,
+    FieldRevisionConflictError,
+)
 
 _NON_NULLABLE_UPDATE_FIELDS = frozenset(
-    {"kind", "title", "is_current", "raw_input", "technologies", "tags"}
+    {"kind", "title", "is_current", "technologies", "tags"}
 )
 
 
@@ -62,6 +66,7 @@ class ExperienceService:
         self._session = session
         self._experiences = ExperienceRepository(session)
         self._evidence = EvidenceRepository(session)
+        self._fields = ExperienceFieldService(session)
 
     async def create(self, request: ExperienceCreate) -> ExperienceDetail:
         """Create a draft record and persist its authoritative completeness score."""
@@ -76,6 +81,7 @@ class ExperienceService:
                     completeness=0,
                 )
             )
+            await self._fields.initialize_experience(item)
             await self._recalculate_completeness(item)
             detail = await self._detail(item)
             await self._session.commit()
@@ -108,31 +114,35 @@ class ExperienceService:
     async def patch(self, experience_id: int, request: ExperienceUpdate) -> ExperienceDetail:
         """Update editable fields, validating merged state and refreshing completeness."""
         fields = request.model_dump(exclude_unset=True)
-        expected_updated_at = fields.pop("expected_updated_at", None)
+        expected_field_revisions = fields.pop("expected_field_revisions", {})
         if "kind" in fields and fields["kind"] is not None:
             fields["kind"] = request.kind.value
 
         try:
             await self._experiences.acquire_ownership_write_lock()
             existing = await self._get_or_raise(experience_id)
-            if expected_updated_at is not None and existing.updated_at != expected_updated_at:
-                raise ExperienceStaleWriteError(
-                    f"stale experience update for {experience_id}: client snapshot is outdated"
-                )
             existing = await self._repair_evidence_references(existing)
             observed_updated_at = existing.updated_at
             self._reject_null_non_nullable_fields(fields)
             self._validate_merged_dates(existing, fields)
+            changed_keys = {
+                key for key, value in fields.items() if getattr(existing, key) != value
+            }
+            await self._fields.validate_expected(
+                experience_id, expected_field_revisions, changed_keys
+            )
             updated = await self._experiences.update_fields_if_current(
                 experience_id,
                 observed_updated_at,
                 fields,
             )
+            if changed_keys:
+                await self._fields.advance_experience_fields(updated, changed_keys)
             await self._recalculate_completeness(updated)
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
-        except ExperienceStaleWriteError as error:
+        except (ExperienceStaleWriteError, FieldRevisionConflictError) as error:
             await self._session.rollback()
             raise ExperienceConflictError(
                 f"Experience {experience_id} was updated by another request; reload and try again"
@@ -286,11 +296,21 @@ class ExperienceService:
 
     async def _detail(self, item: ExperienceItem) -> ExperienceDetail:
         evidence_items, guidance = await self._evidence_and_guidance(item)
+        field_states = await self._fields.list_states(item.experience_id)
         return ExperienceDetail(
             **self._read(item).model_dump(),
             evidence_items=[self._evidence_read(evidence) for evidence in evidence_items],
             missing_dimensions=guidance.missing_dimensions,
             suggested_questions=guidance.suggested_questions,
+            field_states=[
+                {
+                    "key": state.target_key,
+                    "ref_id": state.ref_id or None,
+                    "status": state.status,
+                    "revision": state.revision,
+                }
+                for state in field_states
+            ],
         )
 
     async def _guidance(self, item: ExperienceItem):
@@ -333,7 +353,6 @@ class ExperienceService:
             start_date=item.start_date,
             end_date=item.end_date,
             is_current=item.is_current,
-            raw_input=item.raw_input,
             background=item.background,
             evidence_ids=item.evidence_ids or [],
             technologies=item.technologies or [],

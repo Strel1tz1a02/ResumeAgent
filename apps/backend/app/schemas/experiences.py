@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.evidence_items import EvidenceRead
+from app.schemas.evidence_items import EvidenceCreate, EvidenceRead
 
 
 class ExperienceKind(str, Enum):
@@ -60,7 +60,6 @@ class _ExperienceWritable(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     is_current: bool | None = None
-    raw_input: str | None = None
     background: str | None = None
     technologies: list[str] | None = None
     tags: list[str] | None = None
@@ -95,7 +94,6 @@ class ExperienceCreate(_ExperienceWritable):
     kind: ExperienceKind = ExperienceKind.other
     title: str = ""
     is_current: bool = False
-    raw_input: str = ""
     technologies: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
 
@@ -105,7 +103,37 @@ class ExperienceUpdate(_ExperienceWritable):
 
     model_config = ConfigDict(extra="forbid")
 
-    expected_updated_at: str | None = None
+    expected_field_revisions: dict[str, int] = Field(default_factory=dict)
+
+
+class ExperienceEvidenceSave(BaseModel):
+    """全局保存中一个完整 Evidence 保存单元。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: int = Field(gt=0)
+    action: str = Field(min_length=1)
+    result: str | None = None
+    metrics: str | None = None
+    expected_revision: int = Field(ge=0)
+
+    @field_validator("action")
+    @classmethod
+    def _action_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("evidence action must not be blank")
+        return value
+
+
+class ExperienceGlobalSave(BaseModel):
+    """一次性保存经历主字段、全部 Evidence 草稿和一个待追加项。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    experience: ExperienceUpdate
+    evidence_items: list[ExperienceEvidenceSave] = Field(default_factory=list)
+    new_evidence: EvidenceCreate | None = None
+    expected_collection_revision: int = Field(ge=0)
 
 
 class ExperienceRead(BaseModel):
@@ -120,7 +148,6 @@ class ExperienceRead(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
     is_current: bool = False
-    raw_input: str = ""
     background: str | None = None
     evidence_ids: list[int] = Field(default_factory=list)
     technologies: list[str] = Field(default_factory=list)
@@ -139,6 +166,16 @@ class ExperienceDetail(ExperienceRead):
     evidence_items: list[EvidenceRead] = Field(default_factory=list)
     missing_dimensions: list[str] = Field(default_factory=list)
     suggested_questions: list[str] = Field(default_factory=list)
+    field_states: list["ExperienceFieldStateRead"] = Field(default_factory=list)
+
+
+class ExperienceFieldStateRead(BaseModel):
+    """One field status and revision returned to the experience editor."""
+
+    key: str
+    ref_id: int | None = None
+    status: Literal["complete", "incomplete"]
+    revision: int = Field(ge=0)
 
 
 class ExperienceListQuery(BaseModel):
@@ -168,7 +205,7 @@ class ExperienceCompleteness(BaseModel):
 
 
 class ExperienceImportTextRequest(BaseModel):
-    """Raw user text persisted immediately before optional later enrichment."""
+    """Transient source text used only for one structured import request."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -201,177 +238,3 @@ class DeletionImpactResponse(BaseModel):
 
     affected_matches: list[DeletionImpactMatch] = Field(default_factory=list)
     affected_resumes: list[str] = Field(default_factory=list)
-
-
-class ExperienceEnrichmentQuestion(BaseModel):
-    """One stateless follow-up question generated from persisted facts only."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    question_id: str = Field(min_length=1, max_length=80)
-    question: str = Field(min_length=1, max_length=1_000)
-    target: Literal["experience", "evidence"]
-    evidence_id: int | None = Field(default=None, gt=0)
-    is_fallback: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def _infer_legacy_llm_target(cls, value: object) -> object:
-        """Accept a legacy model response while always emitting the public target contract."""
-        if isinstance(value, dict) and "target" not in value:
-            value = dict(value)
-            value["target"] = (
-                "evidence"
-                if value.get("question_id") in {"action", "result", "metrics"}
-                else "experience"
-            )
-        return value
-
-    @model_validator(mode="after")
-    def _validate_target(self) -> "ExperienceEnrichmentQuestion":
-        if self.target == "experience" and self.evidence_id is not None:
-            raise ValueError("experience questions cannot target an evidence_id")
-        return self
-
-
-class ExperienceEnrichmentAnswerRequest(BaseModel):
-    """A single answer; the server deliberately stores no conversation transcript."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    question_id: str = Field(min_length=1, max_length=80)
-    answer: str = Field(min_length=1, max_length=8_000)
-    evidence_id: int | None = Field(default=None, gt=0)
-
-    @field_validator("answer")
-    @classmethod
-    def _answer_must_not_be_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("answer must not be blank")
-        return value
-
-    @model_validator(mode="after")
-    def _validate_evidence_target(self) -> "ExperienceEnrichmentAnswerRequest":
-        if self.evidence_id is not None and self.question_id not in {
-            "action",
-            "result",
-            "metrics",
-        }:
-            raise ValueError("only evidence questions may include evidence_id")
-        return self
-
-
-class ExperienceEnrichmentExperienceUpdate(BaseModel):
-    """The narrow experience fields an LLM may propose from one answer."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: ExperienceKind | None = None
-    title: str | None = None
-    organization: str | None = None
-    role: str | None = None
-    location: str | None = None
-    start_date: str | None = None
-    end_date: str | None = None
-    is_current: bool | None = None
-    background: str | None = None
-    technologies: list[str] | None = None
-    tags: list[str] | None = None
-    notes: str | None = None
-
-    @field_validator("title")
-    @classmethod
-    def _title_must_not_be_blank(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            raise ValueError("title must not be blank")
-        return value
-
-    @field_validator("start_date", "end_date")
-    @classmethod
-    def _validate_enrichment_dates(cls, value: str | None) -> str | None:
-        if value is not None and not _YEAR_MONTH_RE.fullmatch(value):
-            raise ValueError("date must use YYYY-MM format")
-        return value
-
-    @field_validator("technologies", "tags", mode="before")
-    @classmethod
-    def _normalize_enrichment_labels(cls, value: object) -> list[str] | None:
-        if value is None:
-            return None
-        return _normalize_labels(value)
-
-
-class ExperienceEnrichmentEvidenceFields(BaseModel):
-    """Only factual evidence content is writable by an enrichment response."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: str | None = None
-    result: str | None = None
-    metrics: str | None = None
-
-    @field_validator("action")
-    @classmethod
-    def _action_must_not_be_blank(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        if not value:
-            raise ValueError("action must not be blank")
-        return value
-
-    @model_validator(mode="after")
-    def _must_contain_a_field(self) -> "ExperienceEnrichmentEvidenceFields":
-        if not self.model_fields_set:
-            raise ValueError("evidence update must contain at least one field")
-        if "action" in self.model_fields_set and self.action is None:
-            raise ValueError("evidence action cannot be null")
-        return self
-
-
-class ExperienceEnrichmentEvidenceUpdate(BaseModel):
-    """A typed update that can target only an existing owned evidence row."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    evidence_id: int = Field(gt=0)
-    updates: ExperienceEnrichmentEvidenceFields
-
-
-class ExperienceEnrichmentPatch(BaseModel):
-    """The complete narrow JSON contract accepted from the enrichment LLM."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    experience_updates: ExperienceEnrichmentExperienceUpdate | None = None
-    evidence_update: ExperienceEnrichmentEvidenceUpdate | None = None
-    new_evidence: ExperienceEnrichmentEvidenceFields | None = None
-    next_question: ExperienceEnrichmentQuestion | None = None
-
-    @model_validator(mode="after")
-    def _must_contain_a_mutation(self) -> "ExperienceEnrichmentPatch":
-        has_experience_update = bool(
-            self.experience_updates and self.experience_updates.model_fields_set
-        )
-        if not any((has_experience_update, self.evidence_update, self.new_evidence)):
-            raise ValueError("enrichment answer must contain a recognized patch operation")
-        if self.new_evidence is not None and not self.new_evidence.action:
-            raise ValueError("new evidence requires an action")
-        return self
-
-
-class ExperienceEnrichmentQuestionResponse(BaseModel):
-    """Narrow LLM response for a question-generation turn."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    question: ExperienceEnrichmentQuestion
-
-
-class ExperienceEnrichmentAnswerResponse(ExperienceDetail):
-    """Expanded persisted detail and an optional stateless suggested next question."""
-
-    next_question: ExperienceEnrichmentQuestion | None = None

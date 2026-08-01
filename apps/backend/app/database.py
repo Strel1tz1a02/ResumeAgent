@@ -762,12 +762,23 @@ class Database:
     async def reset_database(self) -> None:
         """Reset by truncating user-document tables and clearing uploads.
 
-        Clears resumes/jobs/improvements **and** tracker applications (leaving
-        orphaned cards after a full data reset would be a bug). Encrypted
+        Clears resumes/jobs/improvements, tracker applications, and AI Chat
+        history. Encrypted
         ``api_keys`` are preserved — matching the pre-existing behavior where a
         reset never wiped the user's stored credentials.
         """
+        from app.ai_chat.models import (
+            AiChatConversation,
+            AiChatMessage,
+            AiChatRun,
+            AiChatToolCall,
+        )
+
         async with self._session() as session:
+            await session.execute(delete(AiChatToolCall))
+            await session.execute(delete(AiChatMessage))
+            await session.execute(delete(AiChatRun))
+            await session.execute(delete(AiChatConversation))
             await session.execute(delete(Application))
             await session.execute(delete(Improvement))
             await session.execute(delete(Job))

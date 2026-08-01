@@ -5,7 +5,9 @@
 > **用途：** 明确记录通用 AI 对话模块第一阶段尚未彻底解决的失败恢复与可靠性问题。
 > 本文件不是当前版本已实现能力的声明，也不属于首期验收标准。
 >
-> **总设计入口：** [AI Chat 通用模块与架构设计](./2026-07-30-ai-chat-module-design.zh-CN.md)
+> **总设计入口：** [AI Chat 通用模块与架构设计](./2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md)
+>
+> **经历业务设计：** [经历适配器与字段对话设计](./2026-08-01-experience-adapter-design.zh-CN.md)
 
 ## 1. 当前结论
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
+from app.ai_chat import reset_ai_chat
 from app.config import settings
 from app.llm import check_llm_health, LLMConfig, resolve_api_key
 from app.schemas import (
@@ -613,8 +614,8 @@ async def reset_database_endpoint(request: ResetDatabaseRequest) -> dict:
     """Reset the database and clear all data.
 
     WARNING: This action is irreversible. It will:
-    1. Truncate all database tables (resumes, jobs, improvements)
-    2. Delete all uploaded files
+    1. Truncate user data tables, including AI Chat history
+    2. Delete all uploaded files and AI Chat checkpoints
 
     Requires confirmation token for safety.
 
@@ -634,4 +635,5 @@ async def reset_database_endpoint(request: ResetDatabaseRequest) -> dict:
             detail="Confirmation required. Pass confirm=RESET_ALL_DATA in request body.",
         )
     await db.reset_database()
+    await reset_ai_chat()
     return {"message": "Database and all data have been reset successfully"}

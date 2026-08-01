@@ -121,7 +121,6 @@
     "noResults": "No matching experiences",
     "error": "Could not load experiences",
     "retry": "Retry",
-    "rawInput": "Raw input",
     "backToList": "Back to list",
     "kind": {
       "all": "All kinds",
@@ -137,7 +136,7 @@
     "import": {
       "button": "Import Text",
       "title": "Import experience",
-      "description": "Paste your experience notes to create a draft.",
+      "description": "Paste experience text. Only parsed structured content will be saved.",
       "text": "Experience text",
       "submit": "Save import",
       "cancel": "Cancel",
@@ -155,10 +154,11 @@
       "is_current": "Current experience",
       "technologies": "Technologies",
       "tags": "Tags",
-      "raw_input": "Raw input",
       "background": "Background",
       "notes": "Notes",
       "save": "Save experience",
+      "saveAll": "Save all fields",
+      "saveField": "Save",
       "saving": "Saving…",
       "error": "Could not save experience"
     },
@@ -229,7 +229,15 @@
       "retry": "Try again",
       "fallback": "Suggested question",
       "manual": "You can edit this experience manually at any time.",
-      "error": "AI could not organize this experience. You can keep editing it manually."
+      "error": "AI cannot respond right now. You can keep editing manually.",
+      "startField": "Start AI chat",
+      "startConfirm": "Start an AI chat for this field?",
+      "startConfirmAction": "Start",
+      "approval": "Overwrite this field?",
+      "approve": "Allow overwrite",
+      "reject": "Reject",
+      "unsavedHint": "AI cannot see unsaved changes",
+      "message": "Type a message"
     }
   },
   "builder": {

@@ -4,7 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import type { ExperienceDetail } from '@/lib/api/experiences';
+import { FieldAiEntry } from './ai-chat/field-ai-entry';
+import { useExperienceAiChat } from './ai-chat/use-experience-ai-chat';
+import type { ExperienceDetail, ExperienceGlobalSave } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
 import {
   useCreateEvidenceMutation,
@@ -17,6 +19,14 @@ interface EvidenceListEditorProps {
   experience: ExperienceDetail;
   onDirtyChange: (dirty: boolean) => void;
   resetSignal: number;
+  globalSaving: boolean;
+  onGlobalDraftChange: (
+    value: Pick<
+      ExperienceGlobalSave,
+      'evidence_items' | 'new_evidence' | 'expected_collection_revision'
+    >,
+    valid: boolean
+  ) => void;
 }
 
 type EvidenceDraft = { action: string; result: string; metrics: string };
@@ -38,8 +48,11 @@ export function EvidenceListEditor({
   experience,
   onDirtyChange,
   resetSignal,
+  globalSaving,
+  onGlobalDraftChange,
 }: EvidenceListEditorProps) {
   const { t } = useTranslations();
+  const chat = useExperienceAiChat();
   const [editorState, setEditorState] = useState<EvidenceEditorState>({
     drafts: {},
     baseline: {},
@@ -75,14 +88,27 @@ export function EvidenceListEditor({
     setEditorState((current) => {
       if (fullReset) return { drafts: serverBaseline, baseline: serverBaseline };
       const next: Record<number, EvidenceDraft> = {};
+      const appliedTarget = chat.lastBusinessEvent?.data.target as
+        | { key?: keyof EvidenceDraft; ref_id?: number | null }
+        | undefined;
       for (const item of experience.evidence_items) {
         const serverDraft = serverBaseline[item.id];
         const localDraft = current.drafts[item.id];
         const previousBaseline = current.baseline[item.id];
-        next[item.id] =
-          localDraft && previousBaseline && !sameDraft(localDraft, previousBaseline)
-            ? localDraft
-            : serverDraft;
+        if (!localDraft || !previousBaseline) {
+          next[item.id] = serverDraft;
+          continue;
+        }
+        const merged = { ...localDraft };
+        for (const key of ['action', 'result', 'metrics'] as const) {
+          if (
+            localDraft[key] === previousBaseline[key] ||
+            (appliedTarget?.ref_id === item.id && appliedTarget.key === key)
+          ) {
+            merged[key] = serverDraft[key];
+          }
+        }
+        next[item.id] = merged;
       }
       return { drafts: next, baseline: serverBaseline };
     });
@@ -91,7 +117,7 @@ export function EvidenceListEditor({
     }
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
-  }, [experience.experience_id, experience.evidence_items, resetSignal]);
+  }, [chat.lastBusinessEvent, experience.experience_id, experience.evidence_items, resetSignal]);
 
   const dirty =
     newEvidence.action !== '' ||
@@ -106,6 +132,45 @@ export function EvidenceListEditor({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    const hasNewEvidence = Boolean(newEvidence.action || newEvidence.result || newEvidence.metrics);
+    onGlobalDraftChange(
+      {
+        evidence_items: experience.evidence_items.map((item) => {
+          const draft = drafts[item.id] ?? toDraft(item);
+          return {
+            evidence_id: item.id,
+            action: draft.action.trim(),
+            result: draft.result.trim() || null,
+            metrics: draft.metrics.trim() || null,
+            expected_revision:
+              (experience.field_states ?? []).find(
+                (state) => state.key === 'action' && state.ref_id === item.id
+              )?.revision ?? 0,
+          };
+        }),
+        new_evidence: hasNewEvidence
+          ? {
+              action: newEvidence.action.trim(),
+              result: newEvidence.result.trim() || null,
+              metrics: newEvidence.metrics.trim() || null,
+            }
+          : null,
+        expected_collection_revision:
+          (experience.field_states ?? []).find(
+            (state) => state.key === 'evidence_new' && state.ref_id === null
+          )?.revision ?? 0,
+      },
+      !hasNewEvidence || Boolean(newEvidence.action.trim())
+    );
+  }, [
+    drafts,
+    experience.evidence_items,
+    experience.field_states,
+    newEvidence,
+    onGlobalDraftChange,
+  ]);
 
   const updateDraft = (id: number, key: keyof EvidenceDraft, value: string) => {
     setEditorState((current) => ({
@@ -138,6 +203,9 @@ export function EvidenceListEditor({
         action: draft.action.trim(),
         result: draft.result.trim() || null,
         metrics: draft.metrics.trim() || null,
+        expected_revision: (experience.field_states ?? []).find(
+          (state) => state.key === 'action' && state.ref_id === id
+        )?.revision,
       },
     });
   };
@@ -158,39 +226,48 @@ export function EvidenceListEditor({
   const fields = (
     draft: EvidenceDraft,
     change: (key: keyof EvidenceDraft, value: string) => void,
-    id: string
+    id: string,
+    evidenceId: number | null,
+    dirty: boolean,
+    onSave?: () => void
   ) => (
     <div className="grid gap-3 md:grid-cols-3">
-      <div>
-        <Label htmlFor={`${id}-action`}>{t('experiences.evidence.action')}</Label>
-        <Input
-          id={`${id}-action`}
-          aria-label={`${t('experiences.evidence.action')} ${id}`}
-          value={draft.action}
-          onChange={(event) => change('action', event.target.value)}
-          disabled={archived || submitting}
-        />
-      </div>
-      <div>
-        <Label htmlFor={`${id}-result`}>{t('experiences.evidence.result')}</Label>
-        <Input
-          id={`${id}-result`}
-          aria-label={`${t('experiences.evidence.result')} ${id}`}
-          value={draft.result}
-          onChange={(event) => change('result', event.target.value)}
-          disabled={archived || submitting}
-        />
-      </div>
-      <div>
-        <Label htmlFor={`${id}-metrics`}>{t('experiences.evidence.metrics')}</Label>
-        <Input
-          id={`${id}-metrics`}
-          aria-label={`${t('experiences.evidence.metrics')} ${id}`}
-          value={draft.metrics}
-          onChange={(event) => change('metrics', event.target.value)}
-          disabled={archived || submitting}
-        />
-      </div>
+      {(['action', 'result', 'metrics'] as const).map((key) => (
+        <FieldAiEntry
+          key={key}
+          target={
+            evidenceId === null
+              ? { key: 'evidence_new', ref_id: null }
+              : { key, ref_id: evidenceId }
+          }
+          state={(experience.field_states ?? []).find(
+            (state) =>
+              state.key === (evidenceId === null ? 'evidence_new' : key) &&
+              state.ref_id === evidenceId
+          )}
+          dirty={dirty}
+          onSave={onSave}
+          saveDisabled={submitting || globalSaving || chat.phase === 'approval'}
+        >
+          <Label htmlFor={`${id}-${key}`}>{t(`experiences.evidence.${key}`)}</Label>
+          <Input
+            id={`${id}-${key}`}
+            aria-label={`${t(`experiences.evidence.${key}`)} ${id}`}
+            value={draft[key]}
+            onChange={(event) => change(key, event.target.value)}
+            disabled={
+              archived ||
+              submitting ||
+              globalSaving ||
+              chat.isTargetLocked(
+                evidenceId === null
+                  ? { key: 'evidence_new', ref_id: null }
+                  : { key, ref_id: evidenceId }
+              )
+            }
+          />
+        </FieldAiEntry>
+      ))}
     </div>
   );
 
@@ -207,17 +284,21 @@ export function EvidenceListEditor({
             className="border border-black p-4"
             aria-label={`${t('experiences.evidence.card')} ${index + 1}`}
           >
-            {fields(draft, (key, value) => updateDraft(item.id, key, value), String(item.id))}
+            {fields(
+              draft,
+              (key, value) => updateDraft(item.id, key, value),
+              String(item.id),
+              item.id,
+              !sameDraft(draft, baseline[item.id] ?? toDraft(item)),
+              () => saveExisting(item.id)
+            )}
             {!archived && (
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button size="sm" onClick={() => void saveExisting(item.id)} disabled={submitting}>
-                  {t('experiences.evidence.save')}
-                </Button>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => void move(index, -1)}
-                  disabled={submitting || index === 0}
+                  disabled={globalSaving || submitting || index === 0}
                 >
                   {t('experiences.evidence.moveUp')}
                 </Button>
@@ -225,7 +306,9 @@ export function EvidenceListEditor({
                   size="sm"
                   variant="outline"
                   onClick={() => void move(index, 1)}
-                  disabled={submitting || index === experience.evidence_items.length - 1}
+                  disabled={
+                    globalSaving || submitting || index === experience.evidence_items.length - 1
+                  }
                 >
                   {t('experiences.evidence.moveDown')}
                 </Button>
@@ -233,7 +316,7 @@ export function EvidenceListEditor({
                   size="sm"
                   variant="destructive"
                   onClick={() => void remove(item.id)}
-                  disabled={submitting}
+                  disabled={globalSaving || submitting}
                 >
                   {t('experiences.evidence.delete')}
                 </Button>
@@ -247,13 +330,15 @@ export function EvidenceListEditor({
           {fields(
             newEvidence,
             (key, value) => setNewEvidence((current) => ({ ...current, [key]: value })),
-            'new'
+            'new',
+            null,
+            Boolean(newEvidence.action || newEvidence.result || newEvidence.metrics)
           )}
           <Button
             className="mt-3"
             size="sm"
             onClick={() => void saveNew()}
-            disabled={submitting || !newEvidence.action.trim()}
+            disabled={globalSaving || submitting || !newEvidence.action.trim()}
           >
             {t('experiences.evidence.add')}
           </Button>

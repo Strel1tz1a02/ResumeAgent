@@ -21,7 +21,7 @@ flowchart LR
 
 - 会话和消息；
 - 模型流式调用；
-- SSE；
+- 可供业务 API 转换的内部流式事件；
 - Tool Call 接收；
 - 用户审批机制；
 - LangGraph 的执行、暂停与恢复；
@@ -105,8 +105,8 @@ flowchart LR
 - 对接模型服务；
 - 流式接收普通文本；
 - 聚合 Tool Call 参数；
-- 将稳定事件转换成 SSE；
-- 处理连接关闭；
+- 生成稳定的内部流式事件；
+- 在调用方取消消费时结束运行；
 - 持久化最终完整回复；
 - 统一模型错误和运行状态。
 
@@ -188,13 +188,13 @@ EvidenceItem
 
 - proposal ID；
 - proposal 状态；
-- 审批 API；
+- 审批 Service 接口；
 - `client_resolution_id` 幂等；
 - 同意和拒绝的通用状态流转；
 - 等待审批时暂停运行；
 - 审批后恢复运行；
 - 防止同一 proposal 被处理两次；
-- 向前端发送通用审批事件。
+- 向业务 API 返回通用审批事件。
 
 业务负责：
 
@@ -228,28 +228,16 @@ EvidenceItem
 - 重复出现相同建议时能够通过当前值判断为 no-change；
 - 不因为模型重试重复修改业务数据。
 
-## 2.8 通用聊天前端
+## 2.8 对外传输与前端边界
 
-通用前端负责：
+通用聊天本轮只提供内部后端运行库，不提供通用 HTTP Router、SSE API 或前端组件。业务 Router/Service 负责：
 
-- 聊天消息列表；
-- 流式文本渲染；
-- 输入框和发送状态；
-- 通用审批容器；
-- SSE reducer；
-- 会话关闭；
-- ready/generating/awaiting_approval/continuing/ended 状态；
-- Tool Result 续跑失败的静默清理。
+- 调用 `AiChatService`；
+- 把 `AsyncIterator[AiChatEvent]` 转换为业务 SSE；
+- 定义业务 API 的请求、响应和错误映射；
+- 在业务前端实现消息、输入、审批和页面联动。
 
-通用前端不负责：
-
-- 在哪个经历字段旁显示入口；
-- 审批期间锁定哪个字段；
-- 如何把 `business_payload` 写回经历表单；
-- 全局保存是否禁用；
-- 字段状态颜色。
-
-这些属于业务页面接入。
+通用层仍负责取消、失败、审批、续跑和 pending Tool Result 等后端状态，但不决定其 UI 表现。
 
 ---
 
@@ -438,7 +426,7 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 |---|---|---|
 | 创建会话 | 保存会话、状态和引用 | 校验 subject/target 是否有效 |
 | 开始一轮 | 保存消息和 run | 解析输入、加载业务上下文 |
-| 模型调用 | 模型客户端、流式和 SSE | Prompt、Graph、Tools |
+| 模型调用 | 模型客户端、内部流式事件 | Prompt、Graph、Tools、业务 SSE 转换 |
 | Tool 校验 | 聚合参数、调用 Handler | 类型校验、no-change、guard |
 | 形成提案 | 持久化、原子事件、interrupt | proposal 展示数据 |
 | 用户审批 | 幂等、状态流转、resume | 应用业务修改或判断失效 |
@@ -461,11 +449,10 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 Tool Call 通用记录
 审批机制
 模型流
-SSE
+内部流式事件
 LangGraph Runtime/checkpoint
 Adapter 注册协议
 幂等和失败恢复
-通用聊天前端
 ```
 
 ## 经历 AI 模块 `ExperienceAdapter`
@@ -479,7 +466,7 @@ ExperienceAdapter
 经历 Prompt
 field_overwrite Handler
 经历上下文构造
-经历聊天前端接入
+经历业务 API 与前端接入
 ```
 
 ## 已有经历领域模块
@@ -518,12 +505,14 @@ ai_chat 不能调用或导入 ExperienceService
 apps/backend/app/
 ├── ai_chat/                              # 通用聊天模块
 │   ├── __init__.py
-│   ├── router.py                         # 通用会话、消息、审批和关闭 API
+│   ├── container.py                      # 注册表、checkpoint 与 Service 生命周期
 │   ├── service.py                        # AiChatService；通用流程入口
 │   ├── runtime.py                        # AiChatRuntime；Graph 执行依赖
 │   ├── registry.py                       # AdapterRegistry
 │   ├── models.py                         # 会话、消息、run、Tool Call ORM 模型
-│   ├── schemas.py                        # 通用 HTTP 与内部传输 Schema
+│   ├── model.py                          # LiteLLM 流式适配器
+│   ├── types.py                          # 通用内部传输类型
+│   ├── errors.py                         # 稳定内部错误
 │   │
 │   ├── adapters/
 │   │   ├── __init__.py
@@ -531,14 +520,13 @@ apps/backend/app/
 │   │
 │   ├── graph/
 │   │   ├── __init__.py
-│   │   ├── state.py                      # 通用 Graph State
 │   │   └── runner.py                     # 编译、astream、interrupt/resume
 │   │
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── handler.py                    # ToolHandler 抽象协议
 │   │   ├── lifecycle.py                  # Tool Call 通用生命周期
-│   │   └── results.py                    # 通用 Tool Result 传输结构
+│   │   └── buffer.py                     # Tool 参数分片聚合
 │   │
 │   ├── repositories/
 │   │   ├── __init__.py
@@ -553,9 +541,7 @@ apps/backend/app/
 │   │
 │   └── streaming/
 │       ├── __init__.py
-│       ├── events.py                     # SSE 事件结构
-│       ├── event_sink.py                 # Graph 事件到 SSE 的输出接口
-│       └── tool_call_buffer.py           # Tool 参数分片聚合
+│       └── events.py                     # 供业务 API 转换的内部事件
 │
 ├── experience_ai_chat/                   # 经历业务 AI 接入层
 │   ├── __init__.py
@@ -590,40 +576,8 @@ apps/backend/app/
     └── evidence_repository.py
 ```
 
-## 6.2 前端目录
+## 6.2 对外接入边界
 
-```text
-apps/frontend/
-├── features/
-│   └── ai-chat/                           # 通用聊天前端模块
-│       ├── api/
-│       │   ├── client.ts                  # 会话、消息、审批和关闭请求
-│       │   └── stream.ts                  # SSE 连接与事件解析
-│       ├── components/
-│       │   ├── chat-panel.tsx
-│       │   ├── message-list.tsx
-│       │   ├── message-input.tsx
-│       │   └── approval-container.tsx
-│       ├── hooks/
-│       │   ├── use-ai-chat.ts
-│       │   └── use-ai-chat-stream.ts
-│       ├── model/
-│       │   ├── reducer.ts                 # 流式文本与输入状态机
-│       │   ├── query-keys.ts
-│       │   └── mutations.ts               # TanStack mutations
-│       ├── types/
-│       │   └── index.ts
-│       └── index.ts                       # 通用模块公开出口
-│
-├── components/
-│   └── experiences/
-│       └── ai-chat/                       # 经历页面的聊天接入
-│           ├── field-ai-entry.tsx         # 字段外侧启动确认
-│           ├── experience-chat-panel.tsx  # 绑定经历 subject/target
-│           ├── field-overwrite-approval.tsx
-│           └── use-experience-ai-chat.ts  # 字段锁定与精确表单回写
-│
-└── lib/
-    └── queries/
-        └── experiences/                   # 已有经历查询与保存状态
-```
+通用聊天是内部后端运行库，不提供通用 HTTP Router、SSE API 或前端 UI。具体业务的 Router/Service 取得 `AiChatService`，把内部 `AiChatEvent` 转换为该业务的 API 与 SSE 协议。业务前端也由具体业务模块负责，不在 `ai_chat/` 下建立通用前端目录。
+
+上图中的 `experience_ai_chat/` 是后续经历适配层的规划目录，本轮不创建；当前生产 `AdapterRegistry` 保持为空。

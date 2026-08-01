@@ -1,5 +1,6 @@
 """HTTP endpoints for the person-level experience library."""
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -10,10 +11,8 @@ from app.repositories.session import get_repository_session
 from app.schemas.experiences import (
     DeletionImpactResponse,
     ExperienceCreate,
-    ExperienceEnrichmentAnswerRequest,
-    ExperienceEnrichmentAnswerResponse,
-    ExperienceEnrichmentQuestion,
     ExperienceDetail,
+    ExperienceGlobalSave,
     ExperienceImportTextRequest,
     ExperienceListQuery,
     ExperienceListResponse,
@@ -22,12 +21,9 @@ from app.schemas.experiences import (
 )
 from app.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
 from app.services.evidence_service import EvidenceService
-from app.services.experience_import_service import ExperienceImportService
-from app.services.experience_enrichment_service import (
-    EnrichmentRetryableError,
-    ExperienceEnrichmentService,
-    InvalidEnrichmentPatch,
-)
+from app.services.experience_import_service import ExperienceImportError, ExperienceImportService
+from app.services.experience_global_save_service import ExperienceGlobalSaveService
+from app.ai_chat import get_ai_chat_service
 from app.services.experience_service import (
     ExperienceConflictError,
     ExperienceNotFoundError,
@@ -38,6 +34,7 @@ from app.services.experience_service import (
 
 router = APIRouter(prefix="/experiences", tags=["Experience Library"])
 Session = Annotated[AsyncSession, Depends(get_repository_session)]
+logger = logging.getLogger(__name__)
 
 
 def _raise_domain_error(error: Exception) -> None:
@@ -52,9 +49,11 @@ def _raise_domain_error(error: Exception) -> None:
 
 @router.post("/import-text", response_model=ExperienceDetail, status_code=status.HTTP_201_CREATED)
 async def import_text(request: ExperienceImportTextRequest, session: Session) -> ExperienceDetail:
-    """Persist accepted pasted text before any optional later enrichment workflow."""
+    """解析临时文本并只持久化通过校验的结构化数据。"""
     try:
         return await ExperienceImportService(session).import_text(request.text)
+    except ExperienceImportError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)
 
@@ -89,34 +88,6 @@ async def get_experience(experience_id: int, session: Session) -> ExperienceDeta
         _raise_domain_error(error)
 
 
-@router.post("/{experience_id}/questions/next", response_model=ExperienceEnrichmentQuestion)
-async def next_enrichment_question(
-    experience_id: int, session: Session
-) -> ExperienceEnrichmentQuestion:
-    """Generate one stateless factual follow-up without persisting a chat transcript."""
-    try:
-        return await ExperienceEnrichmentService(session).next_question(experience_id)
-    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
-        _raise_domain_error(error)
-
-
-@router.post("/{experience_id}/answers", response_model=ExperienceEnrichmentAnswerResponse)
-async def apply_enrichment_answer(
-    experience_id: int,
-    request: ExperienceEnrichmentAnswerRequest,
-    session: Session,
-) -> ExperienceEnrichmentAnswerResponse:
-    """Apply one typed answer patch atomically; conversation history is never stored."""
-    try:
-        return await ExperienceEnrichmentService(session).apply_answer(
-            experience_id, request.question_id, request.answer, request.evidence_id
-        )
-    except EnrichmentRetryableError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    except (InvalidEnrichmentPatch, ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
-        _raise_domain_error(error)
-
-
 @router.patch("/{experience_id}", response_model=ExperienceDetail)
 async def patch_experience(
     experience_id: int,
@@ -126,6 +97,19 @@ async def patch_experience(
     """Apply a manual edit and recompute persisted completeness."""
     try:
         return await ExperienceService(session).patch(experience_id, request)
+    except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
+        _raise_domain_error(error)
+
+
+@router.put("/{experience_id}/save", response_model=ExperienceDetail)
+async def save_experience(
+    experience_id: int,
+    request: ExperienceGlobalSave,
+    session: Session,
+) -> ExperienceDetail:
+    """在一个事务中保存经历主字段和全部 Evidence 保存单元。"""
+    try:
+        return await ExperienceGlobalSaveService(session).save(experience_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)
 
@@ -179,6 +163,15 @@ async def permanently_delete_experience(experience_id: int, session: Session) ->
     """Irreversibly delete an archived experience after its impact has been reviewed."""
     try:
         await ExperienceService(session).permanently_delete(experience_id)
+        try:
+            await get_ai_chat_service().delete_subject(
+                "ExperienceAdapter", {"type": "experience", "id": str(experience_id)}
+            )
+        except Exception:
+            logger.exception(
+                "Experience deleted but AI Chat cleanup failed: experience=%s",
+                experience_id,
+            )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
         _raise_domain_error(error)

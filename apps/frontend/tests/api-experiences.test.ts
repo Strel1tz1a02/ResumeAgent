@@ -12,9 +12,8 @@ import {
   markExperienceReady,
   patchEvidence,
   patchExperience,
-  requestNextExperienceQuestion,
+  saveExperience,
   restoreExperience,
-  submitExperienceAnswer,
   reorderEvidence,
   type ExperienceDetail,
 } from '@/lib/api/experiences';
@@ -29,7 +28,6 @@ const experience: ExperienceDetail = {
   start_date: '2025-01',
   end_date: null,
   is_current: true,
-  raw_input: 'Built an agent platform',
   background: null,
   evidence_ids: [3],
   technologies: ['TypeScript'],
@@ -43,6 +41,7 @@ const experience: ExperienceDetail = {
   evidence_items: [],
   missing_dimensions: [],
   suggested_questions: [],
+  field_states: [],
 };
 
 describe('experience API client', () => {
@@ -115,8 +114,14 @@ describe('experience API client', () => {
   });
 
   it('uses typed CRUD and evidence request bodies', async () => {
-    await createExperience({ kind: 'work', title: 'Developer', raw_input: 'Worked' });
+    await createExperience({ kind: 'work', title: 'Developer', background: 'Worked' });
     await patchExperience(7, { title: 'Staff Developer' });
+    await saveExperience(7, {
+      experience: { title: 'Staff Developer', expected_field_revisions: { title: 2 } },
+      evidence_items: [],
+      new_evidence: null,
+      expected_collection_revision: 1,
+    });
     await createEvidence(7, { action: 'Built API', result: 'Launched', metrics: '20%' });
     await patchEvidence(7, 3, { metrics: '30%' });
     await reorderEvidence(7, [3, 4]);
@@ -131,12 +136,22 @@ describe('experience API client', () => {
       {
         url: '/api/v1/experiences',
         method: 'POST',
-        body: JSON.stringify({ kind: 'work', title: 'Developer', raw_input: 'Worked' }),
+        body: JSON.stringify({ kind: 'work', title: 'Developer', background: 'Worked' }),
       },
       {
         url: '/api/v1/experiences/7',
         method: 'PATCH',
         body: JSON.stringify({ title: 'Staff Developer' }),
+      },
+      {
+        url: '/api/v1/experiences/7/save',
+        method: 'PUT',
+        body: JSON.stringify({
+          experience: { title: 'Staff Developer', expected_field_revisions: { title: 2 } },
+          evidence_items: [],
+          new_evidence: null,
+          expected_collection_revision: 1,
+        }),
       },
       {
         url: '/api/v1/experiences/7/evidence',
@@ -157,17 +172,11 @@ describe('experience API client', () => {
     ]);
   });
 
-  it('uses fetch, lifecycle, question, answer, and deletion endpoints', async () => {
+  it('uses fetch, lifecycle, and deletion endpoints', async () => {
     await fetchExperience(7);
     await markExperienceReady(7);
     await archiveExperience(7);
     await restoreExperience(7);
-    await requestNextExperienceQuestion(7);
-    await submitExperienceAnswer(7, {
-      question_id: 'metrics',
-      answer: 'It served 500 users.',
-      evidence_id: 3,
-    });
     fetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
@@ -188,18 +197,9 @@ describe('experience API client', () => {
       ['/api/v1/experiences/7/mark-ready', 'POST'],
       ['/api/v1/experiences/7/archive', 'POST'],
       ['/api/v1/experiences/7/restore', 'POST'],
-      ['/api/v1/experiences/7/questions/next', 'POST'],
-      ['/api/v1/experiences/7/answers', 'POST'],
       ['/api/v1/experiences/7/deletion-impact', undefined],
       ['/api/v1/experiences/7/permanent', 'DELETE'],
     ]);
-    expect((fetchMock.mock.calls[5][1] as RequestInit).body).toBe(
-      JSON.stringify({
-        question_id: 'metrics',
-        answer: 'It served 500 users.',
-        evidence_id: 3,
-      })
-    );
   });
 
   it('surfaces backend error detail instead of a generic JSON error', async () => {

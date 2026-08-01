@@ -16,6 +16,10 @@ from app.services.experience_completeness_service import (
     READY_COMPLETENESS_THRESHOLD,
     calculate_completeness,
 )
+from app.services.experience_field_service import (
+    ExperienceFieldService,
+    FieldRevisionConflictError,
+)
 from app.services.experience_service import (
     ExperienceConflictError,
     ExperienceNotFoundError,
@@ -31,16 +35,20 @@ class EvidenceService:
         self._session = session
         self._experiences = ExperienceRepository(session)
         self._evidence = EvidenceRepository(session)
+        self._fields = ExperienceFieldService(session)
 
     async def create(self, experience_id: int, request: EvidenceCreate) -> ExperienceDetail:
         """Insert evidence, append its reference, and return the atomically refreshed detail."""
         async def mutation(item: ExperienceItem, observed_updated_at: str) -> ExperienceItem:
             evidence = await self._evidence.create(EvidenceItem(**request.model_dump()))
-            return await self._experiences.set_evidence_ids_if_current(
+            updated = await self._experiences.set_evidence_ids_if_current(
                 item.experience_id,
                 observed_updated_at,
                 [*(item.evidence_ids or []), evidence.id],
             )
+            await self._fields.initialize_evidence(item.experience_id, evidence)
+            await self._fields.advance_collection(updated)
+            return updated
 
         return await self._mutate(experience_id, mutation)
 
@@ -49,12 +57,22 @@ class EvidenceService:
     ) -> ExperienceDetail:
         """Update one evidence row only after proving it belongs to this experience."""
         fields = request.model_dump(exclude_unset=True)
+        expected_revision = fields.pop("expected_revision", None)
         if fields.get("action", object()) is None:
             raise ExperienceValidationError("evidence action cannot be null")
 
         async def mutation(item: ExperienceItem, _observed_updated_at: str) -> ExperienceItem:
-            await self._get_owned_evidence_or_raise(item, evidence_id)
-            await self._evidence.update_fields(evidence_id, fields)
+            evidence = await self._get_owned_evidence_or_raise(item, evidence_id)
+            if expected_revision is not None:
+                state = await self._fields.require_state(
+                    item.experience_id, "action", evidence_id
+                )
+                if state.revision != expected_revision:
+                    raise FieldRevisionConflictError("stale evidence revision")
+            changed = any(getattr(evidence, key) != value for key, value in fields.items())
+            if changed:
+                evidence = await self._evidence.update_fields(evidence_id, fields)
+                await self._fields.advance_evidence_fields(item.experience_id, evidence)
             return item
 
         return await self._mutate(experience_id, mutation)
@@ -71,6 +89,8 @@ class EvidenceService:
             deleted = await self._evidence.delete(evidence_id)
             if not deleted:
                 raise ExperienceNotFoundError(f"Evidence {evidence_id} was not found")
+            await self._fields.delete_evidence_states(item.experience_id, evidence_id)
+            await self._fields.advance_collection(detached)
             return detached
 
         return await self._mutate(experience_id, mutation)
@@ -89,9 +109,12 @@ class EvidenceService:
                 raise ExperienceValidationError(
                     "evidence_ids must contain exactly the current unique evidence IDs"
                 )
-            return await self._experiences.set_evidence_ids_if_current(
+            updated = await self._experiences.set_evidence_ids_if_current(
                 item.experience_id, observed_updated_at, requested_ids
             )
+            if requested_ids != current_ids:
+                await self._fields.advance_collection(updated)
+            return updated
 
         return await self._mutate(experience_id, mutation)
 
@@ -115,7 +138,7 @@ class EvidenceService:
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
-        except ExperienceStaleWriteError as error:
+        except (ExperienceStaleWriteError, FieldRevisionConflictError) as error:
             await self._session.rollback()
             raise ExperienceConflictError(
                 f"Experience {experience_id} was updated by another request; reload and try again"
@@ -157,13 +180,5 @@ class EvidenceService:
         return updated
 
     async def _detail(self, item: ExperienceItem) -> ExperienceDetail:
-        evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
-        guidance = calculate_completeness(
-            item, evidence_items, language=get_content_language()
-        )
-        return ExperienceDetail(
-            **ExperienceService._read(item).model_dump(),
-            evidence_items=[ExperienceService._evidence_read(evidence) for evidence in evidence_items],
-            missing_dimensions=guidance.missing_dimensions,
-            suggested_questions=guidance.suggested_questions,
-        )
+        """复用经历详情组装，确保字段状态和 revision 始终返回。"""
+        return await ExperienceService(self._session)._detail(item)

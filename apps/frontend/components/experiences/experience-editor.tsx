@@ -1,11 +1,18 @@
 'use client';
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import type { ExperienceDetail, ExperienceKind, ExperienceUpdate } from '@/lib/api/experiences';
+import { FieldAiEntry } from './ai-chat/field-ai-entry';
+import { useExperienceAiChat } from './ai-chat/use-experience-ai-chat';
+import type {
+  ExperienceDetail,
+  ExperienceFieldState,
+  ExperienceKind,
+  ExperienceUpdate,
+} from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
 import { usePatchExperienceMutation } from '@/lib/queries/experiences/mutations';
 
@@ -28,43 +35,38 @@ interface ExperienceDraft {
   start_date: string;
   end_date: string;
   is_current: boolean;
-  raw_input: string;
   background: string;
   technologies: string;
   tags: string;
   notes: string;
 }
 
-interface ExperienceEditorState {
-  draft: ExperienceDraft;
-  baseline: {
-    normalized: string;
-    updatedAt: string;
-  };
-}
+type DraftKey = keyof ExperienceDraft;
+
+const units: Record<DraftKey, DraftKey[]> = {
+  kind: ['kind', 'title'],
+  title: ['kind', 'title'],
+  organization: ['organization'],
+  role: ['role'],
+  location: ['location'],
+  start_date: ['start_date', 'end_date', 'is_current'],
+  end_date: ['start_date', 'end_date', 'is_current'],
+  is_current: ['start_date', 'end_date', 'is_current'],
+  background: ['background'],
+  technologies: ['technologies'],
+  tags: ['tags'],
+  notes: ['notes'],
+};
 
 interface ExperienceEditorProps {
   experience: ExperienceDetail;
   onDirtyChange: (dirty: boolean) => void;
   resetSignal: number;
-}
-
-function draftFromExperience(experience: ExperienceDetail): ExperienceDraft {
-  return {
-    kind: experience.kind,
-    title: experience.title,
-    organization: experience.organization ?? '',
-    role: experience.role ?? '',
-    location: experience.location ?? '',
-    start_date: experience.start_date ?? '',
-    end_date: experience.end_date ?? '',
-    is_current: experience.is_current,
-    raw_input: experience.raw_input,
-    background: experience.background ?? '',
-    technologies: experience.technologies.join(', '),
-    tags: experience.tags.join(', '),
-    notes: experience.notes ?? '',
-  };
+  globalDirty: boolean;
+  globalSaving: boolean;
+  globalError: unknown;
+  onGlobalSave: () => void;
+  onGlobalDraftChange: (value: ExperienceUpdate, valid: boolean) => void;
 }
 
 function labels(value: string): string[] {
@@ -80,115 +82,141 @@ function labels(value: string): string[] {
     });
 }
 
-function normalizedDraft(draft: ExperienceDraft): string {
-  return JSON.stringify({
-    ...draft,
-    title: draft.title.trim(),
-    organization: draft.organization.trim(),
-    role: draft.role.trim(),
-    location: draft.location.trim(),
-    start_date: draft.start_date.trim(),
-    end_date: draft.is_current ? '' : draft.end_date.trim(),
-    raw_input: draft.raw_input.trim(),
-    background: draft.background.trim(),
-    technologies: labels(draft.technologies),
-    tags: labels(draft.tags),
-    notes: draft.notes.trim(),
-  });
-}
-
-function editorStateFromExperience(experience: ExperienceDetail): ExperienceEditorState {
-  const draft = draftFromExperience(experience);
+function draftFromExperience(experience: ExperienceDetail): ExperienceDraft {
   return {
-    draft,
-    baseline: {
-      normalized: normalizedDraft(draft),
-      updatedAt: experience.updated_at,
-    },
+    kind: experience.kind,
+    title: experience.title,
+    organization: experience.organization ?? '',
+    role: experience.role ?? '',
+    location: experience.location ?? '',
+    start_date: experience.start_date ?? '',
+    end_date: experience.end_date ?? '',
+    is_current: experience.is_current,
+    background: experience.background ?? '',
+    technologies: experience.technologies.join(', '),
+    tags: experience.tags.join(', '),
+    notes: experience.notes ?? '',
   };
 }
 
-function explicitUpdate(draft: ExperienceDraft, expectedUpdatedAt: string): ExperienceUpdate {
-  return {
-    kind: draft.kind,
-    title: draft.title.trim(),
-    organization: draft.organization.trim() || null,
-    role: draft.role.trim() || null,
-    location: draft.location.trim() || null,
-    start_date: draft.start_date.trim() || null,
-    end_date: draft.is_current ? null : draft.end_date.trim() || null,
-    is_current: draft.is_current,
-    raw_input: draft.raw_input,
-    background: draft.background.trim() || null,
-    technologies: labels(draft.technologies),
-    tags: labels(draft.tags),
-    notes: draft.notes.trim() || null,
-    expected_updated_at: expectedUpdatedAt,
-  };
+function normalizedValue(key: DraftKey, draft: ExperienceDraft): unknown {
+  if (key === 'technologies' || key === 'tags') return labels(draft[key]);
+  if (key === 'end_date' && draft.is_current) return null;
+  if (key === 'kind' || key === 'is_current') return draft[key];
+  const value = draft[key].trim();
+  return key === 'title' ? value : value || null;
+}
+
+function sameField(key: DraftKey, left: ExperienceDraft, right: ExperienceDraft): boolean {
+  return JSON.stringify(normalizedValue(key, left)) === JSON.stringify(normalizedValue(key, right));
+}
+
+function payloadFor(
+  draft: ExperienceDraft,
+  keys: DraftKey[],
+  experience: ExperienceDetail
+): ExperienceUpdate {
+  const payload: Record<string, unknown> = {};
+  const revisions: Record<string, number> = {};
+  for (const key of keys) {
+    payload[key] = normalizedValue(key, draft);
+    const state = (experience.field_states ?? []).find(
+      (item) => item.key === key && item.ref_id === null
+    );
+    if (state) revisions[key] = state.revision;
+  }
+  payload.expected_field_revisions = revisions;
+  return payload as ExperienceUpdate;
 }
 
 export function ExperienceEditor({
   experience,
   onDirtyChange,
   resetSignal,
+  globalDirty,
+  globalSaving,
+  globalError,
+  onGlobalSave,
+  onGlobalDraftChange,
 }: ExperienceEditorProps) {
   const { t } = useTranslations();
-  const [editorState, setEditorState] = useState(() => editorStateFromExperience(experience));
-  const { draft, baseline } = editorState;
+  const chat = useExperienceAiChat();
+  const [draft, setDraft] = useState(() => draftFromExperience(experience));
+  const [baseline, setBaseline] = useState(() => draftFromExperience(experience));
   const patchMutation = usePatchExperienceMutation(experience.experience_id);
   const loadedExperienceIdRef = useRef(experience.experience_id);
   const loadedResetSignalRef = useRef(resetSignal);
-  const dirty = normalizedDraft(draft) !== baseline.normalized;
   const archived = experience.status === 'archived';
   const saving = patchMutation.isPending;
-  const resetPatch = patchMutation.reset;
+  const dirtyKeys = useMemo(
+    () => (Object.keys(draft) as DraftKey[]).filter((key) => !sameField(key, draft, baseline)),
+    [baseline, draft]
+  );
+  const dirty = dirtyKeys.length > 0;
 
   useEffect(() => {
-    if (
-      loadedExperienceIdRef.current === experience.experience_id &&
-      loadedResetSignalRef.current === resetSignal
-    ) {
-      return;
+    const server = draftFromExperience(experience);
+    const fullReset =
+      loadedExperienceIdRef.current !== experience.experience_id ||
+      loadedResetSignalRef.current !== resetSignal;
+    if (fullReset) {
+      setDraft(server);
+      setBaseline(server);
+      patchMutation.reset();
+    } else {
+      const appliedTarget = chat.lastBusinessEvent?.data.target as
+        | { key?: string; ref_id?: number | null }
+        | undefined;
+      setDraft((current) => {
+        const next = { ...current };
+        for (const key of Object.keys(server) as DraftKey[]) {
+          if (
+            sameField(key, current, baseline) ||
+            (appliedTarget?.ref_id == null && appliedTarget?.key === key)
+          ) {
+            next[key] = server[key] as never;
+          }
+        }
+        return next;
+      });
+      setBaseline(server);
     }
-    setEditorState(editorStateFromExperience(experience));
-    resetPatch();
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
-  }, [experience, resetPatch, resetSignal]);
+    // baseline is deliberately the previous server snapshot for the merge above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chat.lastBusinessEvent, experience, resetSignal]);
+
+  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
 
   useEffect(() => {
-    if (dirty) return;
-    const nextDraft = draftFromExperience(experience);
-    const nextNormalized = normalizedDraft(nextDraft);
-    if (baseline.normalized === nextNormalized && baseline.updatedAt === experience.updated_at)
-      return;
-    setEditorState(editorStateFromExperience(experience));
-  }, [baseline.normalized, baseline.updatedAt, dirty, experience]);
+    onGlobalDraftChange(
+      payloadFor(draft, Object.keys(draft) as DraftKey[], experience),
+      Boolean(draft.title.trim())
+    );
+  }, [draft, experience, onGlobalDraftChange]);
 
-  useEffect(() => {
-    onDirtyChange(dirty);
-  }, [dirty, onDirtyChange]);
-
-  const change = <K extends keyof ExperienceDraft>(key: K, value: ExperienceDraft[K]) => {
-    setEditorState((current) => ({
-      ...current,
-      draft: { ...current.draft, [key]: value },
-    }));
+  const change = <K extends DraftKey>(key: K, value: ExperienceDraft[K]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
   };
 
-  const save = () => {
-    if (saving || archived || !draft.title.trim()) return;
-    const submittedDraft = normalizedDraft(draft);
-    patchMutation.mutate(explicitUpdate(draft, baseline.updatedAt), {
-      onSuccess: (detail) => {
-        setEditorState((current) => {
-          if (normalizedDraft(current.draft) !== submittedDraft) return current;
-          return editorStateFromExperience(detail);
-        });
-      },
-    });
-  };
+  const stateFor = (key: DraftKey): ExperienceFieldState | undefined =>
+    (experience.field_states ?? []).find((item) => item.key === key && item.ref_id === null);
 
+  const unitDirty = (key: DraftKey) => units[key].some((item) => dirtyKeys.includes(item));
+  const saveKeys = (keys: DraftKey[]) => {
+    if (saving || archived || (keys.includes('title') && !draft.title.trim())) return;
+    patchMutation.mutate(payloadFor(draft, keys, experience));
+  };
+  const saveUnit = (key: DraftKey) => saveKeys(units[key]);
+  const locked = (key: DraftKey) => chat.isTargetLocked({ key, ref_id: null });
+  const entryProps = (key: DraftKey) => ({
+    target: { key, ref_id: null },
+    state: stateFor(key),
+    dirty: unitDirty(key),
+    onSave: () => saveUnit(key),
+    saveDisabled: saving || globalSaving || archived || chat.phase === 'approval',
+  });
   const stopTextareaEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter') event.stopPropagation();
   };
@@ -202,32 +230,36 @@ export function ExperienceEditor({
         {!archived && (
           <Button
             size="sm"
-            onClick={() => void save()}
-            disabled={saving || !dirty || !draft.title.trim()}
+            onClick={onGlobalSave}
+            disabled={
+              saving ||
+              globalSaving ||
+              !globalDirty ||
+              !draft.title.trim() ||
+              chat.phase === 'approval'
+            }
           >
-            {saving ? t('experiences.editor.saving') : t('experiences.editor.save')}
+            {globalSaving ? t('experiences.editor.saving') : t('experiences.editor.save')}
           </Button>
         )}
       </div>
       <div className="grid gap-3 md:grid-cols-2">
-        <div>
+        <FieldAiEntry {...entryProps('title')}>
           <Label htmlFor="experience-title">{t('experiences.editor.titleField')}</Label>
           <Input
             id="experience-title"
-            aria-label={t('experiences.editor.titleField')}
             value={draft.title}
             onChange={(event) => change('title', event.target.value)}
-            disabled={archived || saving}
+            disabled={archived || saving || globalSaving || locked('title')}
           />
-        </div>
-        <div>
+        </FieldAiEntry>
+        <FieldAiEntry {...entryProps('kind')}>
           <Label htmlFor="experience-kind">{t('experiences.editor.kind')}</Label>
           <select
             id="experience-kind"
-            aria-label={t('experiences.editor.kind')}
             value={draft.kind}
             onChange={(event) => change('kind', event.target.value as ExperienceKind)}
-            disabled={archived || saving}
+            disabled={archived || saving || globalSaving || locked('kind')}
             className="flex h-10 w-full border border-black bg-transparent px-3 py-2 text-sm"
           >
             {kinds.map((kind) => (
@@ -236,92 +268,84 @@ export function ExperienceEditor({
               </option>
             ))}
           </select>
-        </div>
+        </FieldAiEntry>
         {(['organization', 'role', 'location', 'start_date'] as const).map((field) => (
-          <div key={field}>
+          <FieldAiEntry key={field} {...entryProps(field)}>
             <Label htmlFor={`experience-${field}`}>{t(`experiences.editor.${field}`)}</Label>
             <Input
               id={`experience-${field}`}
-              aria-label={t(`experiences.editor.${field}`)}
               type={field === 'start_date' ? 'month' : 'text'}
               value={draft[field]}
               onChange={(event) => change(field, event.target.value)}
-              disabled={archived || saving}
+              disabled={archived || saving || globalSaving || locked(field)}
             />
-          </div>
+          </FieldAiEntry>
         ))}
         {!draft.is_current && (
-          <div>
+          <FieldAiEntry {...entryProps('end_date')}>
             <Label htmlFor="experience-end-date">{t('experiences.editor.end_date')}</Label>
             <Input
               id="experience-end-date"
-              aria-label={t('experiences.editor.end_date')}
               type="month"
               value={draft.end_date}
               onChange={(event) => change('end_date', event.target.value)}
-              disabled={archived || saving}
+              disabled={archived || saving || globalSaving || locked('end_date')}
             />
-          </div>
+          </FieldAiEntry>
         )}
-        <label className="flex items-center gap-2 self-end pb-2 text-sm">
-          <input
-            aria-label={t('experiences.editor.is_current')}
-            type="checkbox"
-            checked={draft.is_current}
-            onChange={(event) =>
-              setEditorState((current) => ({
-                ...current,
-                draft: {
-                  ...current.draft,
-                  is_current: event.target.checked,
-                  end_date: event.target.checked ? '' : current.draft.end_date,
-                },
-              }))
-            }
-            disabled={archived || saving}
-          />
-          {t('experiences.editor.is_current')}
-        </label>
-        <div>
-          <Label htmlFor="experience-technologies">{t('experiences.editor.technologies')}</Label>
-          <Input
-            id="experience-technologies"
-            aria-label={t('experiences.editor.technologies')}
-            value={draft.technologies}
-            onChange={(event) => change('technologies', event.target.value)}
-            disabled={archived || saving}
-          />
-        </div>
-        <div>
-          <Label htmlFor="experience-tags">{t('experiences.editor.tags')}</Label>
-          <Input
-            id="experience-tags"
-            aria-label={t('experiences.editor.tags')}
-            value={draft.tags}
-            onChange={(event) => change('tags', event.target.value)}
-            disabled={archived || saving}
-          />
-        </div>
+        <FieldAiEntry {...entryProps('is_current')}>
+          <label className="flex h-10 items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={draft.is_current}
+              onChange={(event) => {
+                const value = event.target.checked;
+                setDraft((current) => ({
+                  ...current,
+                  is_current: value,
+                  end_date: value ? '' : current.end_date,
+                }));
+              }}
+              disabled={archived || saving || globalSaving || locked('is_current')}
+            />
+            {t('experiences.editor.is_current')}
+          </label>
+        </FieldAiEntry>
+        {(['technologies', 'tags'] as const).map((field) => (
+          <FieldAiEntry key={field} {...entryProps(field)}>
+            <Label htmlFor={`experience-${field}`}>{t(`experiences.editor.${field}`)}</Label>
+            <Input
+              id={`experience-${field}`}
+              value={draft[field]}
+              onChange={(event) => change(field, event.target.value)}
+              disabled={archived || saving || globalSaving || locked(field)}
+            />
+          </FieldAiEntry>
+        ))}
       </div>
-      {(['raw_input', 'background', 'notes'] as const).map((field) => (
-        <div key={field}>
+      {(['background', 'notes'] as const).map((field) => (
+        <FieldAiEntry key={field} {...entryProps(field)}>
           <Label htmlFor={`experience-${field}`}>{t(`experiences.editor.${field}`)}</Label>
           <Textarea
             id={`experience-${field}`}
-            aria-label={t(`experiences.editor.${field}`)}
             value={draft[field]}
             onChange={(event) => change(field, event.target.value)}
             onKeyDown={stopTextareaEnter}
-            disabled={archived || saving}
-            rows={field === 'raw_input' ? 5 : 3}
+            disabled={archived || saving || globalSaving || locked(field)}
+            rows={3}
           />
-        </div>
+        </FieldAiEntry>
       ))}
       {patchMutation.error && (
         <p className="font-mono text-xs text-destructive">
           {patchMutation.error instanceof Error
             ? patchMutation.error.message
             : t('experiences.editor.error')}
+        </p>
+      )}
+      {Boolean(globalError) && (
+        <p className="font-mono text-xs text-destructive">
+          {globalError instanceof Error ? globalError.message : t('experiences.editor.error')}
         </p>
       )}
     </section>

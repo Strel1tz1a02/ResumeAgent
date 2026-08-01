@@ -29,6 +29,7 @@ class EvidenceUpdate(BaseModel):
     action: str | None = None
     result: str | None = None
     metrics: str | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
 
     @field_validator("action")
     @classmethod

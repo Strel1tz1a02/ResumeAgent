@@ -9,7 +9,7 @@ never sees ORM objects — preserving the TinyDB-era contracts.
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -151,7 +151,6 @@ class ExperienceItem(Base):
     start_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
     end_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=False)
-    raw_input: Mapped[str] = mapped_column(Text, default="")
     background: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     technologies: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -173,5 +172,28 @@ class EvidenceItem(Base):
     action: Mapped[str] = mapped_column(Text)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
     metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class ExperienceFieldState(Base):
+    """Completeness hint and optimistic revision for one experience save field."""
+
+    __tablename__ = "experience_field_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "experience_id", "target_key", "ref_id", name="uq_experience_field_state_target"
+        ),
+        Index("ix_experience_field_states_experience_id", "experience_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experience_id: Mapped[int] = mapped_column(
+        ForeignKey("experience_items.experience_id", ondelete="CASCADE"), nullable=False
+    )
+    target_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    ref_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="incomplete")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)

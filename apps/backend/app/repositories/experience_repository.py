@@ -24,7 +24,6 @@ _EXPERIENCE_FIELDS = frozenset(
         "start_date",
         "end_date",
         "is_current",
-        "raw_input",
         "background",
         "technologies",
         "tags",
@@ -110,7 +109,7 @@ class ExperienceRepository:
                     func.lower(ExperienceItem.title).like(pattern),
                     func.lower(ExperienceItem.organization).like(pattern),
                     func.lower(ExperienceItem.role).like(pattern),
-                    func.lower(ExperienceItem.raw_input).like(pattern),
+                    func.lower(ExperienceItem.background).like(pattern),
                     func.lower(ExperienceItem.technologies.cast(String)).like(pattern),
                     func.lower(ExperienceItem.tags.cast(String)).like(pattern),
                 )

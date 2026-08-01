@@ -68,7 +68,7 @@ listExperiences({ q?, kind?, status?, sort? }) → { items: ExperienceRead[]; to
 importExperienceText(text) → ExperienceDetail
 createExperience(payload) → ExperienceDetail
 fetchExperience(experienceId) → ExperienceDetail
-patchExperience(experienceId, { ...editableFields, expected_updated_at? }) → ExperienceDetail
+patchExperience(experienceId, { ...editableFields, expected_field_revisions }) → ExperienceDetail
 
 // Evidence and lifecycle
 createEvidence(experienceId, { action, result?, metrics? }) → ExperienceDetail
@@ -89,7 +89,7 @@ submitExperienceAnswer(experienceId, { question_id, answer, evidence_id? }) → 
 Backend endpoints:
 
 - `GET /experiences` — accepts `q`, `kind`, `status=active|draft|ready|archived`, and `sort=updated_at_desc|created_at_desc|created_at_asc`.
-- `POST /experiences` and `PATCH /experiences/{experience_id}` — create or update editable fields. The frontend's “New experience” action posts `{}` and immediately selects the returned blank draft. PATCH may include `expected_updated_at` as an optimistic-concurrency token; a stale snapshot returns `409` instead of overwriting newer manual or AI facts. IDs, status, timestamps, evidence references, and completeness remain server-owned.
+- `POST /experiences` and `PATCH /experiences/{experience_id}` — create or update editable fields. The frontend's “New experience” action posts `{}` and immediately selects the returned blank draft. PATCH uses `expected_field_revisions` for field/save-unit concurrency; a stale target returns `409` without blocking independent fields. IDs, status, timestamps, evidence references, and completeness remain server-owned.
 - `POST /experiences/import-text` with `{ "text": string }` — stores the exact nonblank text (maximum 20,000 characters) as a draft before any AI call and returns `201` with expanded detail.
 - `GET /experiences/{experience_id}` — returns ordered `evidence_ids`, expanded `evidence_items`, persisted completeness, and natural-language derived questions in the configured content language. Missing-dimension keys remain stable machine-readable identifiers.
 - `POST /experiences/{experience_id}/evidence`, `PATCH|DELETE /experiences/{experience_id}/evidence/{evidence_id}`, and `PUT /experiences/{experience_id}/evidence-order` — keep action/result/metrics together. Reordering must be an exact, duplicate-free permutation of the currently owned IDs. Every mutation returns refreshed expanded detail.
@@ -109,7 +109,7 @@ Only `/experiences` uses the feature-scoped TanStack Query v5 client under `lib/
 - Window-focus and reconnect refetching, query retries, and mutation retries are disabled for this route. Cached authoritative responses remain fresh until a mutation, explicit refresh, or lifecycle invalidation changes them.
 - Manual create, text import, metadata, evidence, AI, ready, archive, restore, and permanent-delete calls are TanStack mutations. Mutations for one experience share `scope.id = "experience:{id}"` and execute serially; different experiences may mutate independently.
 - Before applying a successful write response, the query layer cancels status-list reads and only the matching experience's detail read; unrelated detail and deletion-impact reads continue independently. The returned `ExperienceDetail` then updates the matching detail and status-list caches immutably. Permanent deletion additionally cancels that experience's impact read and removes only its cache entries.
-- Form drafts, dirty-navigation guards, filters, dialogs, and transient AI question/answer UI remain component-local. Metadata saves still send `expected_updated_at`; TanStack serialization complements rather than replaces the backend `409` stale-write check.
+- Form drafts, dirty-navigation guards, filters, dialogs, and current field-chat UI remain component-local. Saves send field/save-unit revisions; TanStack mutation scopes complement rather than replace backend `409` guards.
 
 ## Application Tracker (`lib/api/tracker.ts`)
 

@@ -319,6 +319,11 @@ class Settings(BaseSettings):
         return self.data_dir / "resume_matcher.db"
 
     @property
+    def ai_chat_checkpoint_path(self) -> Path:
+        """Path to the independent LangGraph checkpoint SQLite database."""
+        return self.data_dir / "ai_chat_checkpoints.db"
+
+    @property
     def config_path(self) -> Path:
         """Path to config storage file."""
         return self.data_dir / "config.json"

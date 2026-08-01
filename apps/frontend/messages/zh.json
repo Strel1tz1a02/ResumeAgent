@@ -121,7 +121,6 @@
     "noResults": "没有匹配的经历",
     "error": "无法加载经历",
     "retry": "重试",
-    "rawInput": "原始输入",
     "backToList": "返回列表",
     "kind": {
       "all": "所有类型",
@@ -137,7 +136,7 @@
     "import": {
       "button": "文本导入",
       "title": "导入经历",
-      "description": "粘贴经历笔记以创建草稿。",
+      "description": "粘贴经历文本，系统解析后只保存结构化内容。",
       "text": "经历文本",
       "submit": "保存导入",
       "cancel": "取消",
@@ -155,10 +154,11 @@
       "is_current": "当前经历",
       "technologies": "技术",
       "tags": "标签",
-      "raw_input": "原始输入",
       "background": "背景",
       "notes": "备注",
       "save": "保存经历",
+      "saveAll": "保存全部字段",
+      "saveField": "保存",
       "saving": "正在保存…",
       "error": "无法保存经历"
     },
@@ -229,7 +229,15 @@
       "retry": "重试",
       "fallback": "建议问题",
       "manual": "你随时可以手动编辑这段经历。",
-      "error": "AI 无法整理这段经历。你仍可继续手动编辑。"
+      "error": "AI 暂时无法回复。你仍可继续手动编辑。",
+      "startField": "开始 AI 对话",
+      "startConfirm": "是否针对当前字段开始 AI 对话？",
+      "startConfirmAction": "开始",
+      "approval": "是否覆盖字段？",
+      "approve": "允许覆盖",
+      "reject": "拒绝",
+      "unsavedHint": "未保存的内容 AI 无法感知",
+      "message": "输入消息"
     }
   },
   "builder": {

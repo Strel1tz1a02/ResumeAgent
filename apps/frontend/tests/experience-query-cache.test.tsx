@@ -42,7 +42,6 @@ const detail = (overrides: Partial<ExperienceDetail> = {}): ExperienceDetail => 
   start_date: '2025-01',
   end_date: null,
   is_current: true,
-  raw_input: 'Built search',
   background: null,
   evidence_ids: [],
   technologies: ['TypeScript'],
@@ -303,7 +302,7 @@ describe('experience query cache', () => {
     const manual = deferred<ExperienceDetail>();
     api.createExperience.mockReturnValue(manual.promise);
     api.importExperienceText.mockResolvedValue(
-      detail({ experience_id: 2, title: 'Imported', raw_input: 'Imported text' })
+      detail({ experience_id: 2, title: 'Imported', background: 'Imported text' })
     );
     const { wrapper } = queryWrapper();
     const { result } = renderHook(

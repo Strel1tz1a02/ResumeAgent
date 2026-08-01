@@ -31,7 +31,6 @@ export interface ExperienceRead {
   start_date: string | null;
   end_date: string | null;
   is_current: boolean;
-  raw_input: string;
   background: string | null;
   evidence_ids: number[];
   technologies: string[];
@@ -48,6 +47,14 @@ export interface ExperienceDetail extends ExperienceRead {
   evidence_items: EvidenceItem[];
   missing_dimensions: string[];
   suggested_questions: string[];
+  field_states: ExperienceFieldState[];
+}
+
+export interface ExperienceFieldState {
+  key: string;
+  ref_id: number | null;
+  status: 'complete' | 'incomplete';
+  revision: number;
 }
 
 export interface ExperienceCreate {
@@ -59,7 +66,6 @@ export interface ExperienceCreate {
   start_date?: string | null;
   end_date?: string | null;
   is_current?: boolean;
-  raw_input?: string;
   background?: string | null;
   technologies?: string[];
   tags?: string[];
@@ -67,7 +73,7 @@ export interface ExperienceCreate {
 }
 
 export interface ExperienceUpdate extends ExperienceCreate {
-  expected_updated_at?: string;
+  expected_field_revisions?: Record<string, number>;
 }
 
 export interface EvidenceCreate {
@@ -80,6 +86,37 @@ export interface EvidenceUpdate {
   action?: string | null;
   result?: string | null;
   metrics?: string | null;
+  expected_revision?: number;
+}
+
+export interface ExperienceEvidenceSave {
+  evidence_id: number;
+  action: string;
+  result: string | null;
+  metrics: string | null;
+  expected_revision: number;
+}
+
+export interface ExperienceGlobalSave {
+  experience: ExperienceUpdate;
+  evidence_items: ExperienceEvidenceSave[];
+  new_evidence: EvidenceCreate | null;
+  expected_collection_revision: number;
+}
+
+export interface ExperienceEvidenceSave {
+  evidence_id: number;
+  action: string;
+  result: string | null;
+  metrics: string | null;
+  expected_revision: number;
+}
+
+export interface ExperienceGlobalSave {
+  experience: ExperienceUpdate;
+  evidence_items: ExperienceEvidenceSave[];
+  new_evidence: EvidenceCreate | null;
+  expected_collection_revision: number;
 }
 
 export interface ExperienceListQuery {
@@ -109,24 +146,6 @@ export class ExperienceReadyConflictError extends Error {
     super('Experience is not complete enough to mark ready');
     this.name = 'ExperienceReadyConflictError';
   }
-}
-
-export interface ExperienceEnrichmentQuestion {
-  question_id: string;
-  question: string;
-  target: 'experience' | 'evidence';
-  evidence_id: number | null;
-  is_fallback: boolean;
-}
-
-export interface ExperienceEnrichmentAnswerRequest {
-  question_id: string;
-  answer: string;
-  evidence_id?: number | null;
-}
-
-export interface ExperienceEnrichmentAnswerResponse extends ExperienceDetail {
-  next_question: ExperienceEnrichmentQuestion | null;
 }
 
 function responseErrorMessage(payload: unknown): string | null {
@@ -225,6 +244,16 @@ export async function patchExperience(
   );
 }
 
+export async function saveExperience(
+  experienceId: number,
+  payload: ExperienceGlobalSave
+): Promise<ExperienceDetail> {
+  return parseResponse<ExperienceDetail>(
+    await apiPut(`${experiencePath(experienceId)}/save`, payload),
+    'Failed to save experience'
+  );
+}
+
 export async function markExperienceReady(experienceId: number): Promise<ExperienceDetail> {
   const response = await apiPost(`${experiencePath(experienceId)}/mark-ready`, {});
   if (response.status === 409) {
@@ -311,24 +340,5 @@ export async function reorderEvidence(
   return parseResponse<ExperienceDetail>(
     await apiPut(`${experiencePath(experienceId)}/evidence-order`, { evidence_ids: evidenceIds }),
     'Failed to reorder evidence'
-  );
-}
-
-export async function requestNextExperienceQuestion(
-  experienceId: number
-): Promise<ExperienceEnrichmentQuestion> {
-  return parseResponse<ExperienceEnrichmentQuestion>(
-    await apiPost(`${experiencePath(experienceId)}/questions/next`, {}),
-    'Failed to generate experience question'
-  );
-}
-
-export async function submitExperienceAnswer(
-  experienceId: number,
-  payload: ExperienceEnrichmentAnswerRequest
-): Promise<ExperienceEnrichmentAnswerResponse> {
-  return parseResponse<ExperienceEnrichmentAnswerResponse>(
-    await apiPost(`${experiencePath(experienceId)}/answers`, payload),
-    'Failed to apply experience answer'
   );
 }

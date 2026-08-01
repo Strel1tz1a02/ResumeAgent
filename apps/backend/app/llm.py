@@ -814,8 +814,7 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
     Args:
         data: Parsed JSON dict.
         schema_type: Expected schema — "resume" (full resume), "enrichment"
-            (analyze output), "experience_enrichment" (one question or a
-            narrow experience patch), "diff" (diff changes), "keywords", or
+            (analyze output), "diff" (diff changes), "keywords", or
             "interview_prep".
             Determines which fields are checked for truncation.
     """
@@ -845,39 +844,6 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
             )
             return True
         return False
-
-    if schema_type == "experience_enrichment":
-        # Question turns require one question object. Answer turns require at
-        # least one recognized patch operation. Do not use resume-array
-        # heuristics here: empty evidence arrays are a valid library state.
-        question = data.get("question")
-        if isinstance(question, dict):
-            if question.get("question_id") and question.get("question"):
-                return False
-            logging.warning("Possible truncation detected: enrichment question is incomplete")
-            return True
-        experience_updates = data.get("experience_updates")
-        if isinstance(experience_updates, dict) and experience_updates:
-            return False
-        evidence_update = data.get("evidence_update")
-        if (
-            isinstance(evidence_update, dict)
-            and isinstance(evidence_update.get("evidence_id"), int)
-            and not isinstance(evidence_update.get("evidence_id"), bool)
-            and evidence_update["evidence_id"] > 0
-            and isinstance(evidence_update.get("updates"), dict)
-            and evidence_update["updates"]
-        ):
-            return False
-        new_evidence = data.get("new_evidence")
-        if (
-            isinstance(new_evidence, dict)
-            and isinstance(new_evidence.get("action"), str)
-            and bool(new_evidence["action"].strip())
-        ):
-            return False
-        logging.warning("Possible truncation detected: enrichment answer has no complete patch operation")
-        return True
 
     if schema_type == "interview_prep":
         required = {
@@ -1117,7 +1083,7 @@ async def complete_json(
 
     Args:
         schema_type: Expected schema — "resume", "enrichment", "diff",
-            "keywords", "interview_prep", or "experience_enrichment". Passed to _appears_truncated for
+            "keywords", or "interview_prep". Passed to _appears_truncated for
             context-aware truncation detection and used to tailor retry hints.
     """
     router, config = get_router(config)
@@ -1189,11 +1155,6 @@ async def complete_json(
                     elif schema_type == "interview_prep":
                         hint = (
                             "\n\nIMPORTANT: Output the COMPLETE JSON object with ALL keys: role_fit_analysis, resume_questions, project_follow_ups, skill_gaps, talking_points. Do not truncate."
-                        )
-                    elif schema_type == "experience_enrichment":
-                        hint = (
-                            "\n\nIMPORTANT: Output a COMPLETE JSON object containing either "
-                            "question or a recognized enrichment patch operation. Do not truncate."
                         )
                     else:
                         hint = (

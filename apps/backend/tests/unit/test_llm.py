@@ -209,43 +209,6 @@ class TestAppearsTruncated:
         }
         assert _appears_truncated(data, schema_type="enrichment") is False
 
-    # --- experience enrichment schema ---
-
-    def test_experience_enrichment_requires_question_or_patch_without_resume_heuristics(self):
-        """A stateless question or a narrow patch is valid even without resume arrays."""
-        assert _appears_truncated(
-            {"question": {"question_id": "action", "question": "What did you do?"}},
-            schema_type="experience_enrichment",
-        ) is False
-        assert _appears_truncated(
-            {"new_evidence": {"action": "Built API"}},
-            schema_type="experience_enrichment",
-        ) is False
-        assert _appears_truncated({}, schema_type="experience_enrichment") is True
-
-    @pytest.mark.parametrize(
-        "data",
-        [
-            {"experience_updates": {}},
-            {"experience_updates": None},
-            {"evidence_update": {}},
-            {"evidence_update": {"evidence_id": 0, "updates": {"result": "Released"}}},
-            {"evidence_update": {"evidence_id": 1, "updates": {}}},
-            {"new_evidence": {}},
-            {"new_evidence": {"action": "   "}},
-        ],
-    )
-    def test_experience_enrichment_empty_operations_are_truncated(self, data):
-        """A structurally empty operation must cause a JSON retry, not a later no-op."""
-        assert _appears_truncated(data, schema_type="experience_enrichment") is True
-
-    def test_experience_enrichment_valid_evidence_operation_is_not_truncated(self):
-        """A complete owned evidence operation remains a valid answer shape."""
-        assert _appears_truncated(
-            {"evidence_update": {"evidence_id": 1, "updates": {"result": "Released"}}},
-            schema_type="experience_enrichment",
-        ) is False
-
     # --- diff schema ---
 
     def test_diff_empty_changes(self):
