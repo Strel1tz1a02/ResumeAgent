@@ -1,5 +1,3 @@
-先不讨论类名和目录，先把功能边界重新划清。核心结论是：不能只分成“通用聊天”和“经历业务代码”两个平面，逻辑上需要识别三个责任层，其中后两层可以放在同一个业务模块中。
-
 ```mermaid
 flowchart LR
     UI["业务页面"] --> CHAT["通用聊天模块"]
@@ -506,4 +504,126 @@ ExperienceRepository
 ExperienceAdapter 可以调用 ExperienceService
 ExperienceAdapter 不应直接实现另一套经历写入规则
 ai_chat 不能调用或导入 ExperienceService
+```
+
+---
+
+# 6. 目录结构设计
+
+目录结构直接表达前述功能边界：通用聊天、经历 AI 接入和经历领域逻辑分别存放。通用聊天代码不能散落到全局 `services/`、`repositories/`、`schemas/` 或业务组件目录中。
+
+## 6.1 后端目录
+
+```text
+apps/backend/app/
+├── ai_chat/                              # 通用聊天模块
+│   ├── __init__.py
+│   ├── router.py                         # 通用会话、消息、审批和关闭 API
+│   ├── service.py                        # AiChatService；通用流程入口
+│   ├── runtime.py                        # AiChatRuntime；Graph 执行依赖
+│   ├── registry.py                       # AdapterRegistry
+│   ├── models.py                         # 会话、消息、run、Tool Call ORM 模型
+│   ├── schemas.py                        # 通用 HTTP 与内部传输 Schema
+│   │
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   └── base.py                       # BaseAdapter、AdapterInput、绑定引用协议
+│   │
+│   ├── graph/
+│   │   ├── __init__.py
+│   │   ├── state.py                      # 通用 Graph State
+│   │   └── runner.py                     # 编译、astream、interrupt/resume
+│   │
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── handler.py                    # ToolHandler 抽象协议
+│   │   ├── lifecycle.py                  # Tool Call 通用生命周期
+│   │   └── results.py                    # 通用 Tool Result 传输结构
+│   │
+│   ├── repositories/
+│   │   ├── __init__.py
+│   │   ├── conversation_repository.py
+│   │   ├── message_repository.py
+│   │   ├── run_repository.py
+│   │   └── tool_call_repository.py
+│   │
+│   ├── checkpoint/
+│   │   ├── __init__.py
+│   │   └── factory.py                    # 持久化 checkpointer 创建与配置
+│   │
+│   └── streaming/
+│       ├── __init__.py
+│       ├── events.py                     # SSE 事件结构
+│       ├── event_sink.py                 # Graph 事件到 SSE 的输出接口
+│       └── tool_call_buffer.py           # Tool 参数分片聚合
+│
+├── experience_ai_chat/                   # 经历业务 AI 接入层
+│   ├── __init__.py
+│   ├── adapter.py                        # ExperienceAdapter
+│   ├── context.py                        # 经历模型上下文构造
+│   ├── prompts.py                        # 经历补全 Prompt
+│   │
+│   ├── graph/
+│   │   ├── __init__.py
+│   │   ├── state.py                      # 经历 Graph 扩展 State
+│   │   ├── builder.py                    # 经历 Graph 定义
+│   │   └── nodes/
+│   │       ├── __init__.py
+│   │       ├── prepare_turn.py
+│   │       ├── load_context.py
+│   │       ├── agent_stream.py
+│   │       ├── validate_tool_call.py
+│   │       ├── approval.py
+│   │       └── continuation.py
+│   │
+│   └── tools/
+│       ├── __init__.py
+│       └── field_overwrite.py             # 经历字段覆盖 Handler
+│
+├── services/
+│   ├── experience_service.py              # 经历领域写入与业务规则
+│   ├── experience_completeness_service.py
+│   └── evidence_service.py
+│
+└── repositories/
+    ├── experience_repository.py           # 经历领域持久化
+    └── evidence_repository.py
+```
+
+## 6.2 前端目录
+
+```text
+apps/frontend/
+├── features/
+│   └── ai-chat/                           # 通用聊天前端模块
+│       ├── api/
+│       │   ├── client.ts                  # 会话、消息、审批和关闭请求
+│       │   └── stream.ts                  # SSE 连接与事件解析
+│       ├── components/
+│       │   ├── chat-panel.tsx
+│       │   ├── message-list.tsx
+│       │   ├── message-input.tsx
+│       │   └── approval-container.tsx
+│       ├── hooks/
+│       │   ├── use-ai-chat.ts
+│       │   └── use-ai-chat-stream.ts
+│       ├── model/
+│       │   ├── reducer.ts                 # 流式文本与输入状态机
+│       │   ├── query-keys.ts
+│       │   └── mutations.ts               # TanStack mutations
+│       ├── types/
+│       │   └── index.ts
+│       └── index.ts                       # 通用模块公开出口
+│
+├── components/
+│   └── experiences/
+│       └── ai-chat/                       # 经历页面的聊天接入
+│           ├── field-ai-entry.tsx         # 字段外侧启动确认
+│           ├── experience-chat-panel.tsx  # 绑定经历 subject/target
+│           ├── field-overwrite-approval.tsx
+│           └── use-experience-ai-chat.ts  # 字段锁定与精确表单回写
+│
+└── lib/
+    └── queries/
+        └── experiences/                   # 已有经历查询与保存状态
 ```
