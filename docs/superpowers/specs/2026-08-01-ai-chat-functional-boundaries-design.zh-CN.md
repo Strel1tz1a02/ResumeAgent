@@ -277,7 +277,80 @@ ExperienceAdapter
 
 通用聊天只通过 Adapter 查找定义，不直接导入经历模块。
 
-## 3.2 解释 subject 和 target
+## 3.2 Adapter 基类设计
+
+### 3.2.1 设计目的
+
+`BaseAdapter` 是通用聊天模块与业务 AI 接入层之间唯一稳定的后端扩展契约。
+
+它的作用不是实现一套默认聊天业务，也不是封装业务领域服务，而是把通用聊天运行一次业务 Graph 所必需的差异集中到一个入口中：
+
+- 识别并校验业务对象引用；
+- 把通用运行输入转换成业务 State；
+- 提供业务 Graph；
+- 提供该 Graph 使用的 Tool Handlers。
+
+通用聊天只依赖 `BaseAdapter`，不依赖 `ExperienceAdapter` 或任何业务 Service。新增业务时，应增加新的 Adapter 实现并注册，不修改通用聊天。
+
+### 3.2.2 继承关系
+```text
+BaseAdapter
+    ├── ExperienceAdapter
+    ├── ResumeOptimizationAdapter
+    └── 其他业务 Adapter
+```
+
+注册表使用具体 Adapter 的稳定名称作为键；会话中的 `adapter` 保存同一个名称。例如：
+
+```text
+ExperienceAdapter
+```
+
+因此同一个具体 Adapter 名称必须全局唯一。类名一旦用于已经持久化的会话，就不能在没有同步处理历史数据的情况下随意修改。
+
+### 3.2.3 实例生命周期与状态约束
+
+Adapter 在应用启动时创建并注册，运行期间作为无请求状态的长生命周期对象复用。
+
+Adapter 实例可以持有：
+
+- 业务 Service factory；
+- 只读配置；
+- Prompt 模板引用；
+- 无请求状态的 Tool Handler；
+- Graph 构建所需的静态依赖。
+
+Adapter 实例不能持有：
+
+- 当前用户；
+- 当前 conversation、run、subject 或 target；
+- 请求级数据库 Session；
+- 当前 Graph State；
+- SSE 连接；
+- 可被并发请求修改的临时结果。
+
+所有请求级数据必须通过方法参数、Graph State 或 `AiChatRuntime` 显式传入。这样同一个 Adapter 才能安全服务多个并发会话。
+
+### 3.2.4 与业务领域服务的关系
+
+Adapter 是协议转换和流程装配层，不是新的业务 Service。
+
+```text
+通用聊天输入
+→ BaseAdapter 契约
+→ ExperienceAdapter 解释业务含义
+→ ExperienceService 执行领域规则
+→ ExperienceRepository 持久化
+```
+
+具体 Adapter 可以调用业务 Service，但不能：
+
+- 直接复制业务保存规则；
+- 绕过 Service 直接修改 Repository；
+- 自己计算本应由领域服务维护的派生值；
+- 为 AI 单独建立一套与手动编辑不同的数据一致性规则。
+
+## 3.3 解释 subject 和 target
 
 通用聊天保存：
 
@@ -299,7 +372,7 @@ ExperienceAdapter
 
 通用聊天不应该硬编码任何字段白名单。
 
-## 3.3 加载业务上下文
+## 3.4 加载业务上下文
 
 业务接入层负责通过领域服务读取：
 
@@ -312,7 +385,7 @@ ExperienceAdapter
 
 业务接入层决定哪些数据提供给模型，但不应直接从 Repository 拼接一套绕过领域规则的查询。
 
-## 3.4 定义业务 Graph
+## 3.5 定义业务 Graph
 
 经历补全的 Graph 属于经历业务接入层，因为以下决策都是业务相关的：
 
@@ -326,7 +399,7 @@ ExperienceAdapter
 
 其他业务可以使用完全不同的 Graph。
 
-## 3.5 定义 Tool 业务语义
+## 3.6 定义 Tool 业务语义
 
 经历接入层负责 `field_overwrite` 的：
 
@@ -341,7 +414,7 @@ ExperienceAdapter
 
 但是，真正的字段写入、revision 增长和完整度重算仍由经历领域服务完成。
 
-## 3.6 业务前端接入
+## 3.7 业务前端接入
 
 经历页面负责：
 
