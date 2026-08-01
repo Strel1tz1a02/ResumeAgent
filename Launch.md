@@ -13,7 +13,6 @@ uvicorn app.main:app --reload --port 8000
 ```
 - 启动前端：
 ```bash
-cd apps\frontend
-npm install
+cd apps/frontend
 npm run dev
 ```
