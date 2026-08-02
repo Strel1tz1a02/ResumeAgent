@@ -1,4 +1,4 @@
-"""三个经历 Tool 共用的目标与 guard 辅助函数。"""
+"""经历内容修改 Tool 的上下文解析辅助函数。"""
 
 from __future__ import annotations
 
@@ -34,3 +34,15 @@ def generation_guard(context: ToolContext) -> tuple[int, Any]:
         "normalized_target_value_at_generation_start"
     )
 
+
+def evidence_generation_revision(
+    context: ToolContext, evidence_id: int
+) -> int | None:
+    """读取共享 Evidence 会话生成开始时某一 Item 的 revision。"""
+    revisions = context.adapter_context.get(
+        "evidence_revisions_at_generation_start"
+    )
+    if not isinstance(revisions, dict):
+        return None
+    revision = revisions.get(str(evidence_id))
+    return revision if isinstance(revision, int) else None

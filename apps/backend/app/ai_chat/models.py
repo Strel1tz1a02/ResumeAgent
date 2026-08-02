@@ -1,4 +1,4 @@
-"""SQLAlchemy models owned by the reusable AI Chat runtime."""
+"""可复用 AI 对话运行时拥有的 SQLAlchemy 模型。"""
 
 from datetime import datetime, timezone
 from typing import Any
@@ -21,12 +21,12 @@ from app.models import Base
 
 
 def utcnow_iso() -> str:
-    """Return a UTC ISO-8601 audit timestamp."""
+    """返回 UTC ISO-8601 审计时间戳。"""
     return datetime.now(timezone.utc).isoformat()
 
 
 class AiChatConversation(Base):
-    """One business-bound AI conversation."""
+    """一个绑定业务对象的 AI 会话。"""
 
     __tablename__ = "ai_chat_conversations"
 
@@ -49,7 +49,7 @@ class AiChatConversation(Base):
 
 
 class AiChatRun(Base):
-    """One opening, user turn, or post-approval continuation."""
+    """一次开场、用户轮次或审批后续跑。"""
 
     __tablename__ = "ai_chat_runs"
 
@@ -83,7 +83,7 @@ class AiChatRun(Base):
 
 
 class AiChatMessage(Base):
-    """One visible user or assistant message."""
+    """一条可见的用户或助手消息。"""
 
     __tablename__ = "ai_chat_messages"
 
@@ -123,7 +123,7 @@ class AiChatMessage(Base):
 
 
 class AiChatToolCall(Base):
-    """Persisted Tool Call, optional proposal, decision, and Tool Result."""
+    """持久化的工具调用，以及可选的提案、决定和工具结果。"""
 
     __tablename__ = "ai_chat_tool_calls"
 

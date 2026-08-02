@@ -1,4 +1,4 @@
-"""Internal application service for reusable AI conversation lifecycles."""
+"""管理可复用 AI 会话生命周期的内部应用服务。"""
 
 import asyncio
 import logging
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class AiChatService:
-    """Coordinate generic chat persistence, Graph execution, and recovery."""
+    """协调通用对话持久化、图执行和失败恢复。"""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class AiChatService:
         tool_lifecycle: ToolLifecycle,
         repositories: RepositoryFactory,
     ) -> None:
-        """Compose stateless collaborators and process-local approval locks."""
+        """组装无状态协作者和进程内审批锁。"""
         self._registry = registry
         self._runner = runner
         self._tool_lifecycle = tool_lifecycle
@@ -58,7 +58,7 @@ class AiChatService:
         target: JsonObject,
         language: str = "zh",
     ) -> int:
-        """Validate the business binding before persisting a conversation."""
+        """在持久化会话前校验业务绑定。"""
         instance = self._registry.get(adapter)
         binding = await instance.validate_binding(
             SubjectRef.model_validate(subject), TargetRef.model_validate(target)
@@ -74,7 +74,7 @@ class AiChatService:
             return row.id
 
     async def stream_opening(self, conversation_id: int) -> AsyncIterator[AiChatEvent]:
-        """Start and stream the Adapter's opening turn."""
+        """启动并流式返回适配器的开场轮次。"""
         async for event in self._stream_new_run(
             conversation_id=conversation_id,
             kind="opening",
@@ -86,7 +86,7 @@ class AiChatService:
     async def stream_message(
         self, conversation_id: int, content: str, client_message_id: str
     ) -> AsyncIterator[AiChatEvent]:
-        """Persist an idempotent user message and stream one model invocation."""
+        """持久化幂等用户消息并流式执行一次模型调用。"""
         async for event in self._stream_new_run(
             conversation_id=conversation_id,
             kind="user_turn",
@@ -103,7 +103,7 @@ class AiChatService:
         user_content: str | None,
         client_message_id: str | None,
     ) -> AsyncIterator[AiChatEvent]:
-        """Atomically open a run, then stream and finalize its assistant message."""
+        """原子创建运行，然后流式生成并结束助手消息。"""
         try:
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
@@ -177,7 +177,7 @@ class AiChatService:
         user_message_id: int | None = None,
         approval: ApprovalInput | None = None,
     ) -> AdapterInput:
-        """Load serializable history and pending Tool Results for one invocation."""
+        """为一次调用加载可序列化历史和待补传工具结果。"""
         async with database_module.db.session() as session:
             repositories = self._repositories.create(session)
             conversation = await repositories.conversations.get(conversation_id)
@@ -224,7 +224,7 @@ class AiChatService:
         resume: JsonObject | ApprovalInput | None = None,
         silent_failure: bool = False,
     ) -> AsyncIterator[AiChatEvent]:
-        """Persist a complete response or a safely resumable failure."""
+        """持久化完整响应，或记录可安全恢复的失败。"""
         text = ""
         suspended = False
         proposal_emitted = False
@@ -300,7 +300,7 @@ class AiChatService:
         code: str | None,
         content: str,
     ) -> None:
-        """Persist partial output and terminate a failed or cancelled run."""
+        """持久化部分输出并结束失败或取消的运行。"""
         async with database_module.db.session() as session:
             message = await session.get(AiChatMessage, assistant_id)
             repositories = self._repositories.create(session)
@@ -318,7 +318,7 @@ class AiChatService:
         decision: Literal["approve", "reject"],
         client_resolution_id: str,
     ) -> AsyncIterator[AiChatEvent]:
-        """Resolve once, then immediately resume the same checkpoint without Tools."""
+        """完成一次审批后，立即从同一检查点无工具续跑。"""
         lock = self._resolution_locks.setdefault(proposal_id, asyncio.Lock())
         async with lock:
             async with database_module.db.session() as session:
@@ -443,7 +443,7 @@ class AiChatService:
         self._resolution_locks.pop(proposal_id, None)
 
     async def close_conversation(self, conversation_id: int, reason: str) -> None:
-        """End an idle conversation while preserving its history."""
+        """结束空闲会话并保留其历史记录。"""
         async with database_module.db.session() as session:
             repositories = self._repositories.create(session)
             conversations = repositories.conversations
@@ -458,7 +458,7 @@ class AiChatService:
             await session.commit()
 
     async def delete_conversation(self, conversation_id: int) -> None:
-        """Delete one conversation and its checkpoint thread."""
+        """删除一个会话及其检查点线程。"""
         async with database_module.db.session() as session:
             deleted = await self._repositories.create(session).conversations.delete(
                 conversation_id
@@ -468,7 +468,7 @@ class AiChatService:
             await self._runner.delete_thread(conversation_id)
 
     async def delete_subject(self, adapter: str, subject: JsonObject) -> int:
-        """Delete all conversations bound to an opaque business subject."""
+        """删除绑定到不透明业务主体的全部会话。"""
         normalized = SubjectRef.model_validate(subject).model_dump(mode="json")
         async with database_module.db.session() as session:
             repository = self._repositories.create(session).conversations

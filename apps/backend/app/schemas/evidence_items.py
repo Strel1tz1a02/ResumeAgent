@@ -1,10 +1,10 @@
-"""Pydantic contracts for structured experience evidence."""
+"""结构化经历证据的 Pydantic 契约。"""
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EvidenceCreate(BaseModel):
-    """Client-supplied fields for a new evidence record."""
+    """客户端创建证据记录时提供的字段。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,7 +22,7 @@ class EvidenceCreate(BaseModel):
 
 
 class EvidenceUpdate(BaseModel):
-    """Client-supplied partial update for one evidence record."""
+    """客户端对一条证据记录提供的局部更新。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -43,7 +43,7 @@ class EvidenceUpdate(BaseModel):
 
 
 class EvidenceRead(BaseModel):
-    """A persisted evidence record returned to clients."""
+    """返回给客户端的已持久化证据记录。"""
 
     id: int
     action: str
@@ -54,7 +54,7 @@ class EvidenceRead(BaseModel):
 
 
 class EvidenceReorder(BaseModel):
-    """Requested presentation order; services verify it matches the current ID set."""
+    """请求的展示顺序；服务层会校验其与当前 ID 集合一致。"""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -1,4 +1,4 @@
-"""Business Tool Handler protocol with opaque results."""
+"""返回不透明结果的业务工具处理器协议。"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ from app.ai_chat.types import JsonObject
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Identifiers and opaque binding supplied to Tool business logic."""
+    """提供给工具业务逻辑的标识符和不透明绑定。"""
 
     conversation_id: int
     run_id: int
@@ -23,7 +23,7 @@ class ToolContext:
 
 @dataclass(frozen=True)
 class ApprovalProposal:
-    """Opaque proposal that must be approved before execution."""
+    """执行前必须审批的不透明提案。"""
 
     proposal_payload: JsonObject
     guard_payload: JsonObject
@@ -31,14 +31,14 @@ class ApprovalProposal:
 
 @dataclass(frozen=True)
 class ImmediateToolResult:
-    """Opaque Tool Result that does not require user approval."""
+    """无需用户审批的不透明工具结果。"""
 
     payload: JsonObject
 
 
 @dataclass(frozen=True)
 class ToolResult:
-    """Opaque result produced after an approval decision."""
+    """审批决定后产生的不透明结果。"""
 
     payload: JsonObject
 
@@ -47,16 +47,15 @@ ToolValidation = ApprovalProposal | ImmediateToolResult
 
 
 class ToolHandler(ABC):
-    """Validate and resolve one business Tool without leaking its semantics."""
+    """校验并处理一个业务工具，同时不向通用层泄露其语义。"""
 
     name: str
+    description: str
     arguments_schema: type[BaseModel]
 
     @abstractmethod
-    async def validate(
-        self, context: ToolContext, arguments: BaseModel
-    ) -> ToolValidation:
-        """Return either an approval proposal or an immediate opaque result."""
+    async def invoke(self, context: ToolContext, arguments: BaseModel) -> ToolValidation:
+        """返回审批提案或立即生效的不透明结果。"""
 
     @abstractmethod
     async def resolve(
@@ -67,8 +66,8 @@ class ToolHandler(ABC):
         guard_payload: JsonObject,
         decision: Literal["approve", "reject"],
     ) -> ToolResult:
-        """Resolve an approved or rejected proposal through business logic."""
+        """通过业务逻辑处理已同意或已拒绝的提案。"""
 
     def schema(self) -> dict[str, Any]:
-        """Return the provider-neutral JSON Schema for this Tool."""
+        """返回与模型提供方无关的工具 JSON Schema。"""
         return self.arguments_schema.model_json_schema()

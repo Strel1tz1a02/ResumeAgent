@@ -1,4 +1,4 @@
-"""Transactional mutations for structured experience evidence."""
+"""结构化经历证据的事务性修改。"""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from app.services.experience_service import (
 
 
 class EvidenceService:
-    """Keep evidence rows, JSON references, and derived experience state in one commit."""
+    """在一次提交中维护证据记录、JSON 引用和派生经历状态。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -38,7 +38,7 @@ class EvidenceService:
         self._fields = ExperienceFieldService(session)
 
     async def create(self, experience_id: int, request: EvidenceCreate) -> ExperienceDetail:
-        """Insert evidence, append its reference, and return the atomically refreshed detail."""
+        """插入证据、追加其引用，并返回原子刷新的详情。"""
         async def mutation(item: ExperienceItem, observed_updated_at: str) -> ExperienceItem:
             evidence = await self._evidence.create(EvidenceItem(**request.model_dump()))
             updated = await self._experiences.set_evidence_ids_if_current(
@@ -55,7 +55,7 @@ class EvidenceService:
     async def patch(
         self, experience_id: int, evidence_id: int, request: EvidenceUpdate
     ) -> ExperienceDetail:
-        """Update one evidence row only after proving it belongs to this experience."""
+        """确认归属当前经历后，才更新对应证据记录。"""
         fields = request.model_dump(exclude_unset=True)
         expected_revision = fields.pop("expected_revision", None)
         if fields.get("action", object()) is None:
@@ -78,7 +78,7 @@ class EvidenceService:
         return await self._mutate(experience_id, mutation)
 
     async def delete(self, experience_id: int, evidence_id: int) -> ExperienceDetail:
-        """Detach and delete an owned evidence row in the same transaction."""
+        """在同一事务中解除关联并删除所属证据记录。"""
         async def mutation(item: ExperienceItem, observed_updated_at: str) -> ExperienceItem:
             await self._get_owned_evidence_or_raise(item, evidence_id)
             detached = await self._experiences.set_evidence_ids_if_current(
@@ -96,7 +96,7 @@ class EvidenceService:
         return await self._mutate(experience_id, mutation)
 
     async def reorder(self, experience_id: int, request: EvidenceReorder) -> ExperienceDetail:
-        """Replace display order only when the client supplies the exact current ID set."""
+        """仅当客户端提供完整的当前 ID 集合时替换展示顺序。"""
         requested_ids = request.evidence_ids
 
         async def mutation(item: ExperienceItem, observed_updated_at: str) -> ExperienceItem:
@@ -126,10 +126,8 @@ class EvidenceService:
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_experience_or_raise(experience_id)
-            # Claim the experience version before touching an evidence row.  This
-            # keeps patch operations subject to the same optimistic concurrency
-            # boundary as JSON-reference changes; SQLite then holds the write
-            # transaction through the evidence and derived-state updates.
+        # 修改证据记录前先占用经历版本，使局部更新与 JSON 引用修改遵守同一
+        # 乐观并发边界；随后 SQLite 会在证据和派生状态更新期间保持写事务。
             claimed = await self._experiences.set_evidence_ids_if_current(
                 item.experience_id, item.updated_at, item.evidence_ids or []
             )

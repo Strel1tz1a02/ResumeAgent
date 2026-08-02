@@ -1,4 +1,4 @@
-"""Queries and mutations for persisted experience records."""
+"""已持久化经历记录的查询与修改。"""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _updated_at() -> str:
 
 
 def _next_updated_at(observed_updated_at: str) -> str:
-    """Generate a UTC audit timestamp strictly later than the version just observed."""
+    """生成严格晚于刚读取版本的 UTC 审计时间戳。"""
     observed = datetime.fromisoformat(observed_updated_at)
     current = datetime.fromisoformat(_updated_at())
     if current > observed:
@@ -46,27 +46,27 @@ def _next_updated_at(observed_updated_at: str) -> str:
 
 
 class ExperienceStaleWriteError(ValueError):
-    """Raised when another transaction has changed an experience since it was read."""
+    """经历读取后被其他事务修改时抛出。"""
 
 
 class ExperienceRepository:
-    """Access experience rows using a caller-owned shared transaction."""
+    """使用调用方持有的共享事务访问经历记录。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def create(self, item: ExperienceItem) -> ExperienceItem:
-        """Store an experience and populate its generated identifier without committing."""
+        """保存经历并回填生成的标识符，但不自行提交。"""
         self._session.add(item)
         await self._session.flush()
         return item
 
     async def acquire_ownership_write_lock(self) -> None:
-        """Serialize JSON evidence ownership checks for the caller-owned transaction.
+        """在调用方事务中串行执行 JSON 证据所有权校验。
 
-        SQLite has no row-level locking and JSON references have no foreign-key
-        constraint, so its `BEGIN IMMEDIATE` must happen before any ownership
-        read. Other databases use a locking select as the closest equivalent.
+        SQLite 没有行级锁，JSON 引用也没有外键约束，因此必须在读取任何
+        所有权信息前执行 `BEGIN IMMEDIATE`。其他数据库则使用加锁查询作为
+        最接近的等价实现。
         """
         if self._session.in_transaction():
             raise RuntimeError("ownership write lock must be acquired before any database operation")
@@ -79,7 +79,7 @@ class ExperienceRepository:
         )
 
     async def get(self, experience_id: int) -> ExperienceItem | None:
-        """Return one experience regardless of lifecycle status."""
+        """返回一条经历，不限制其生命周期状态。"""
         return await self._session.get(ExperienceItem, experience_id)
 
     async def list(
@@ -90,7 +90,7 @@ class ExperienceRepository:
         status: ExperienceStatusFilter = "active",
         sort: ExperienceSort = "updated_at_desc",
     ) -> list[ExperienceItem]:
-        """Return experiences using the approved active, filter, search, and sort contract."""
+        """按约定的活动状态、筛选、搜索和排序契约返回经历。"""
         statement = select(ExperienceItem)
         if status == "active":
             statement = statement.where(ExperienceItem.status.in_(("draft", "ready")))
@@ -135,7 +135,7 @@ class ExperienceRepository:
     async def update_fields(
         self, experience_id: int, fields: dict[str, Any]
     ) -> ExperienceItem:
-        """Apply known ORM fields to one experience without committing."""
+        """将已知 ORM 字段应用到一条经历，但不自行提交。"""
         item = await self.get(experience_id)
         if item is None:
             raise ValueError(f"experience {experience_id} does not exist")
@@ -154,7 +154,7 @@ class ExperienceRepository:
         observed_updated_at: str,
         fields: dict[str, Any],
     ) -> ExperienceItem:
-        """Update editable fields only while the caller's observed version is current."""
+        """仅当调用方读取的版本仍为当前版本时更新可编辑字段。"""
         unknown = set(fields) - _EXPERIENCE_FIELDS
         if unknown:
             raise ValueError(f"unsupported experience fields: {sorted(unknown)}")
@@ -184,7 +184,7 @@ class ExperienceRepository:
     async def set_evidence_ids(
         self, experience_id: int, evidence_ids: list[int]
     ) -> ExperienceItem:
-        """Set ordered evidence references while enforcing single-experience ownership."""
+        """设置有序证据引用，并强制证据只能属于一条经历。"""
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidence_ids must not contain duplicates")
         item = await self.get(experience_id)
@@ -221,7 +221,7 @@ class ExperienceRepository:
         observed_updated_at: str,
         evidence_ids: list[int],
     ) -> ExperienceItem:
-        """Atomically replace evidence references only while the observed version is current."""
+        """仅当已读取版本仍为当前版本时原子替换证据引用。"""
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidence_ids must not contain duplicates")
         item = await self.get(experience_id)
@@ -269,7 +269,7 @@ class ExperienceRepository:
     async def set_completeness(
         self, experience_id: int, completeness: int
     ) -> ExperienceItem:
-        """Set a server-computed completeness score without exposing generic audit writes."""
+        """设置服务端计算的完整度，不开放通用审计字段写入。"""
         if isinstance(completeness, bool) or not isinstance(completeness, int):
             raise ValueError("completeness must be an integer from 0 to 100")
         if not 0 <= completeness <= 100:
@@ -287,7 +287,7 @@ class ExperienceRepository:
         experience_id: int,
         status: ExperienceLifecycleStatus,
     ) -> ExperienceItem:
-        """Apply a valid lifecycle state and keep its archive timestamp consistent."""
+        """应用有效的生命周期状态，并保持归档时间一致。"""
         if status not in {"draft", "ready", "archived"}:
             raise ValueError(f"unsupported experience status: {status}")
         item = await self.get(experience_id)
@@ -300,7 +300,7 @@ class ExperienceRepository:
         return item
 
     async def delete(self, experience_id: int) -> bool:
-        """Remove one experience row without committing or deleting its evidence."""
+        """移除一条经历记录，但不自行提交或删除其证据。"""
         item = await self.get(experience_id)
         if item is None:
             return False

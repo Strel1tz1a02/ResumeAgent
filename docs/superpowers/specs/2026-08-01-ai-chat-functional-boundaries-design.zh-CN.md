@@ -37,7 +37,7 @@ flowchart LR
 - `evidence.metrics` 指向哪个字段；
 - 应该给模型哪些经历上下文；
 - 经历补全使用什么 Prompt；
-- `field_overwrite` 的建议值如何校验；
+- `content_change` 的目标和建议内容如何校验；
 - 经历补全的 Graph 如何流转。
 
 ### 业务领域服务
@@ -336,6 +336,12 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 - 自己计算本应由领域服务维护的派生值；
 - 为 AI 单独建立一套与手动编辑不同的数据一致性规则。
 
+### 3.2.5 parse_input 的强类型边界
+
+`BaseAdapter.parse_input()` 返回通用 `AdapterState` 的业务子类，而不是没有结构约束的字典。每个业务自行定义专属输入类，例如 `ExperienceInputState`。通用 Graph Runner 不理解其中字段，只调用 `model_dump(mode="json")` 将其转换成可序列化数据，再与通用运行输入合并后交给 LangGraph。
+
+这样既能在业务层获得字段校验、类型提示和明确命名，也不会让 Pydantic 对象进入 checkpoint。
+
 ## 3.3 解释 subject 和 target
 
 通用聊天保存：
@@ -375,8 +381,8 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 
 经历补全的 Graph 属于经历业务接入层，因为以下决策都是业务相关的：
 
-- 什么时候加载经历上下文；
-- 什么情况下允许 `field_overwrite`；
+- 如何使用 Adapter 在执行前构造的经历上下文；
+- 什么情况下允许 `content_change`；
 - Tool 无效时如何引导模型；
 - no-change 时如何继续；
 - 提案形成前检查什么；
@@ -387,18 +393,18 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 
 ## 3.6 定义 Tool 业务语义
 
-经历接入层负责 `field_overwrite` 的：
+经历接入层只定义一个 `content_change` Tool。Tool Handler 负责参数解析和 Service 路由：
 
+- 通过独立 `description` 字段向模型说明工具用途和调用条件；
 - 参数 Schema；
-- 字段值规范化；
-- 目标字段类型校验；
-- no-change 判断；
-- proposal payload；
-- revision guard；
-- 审批后调用哪个领域服务；
-- `applied` 或 `invalidated` 结果构造。
+- 根据 target 形态选择字段修改、Evidence 修改或 Evidence 追加 Service；
+- 将 Service 结果转换为通用 proposal 或 Tool Result。
 
-但是，真正的字段写入、revision 增长和完整度重算仍由经历领域服务完成。
+Evidence 业务只创建一个集合级会话。模型修改已有 EvidenceItem 时在 Tool 参数中提交 `evidence_id` 和完整 `action/result/metrics`，Handler 路由到按 ID 整体覆盖服务；创建时不提交 ID 并追加到末尾。通用聊天层仍不理解这些业务语义。
+
+目标白名单、字段值规范化、Evidence 所有权、no-change、revision guard、proposal 内容、真正写入和结果构造全部由经历领域服务完成。
+
+Tool 名称、调用条件和参数提交规则不写死在系统 Prompt。通用模型层从 Handler 读取 `name`、`description` 和 `arguments_schema`，统一构造模型提供方所需的 Tool 定义。
 
 ## 3.7 业务前端接入
 
@@ -464,7 +470,7 @@ ExperienceAdapter
 经历 State
 经历 Graph
 经历 Prompt
-field_overwrite Handler
+content_change Handler
 经历上下文构造
 经历业务 API 与前端接入
 ```
@@ -556,7 +562,6 @@ apps/backend/app/
 │   │   └── nodes/
 │   │       ├── __init__.py
 │   │       ├── prepare_turn.py
-│   │       ├── load_context.py
 │   │       ├── agent_stream.py
 │   │       ├── validate_tool_call.py
 │   │       ├── approval.py
@@ -564,7 +569,8 @@ apps/backend/app/
 │   │
 │   └── tools/
 │       ├── __init__.py
-│       └── field_overwrite.py             # 经历字段覆盖 Handler
+│       ├── common.py                       # Tool 上下文解析
+│       └── content_change.py               # 统一内容修改路由 Handler
 │
 ├── services/
 │   ├── experience_service.py              # 经历领域写入与业务规则

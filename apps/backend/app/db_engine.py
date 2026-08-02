@@ -61,8 +61,8 @@ def make_sync_engine(path: Path) -> Engine:
 
 def init_models_sync(engine: Engine) -> None:
     """Create all tables (idempotent) using a sync engine connection."""
-    # AI Chat models live in their own module but share this declarative Base.
-    # Import them before create_all so their tables join the shared metadata.
+    # AI 对话模型位于独立模块，但共享同一个声明式 Base。
+    # 在 create_all 前导入，使对应表加入共享 metadata。
     import app.ai_chat.models  # noqa: F401
 
     from app.scripts.migrate_experience_field_states import migrate

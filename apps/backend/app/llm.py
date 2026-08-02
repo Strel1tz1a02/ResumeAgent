@@ -25,14 +25,14 @@ def _configure_litellm_logging() -> None:
 
 _configure_litellm_logging()
 
-# Let LiteLLM drop provider-unsupported params (reasoning_effort, non-default
-# temperature, etc.) instead of raising UnsupportedParamsError. This replaces
-# the hardcoded per-model compatibility branches this module used to carry.
+# 让 LiteLLM 丢弃模型提供方不支持的参数，例如 reasoning_effort 和非默认
+# temperature，避免抛出 UnsupportedParamsError。这取代了此前按模型硬编码的
+# 兼容分支。
 litellm.drop_params = True
 
-# Let LiteLLM auto-drop `thinking_blocks` from assistant messages when required
-# for a given turn (e.g., tool-call turns missing the blocks). Defensive; no
-# current code path sends thinking, but future-proofs the Router.
+# 必要时让 LiteLLM 自动从助手消息中移除 `thinking_blocks`，例如工具调用轮次
+# 缺少对应块时。当前没有代码路径发送 thinking，此设置用于增强 Router 的
+# 后续兼容性。
 litellm.modify_params = True
 
 # LLM timeout configuration (seconds) - base values

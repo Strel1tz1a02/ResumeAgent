@@ -25,6 +25,10 @@ from app.services.experience_field_service import ExperienceFieldService
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/experience-ai-chat", tags=["experience-ai-chat"])
 
+# 部分反向代理会在收到足够字节前攒住小型响应块。先发送一段 SSE 注释，
+# 让代理尽早建立流式传输；注释不会被前端当作业务事件处理。
+_SSE_PREAMBLE = ":" + (" " * 2048) + "\n\n"
+
 
 def _encode_sse(event: AiChatEvent) -> str:
     """将内部事件编码为一条原子 SSE 记录。"""
@@ -46,6 +50,7 @@ def _business_event(event: AiChatEvent) -> AiChatEvent | None:
 
 async def _stream(events: AsyncIterator[AiChatEvent]) -> AsyncIterator[str]:
     """消费通用流；异常只记录服务端并返回稳定业务错误。"""
+    yield _SSE_PREAMBLE
     try:
         async for event in events:
             mapped = _business_event(event)
@@ -61,18 +66,20 @@ def _sse(events: AsyncIterator[AiChatEvent]) -> StreamingResponse:
     return StreamingResponse(
         _stream(events),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
 @router.post(
     "/conversations",
-    response_model=ConversationCreateResponse,
-    status_code=status.HTTP_201_CREATED,
+    response_model=ConversationCreateResponse, # 自动将返回值转Json
+    status_code=status.HTTP_201_CREATED, # 成功时返回 201
 )
-async def create_conversation(
-    request: ConversationCreateRequest,
-) -> ConversationCreateResponse:
+async def create_conversation( request: ConversationCreateRequest,) -> ConversationCreateResponse:
     """验证字段绑定并创建不可恢复的当前会话。"""
     try:
         service = get_ai_chat_service()
@@ -84,8 +91,11 @@ async def create_conversation(
             language=get_content_language(),
         )
         async with database_module.db.session() as session:
+            snapshot_key = (
+                "evidence_new" if request.target.key == "evidence" else request.target.key
+            )
             snapshot = await ExperienceFieldService(session).snapshot(
-                request.experience_id, request.target.key, request.target.ref_id
+                request.experience_id, snapshot_key, request.target.ref_id
             )
         return ConversationCreateResponse(
             conversation_id=conversation_id,
@@ -135,4 +145,3 @@ async def close_conversation(
 ) -> None:
     """结束当前会话；之后不能恢复或继续。"""
     await get_ai_chat_service().close_conversation(conversation_id, request.reason)
-

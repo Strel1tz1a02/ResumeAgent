@@ -1,4 +1,4 @@
-"""Message persistence using a caller-owned transaction."""
+"""使用调用方事务的消息持久化。"""
 
 from typing import Any
 
@@ -9,10 +9,10 @@ from app.ai_chat.models import AiChatMessage, utcnow_iso
 
 
 class MessageRepository:
-    """Manage ordered user and assistant messages."""
+    """管理有序的用户和助手消息。"""
 
     def __init__(self, session: AsyncSession) -> None:
-        """Bind repository operations to a caller-owned session."""
+        """将仓储操作绑定到调用方持有的会话。"""
         self._session = session
 
     async def _next_sequence(self, conversation_id: int) -> int:
@@ -34,7 +34,7 @@ class MessageRepository:
         client_message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AiChatMessage:
-        """Append one message to a conversation."""
+        """向会话追加一条消息。"""
         row = AiChatMessage(
             conversation_id=conversation_id,
             run_id=run_id,
@@ -52,7 +52,7 @@ class MessageRepository:
     async def get_by_client_id(
         self, conversation_id: int, client_message_id: str
     ) -> AiChatMessage | None:
-        """Find an idempotent user message."""
+        """查找幂等用户消息。"""
         result = await self._session.execute(
             select(AiChatMessage).where(
                 AiChatMessage.conversation_id == conversation_id,
@@ -62,7 +62,7 @@ class MessageRepository:
         return result.scalar_one_or_none()
 
     async def list_completed(self, conversation_id: int) -> list[AiChatMessage]:
-        """Return completed visible messages in stable order."""
+        """按稳定顺序返回已完成的可见消息。"""
         result = await self._session.execute(
             select(AiChatMessage)
             .where(
@@ -74,19 +74,19 @@ class MessageRepository:
         return list(result.scalars().all())
 
     async def append(self, row: AiChatMessage, delta: str) -> None:
-        """Append a streamed text delta to a generating assistant message."""
+        """向生成中的助手消息追加流式文本增量。"""
         row.content += delta
         row.updated_at = utcnow_iso()
         await self._session.flush()
 
     async def finish(self, row: AiChatMessage, status: str) -> None:
-        """Finish a generating assistant message."""
+        """结束生成中的助手消息。"""
         row.status = status
         row.updated_at = utcnow_iso()
         await self._session.flush()
 
     async def cancel_generating(self, run_id: int) -> None:
-        """Cancel every still-generating assistant message for one run."""
+        """取消一次运行中所有仍在生成的助手消息。"""
         result = await self._session.execute(
             select(AiChatMessage).where(
                 AiChatMessage.run_id == run_id,

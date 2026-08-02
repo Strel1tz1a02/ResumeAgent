@@ -1,4 +1,4 @@
-"""Serializable types shared across the AI Chat boundary."""
+"""AI 对话边界共享的可序列化类型。"""
 
 from typing import Literal, NotRequired, TypeAlias, TypedDict
 
@@ -10,7 +10,7 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 class SubjectRef(BaseModel):
-    """Opaque business subject reference persisted by the chat runtime."""
+    """由对话运行时持久化的不透明业务主体引用。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -19,7 +19,7 @@ class SubjectRef(BaseModel):
 
 
 class TargetRef(BaseModel):
-    """Opaque business target reference persisted by the chat runtime."""
+    """由对话运行时持久化的不透明业务目标引用。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -28,14 +28,20 @@ class TargetRef(BaseModel):
 
 
 class ValidatedBinding(BaseModel):
-    """Business-validated and normalized conversation binding."""
+    """经过业务校验和规范化的会话绑定。"""
 
     subject: SubjectRef
     target: TargetRef
 
 
+class AdapterState(BaseModel):
+    """具体 Adapter 返回给通用 Graph Runner 的可序列化业务状态。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PendingToolResult(TypedDict):
-    """Opaque Tool Result awaiting a complete model response."""
+    """等待模型完整响应的不透明工具结果。"""
 
     tool_call_id: int
     provider_tool_call_id: str | None
@@ -45,7 +51,7 @@ class PendingToolResult(TypedDict):
 
 
 class ApprovalInput(TypedDict):
-    """Decision and Tool Result passed into a resumed Graph."""
+    """传入恢复后业务图的审批决定和工具结果。"""
 
     tool_call_id: int
     decision: Literal["approve", "reject"]
@@ -53,7 +59,7 @@ class ApprovalInput(TypedDict):
 
 
 class AdapterInput(TypedDict):
-    """Common per-run input parsed by a concrete Adapter."""
+    """由具体适配器解析的通用单次运行输入。"""
 
     conversation_id: int
     run_id: int
@@ -70,7 +76,7 @@ class AdapterInput(TypedDict):
 
 
 class AiChatBaseState(TypedDict):
-    """Serializable State fields with identical meaning for every Adapter."""
+    """在所有适配器中语义一致的可序列化状态字段。"""
 
     conversation_id: int
     run_id: int

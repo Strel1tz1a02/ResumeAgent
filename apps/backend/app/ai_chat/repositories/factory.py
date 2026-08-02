@@ -1,4 +1,4 @@
-"""Construct transaction-scoped AI Chat repositories."""
+"""构造事务范围内的 AI 对话仓储。"""
 
 from dataclasses import dataclass
 
@@ -12,7 +12,7 @@ from app.ai_chat.repositories.tool_call_repository import ToolCallRepository
 
 @dataclass(frozen=True)
 class AiChatRepositories:
-    """Repositories sharing one caller-owned SQLAlchemy session."""
+    """共享同一调用方 SQLAlchemy 会话的仓储集合。"""
 
     conversations: ConversationRepository
     messages: MessageRepository
@@ -21,10 +21,10 @@ class AiChatRepositories:
 
 
 class RepositoryFactory:
-    """Create a repository bundle without taking over transaction control."""
+    """创建仓储集合，但不接管事务控制。"""
 
     def create(self, session: AsyncSession) -> AiChatRepositories:
-        """Bind all repositories to the supplied session."""
+        """将全部仓储绑定到传入的会话。"""
         return AiChatRepositories(
             conversations=ConversationRepository(session),
             messages=MessageRepository(session),

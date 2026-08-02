@@ -1,4 +1,4 @@
-"""Integration contracts for the person-level experience library API."""
+"""个人经历库 API 的集成契约测试。"""
 
 from unittest.mock import AsyncMock, patch
 
@@ -56,7 +56,7 @@ async def test_import_text_persists_only_structured_llm_output(isolated_db) -> N
 
 
 async def test_import_text_rejects_blank_and_oversized_requests(isolated_db) -> None:
-    """Removing import input bounds or blank validation must fail this contract."""
+    """移除导入文本长度限制或空值校验时，此契约必须失败。"""
     async with _client() as client:
         blank = await client.post("/api/v1/experiences/import-text", json={"text": " \n\t "})
         oversized = await client.post(
@@ -68,7 +68,7 @@ async def test_import_text_rejects_blank_and_oversized_requests(isolated_db) -> 
 
 
 async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
-    """Breaking create, update, persistence, detail expansion, or query forwarding must fail."""
+    """创建、更新、持久化、详情展开或查询转发被破坏时必须失败。"""
     create_payload = {
         "kind": "project",
         "title": "Resume Matcher",
@@ -118,7 +118,7 @@ async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
 
 
 async def test_create_evidence_appends_it_and_returns_expanded_experience(isolated_db) -> None:
-    """Dropping the JSON reference after inserting evidence would hide a valid fact from clients."""
+    """插入证据后若遗漏 JSON 引用，客户端会看不到有效事实。"""
     async with _client() as client:
         created = await client.post(
             "/api/v1/experiences",
@@ -146,7 +146,7 @@ async def test_create_evidence_appends_it_and_returns_expanded_experience(isolat
 
 
 async def test_patch_evidence_requires_ownership_and_hides_cross_experience_rows(isolated_db) -> None:
-    """Removing the JSON-membership check would let one experience edit another's evidence."""
+    """移除 JSON 成员校验会导致一条经历修改另一条经历的证据。"""
     async with _client() as client:
         first = await client.post("/api/v1/experiences", json={"title": "First"})
         second = await client.post("/api/v1/experiences", json={"title": "Second"})
@@ -172,7 +172,7 @@ async def test_patch_evidence_requires_ownership_and_hides_cross_experience_rows
 
 
 async def test_delete_evidence_removes_row_and_json_reference_atomically(isolated_db) -> None:
-    """Leaving either the evidence row or its reference behind creates inconsistent detail responses."""
+    """遗留证据记录或其引用都会造成详情响应不一致。"""
     async with _client() as client:
         experience = await client.post("/api/v1/experiences", json={"title": "Delete proof"})
         experience_id = experience.json()["experience_id"]
@@ -190,7 +190,7 @@ async def test_delete_evidence_removes_row_and_json_reference_atomically(isolate
 
 
 async def test_reorder_evidence_requires_exact_unique_id_set_and_preserves_requested_order(isolated_db) -> None:
-    """Accepting a partial, extra, or duplicated order would silently drop or duplicate evidence."""
+    """接受缺失、多余或重复的顺序会静默丢失或复制证据。"""
     async with _client() as client:
         experience = await client.post("/api/v1/experiences", json={"title": "Order proof"})
         experience_id = experience.json()["experience_id"]
@@ -225,7 +225,7 @@ async def test_reorder_evidence_requires_exact_unique_id_set_and_preserves_reque
 
 
 async def test_evidence_mutations_recompute_completeness_and_downgrade_ready_experiences(isolated_db) -> None:
-    """Skipping recomputation or ready-to-draft downgrade would advertise an incomplete record as ready."""
+    """跳过完整度重算或就绪降级会把不完整记录错误标记为就绪。"""
     create_payload = {
         "kind": "project",
         "title": "Complete enough",
@@ -258,7 +258,7 @@ async def test_evidence_mutations_recompute_completeness_and_downgrade_ready_exp
 
 
 async def test_failed_evidence_delete_rolls_back_reference_and_row(isolated_db) -> None:
-    """A failure after detaching evidence must not commit a dangling row or a missing reference."""
+    """解除证据关联后发生失败时，不得提交悬空记录或缺失引用。"""
     async with _client() as client:
         experience = await client.post("/api/v1/experiences", json={"title": "Rollback proof"})
         experience_id = experience.json()["experience_id"]
@@ -288,7 +288,7 @@ async def test_failed_evidence_delete_rolls_back_reference_and_row(isolated_db) 
 
 
 async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, monkeypatch) -> None:
-    """Leaking a stale repository write would turn an ordinary concurrent edit into a 500."""
+    """泄漏仓储层陈旧写入异常会把普通并发编辑变成 500。"""
     async with _client() as client:
         experience = await client.post("/api/v1/experiences", json={"title": "Stale proof"})
         experience_id = experience.json()["experience_id"]
@@ -316,7 +316,7 @@ async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, mo
 async def test_patch_evidence_advances_its_timestamp_when_the_clock_regresses(
     isolated_db, monkeypatch
 ) -> None:
-    """A frozen or regressed clock must not weaken evidence audit ordering after an edit."""
+    """时钟冻结或回退不得削弱编辑后的证据审计顺序。"""
     async with _client() as client:
         experience = await client.post("/api/v1/experiences", json={"title": "Audit proof"})
         experience_id = experience.json()["experience_id"]
@@ -340,7 +340,7 @@ async def test_patch_evidence_advances_its_timestamp_when_the_clock_regresses(
 async def test_evidence_service_acquires_ownership_lock_before_loading_experience(
     isolated_db, monkeypatch
 ) -> None:
-    """Reading ownership before the write lock would leave a cross-session assignment race."""
+    """在写锁前读取所有权会留下跨会话归属竞态。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Lock order"})
         experience_id = created.json()["experience_id"]
@@ -369,7 +369,7 @@ async def test_evidence_service_acquires_ownership_lock_before_loading_experienc
 
 
 async def test_missing_and_server_owned_fields_are_rejected(isolated_db) -> None:
-    """Allowing missing records or client-set computed/lifecycle fields must fail."""
+    """允许缺失记录或客户端设置计算字段、生命周期字段时必须失败。"""
     async with _client() as client:
         missing = await client.get("/api/v1/experiences/99999")
         forbidden_create = await client.post(
@@ -388,7 +388,7 @@ async def test_missing_and_server_owned_fields_are_rejected(isolated_db) -> None
 
 
 async def test_patch_rejects_current_and_end_date_conflicts_in_merged_state(isolated_db) -> None:
-    """Validating only sparse patch fields would permit contradictory stored dates."""
+    """只校验稀疏更新字段会允许数据库保存相互矛盾的日期。"""
     async with _client() as client:
         current = await client.post(
             "/api/v1/experiences", json={"title": "Current", "is_current": True}
@@ -490,7 +490,7 @@ async def test_global_save_rolls_back_all_units_on_revision_conflict(isolated_db
 
 
 async def test_failed_import_rolls_back_its_uncommitted_record(isolated_db) -> None:
-    """Dropping service rollback after a post-insert failure would leave a ghost draft."""
+    """插入后失败时若不执行服务回滚，会留下幽灵草稿。"""
     with patch(
         "app.services.experience_import_service.ExperienceRepository.set_completeness",
         new_callable=AsyncMock,
@@ -515,7 +515,7 @@ async def test_failed_import_rolls_back_its_uncommitted_record(isolated_db) -> N
 
 
 async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db) -> None:
-    """Forwarding explicit nulls to non-null database columns must not become 500 errors."""
+    """向数据库非空列传递显式空值时不得演变为 500 错误。"""
     async with _client() as client:
         created = await client.post(
             "/api/v1/experiences",
@@ -547,7 +547,7 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
 
 
 async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolated_db) -> None:
-    """Mapping stale conditional writes as success would let clients lose a winner's edit."""
+    """将陈旧条件写入视为成功会让客户端覆盖已胜出的编辑。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Winner"})
         experience_id = created.json()["experience_id"]
@@ -600,7 +600,7 @@ async def test_patch_allows_disjoint_fields_after_another_field_changes(
 
 
 async def test_patch_repairs_historical_missing_evidence_references(isolated_db) -> None:
-    """A tolerated dangling JSON ID must not survive the next ordinary write."""
+    """已容忍的悬空 JSON ID 不得在下一次普通写入后继续存在。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Before"})
     experience_id = created.json()["experience_id"]
@@ -643,7 +643,7 @@ async def test_lifecycle_write_repairs_historical_missing_evidence_references(is
 async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalculation(
     tmp_path, monkeypatch
 ) -> None:
-    """A fixed clock must not let completeness recalculation restore a stale version token."""
+    """固定时钟不得让完整度重算恢复陈旧版本标记。"""
     frozen_time = "2030-01-01T00:00:00+00:00"
     monkeypatch.setattr(
         "app.repositories.experience_repository._updated_at", lambda: frozen_time
@@ -698,7 +698,7 @@ async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalcula
 
 
 async def test_mark_ready_rejects_incomplete_record_with_current_guidance(isolated_db) -> None:
-    """Removing readiness validation would let incomplete drafts be advertised as ready."""
+    """移除就绪校验会让不完整草稿被错误标记为就绪。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Incomplete"})
         experience_id = created.json()["experience_id"]
@@ -723,7 +723,7 @@ async def test_mark_ready_rejects_incomplete_record_with_current_guidance(isolat
 
 
 async def test_mark_ready_promotes_complete_draft_and_manual_edit_downgrades_it(isolated_db) -> None:
-    """Skipping the readiness transition or its below-threshold downgrade leaves stale ready state."""
+    """跳过就绪转换或低于阈值时的降级会遗留陈旧就绪状态。"""
     payload = {
         "kind": "project",
         "title": "Ready project",
@@ -760,7 +760,7 @@ async def test_mark_ready_promotes_complete_draft_and_manual_edit_downgrades_it(
 
 
 async def test_archive_restore_and_list_filters_keep_lifecycle_views_separate(isolated_db) -> None:
-    """A lifecycle filter regression could surface archived records in the active library."""
+    """生命周期筛选回归可能让已归档记录出现在活动经历库中。"""
     async with _client() as client:
         first = await client.post(
             "/api/v1/experiences",
@@ -813,7 +813,7 @@ async def test_archive_restore_and_list_filters_keep_lifecycle_views_separate(is
 
 
 async def test_permanent_delete_requires_archive_and_preserves_unrelated_rows(isolated_db) -> None:
-    """Deleting before archive or touching unrelated evidence/resumes would violate deletion safety."""
+    """归档前删除或改动无关证据、简历会违反删除安全约束。"""
     async with isolated_db.session() as session:
         session.add(
             Resume(
@@ -857,7 +857,7 @@ async def test_permanent_delete_requires_archive_and_preserves_unrelated_rows(is
 async def test_patch_rolls_back_post_write_failure_in_current_and_reopened_sessions(
     isolated_db, monkeypatch
 ) -> None:
-    """A failed completeness refresh must not leave the already-flushed title visible or committed."""
+    """完整度刷新失败时，不得让已刷新的标题保持可见或被提交。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Original"})
     experience_id = created.json()["experience_id"]
@@ -880,7 +880,7 @@ async def test_patch_rolls_back_post_write_failure_in_current_and_reopened_sessi
 
 
 async def test_patch_maps_post_write_value_error_to_422_and_rolls_back(isolated_db) -> None:
-    """Leaking a repository ValueError after the title write would turn validation into a 500."""
+    """标题写入后若泄漏仓储 ValueError，会把校验错误变成 500。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Original"})
         experience_id = created.json()["experience_id"]
@@ -904,7 +904,7 @@ async def test_patch_maps_post_write_value_error_to_422_and_rolls_back(isolated_
 
 
 async def test_restore_rejects_active_draft_and_ready_experiences(isolated_db) -> None:
-    """Allowing restore outside the archive state would make lifecycle actions non-idempotent."""
+    """允许非归档状态执行恢复会破坏生命周期操作的幂等性。"""
     ready_payload = {
         "kind": "project",
         "title": "Ready",

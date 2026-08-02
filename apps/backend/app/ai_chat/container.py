@@ -1,4 +1,4 @@
-"""Application-level composition root for the reusable AI Chat runtime."""
+"""可复用 AI 对话运行时的应用级组装入口。"""
 
 from pathlib import Path
 
@@ -20,7 +20,7 @@ _service: AiChatService | None = None
 
 
 def _checkpoint_path() -> Path:
-    """Use production data storage or the active isolated database directory."""
+    """使用生产数据目录或当前隔离数据库所在目录。"""
     active_database = database_module.db.db_path.resolve()
     configured_database = settings.sqlite_path.resolve()
     if active_database != configured_database:
@@ -29,12 +29,12 @@ def _checkpoint_path() -> Path:
 
 
 def register_adapter(adapter: BaseAdapter) -> None:
-    """Register one long-lived stateless business Adapter."""
+    """注册一个长期存活且无状态的业务适配器。"""
     _registry.register(adapter)
 
 
 async def start_ai_chat() -> None:
-    """Initialize checkpoint persistence and compose the runtime once."""
+    """初始化检查点持久化，并完成一次运行时组装。"""
     global _checkpoints, _service
     if _service is not None:
         return
@@ -50,14 +50,14 @@ async def start_ai_chat() -> None:
 
 
 def get_ai_chat_service() -> AiChatService:
-    """Return the started internal service to a business Router or Service."""
+    """向业务路由或服务返回已启动的内部服务。"""
     if _service is None:
         raise RuntimeError("AI Chat has not been started")
     return _service
 
 
 async def close_ai_chat() -> None:
-    """Close checkpoint resources without discarding Adapter registrations."""
+    """关闭检查点资源，但保留适配器注册信息。"""
     global _checkpoints, _service
     _service = None
     if _checkpoints is not None:
@@ -66,7 +66,7 @@ async def close_ai_chat() -> None:
 
 
 async def reset_ai_chat() -> None:
-    """Remove all checkpoint state and restart the runtime."""
+    """清除全部检查点状态并重新启动运行时。"""
     global _checkpoints, _service
     _service = None
     desired_path = _checkpoint_path()

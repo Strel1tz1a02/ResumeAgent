@@ -1,26 +1,26 @@
-"""Create and close the dedicated asynchronous SQLite checkpointer."""
+"""创建和关闭专用异步 SQLite 检查点存储。"""
 
 import os
 from pathlib import Path
 from typing import Any
 
-# LangGraph reads this setting while importing its serializer module.
+# LangGraph 在导入序列化模块时读取此设置。
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 
 class CheckpointLifecycle:
-    """Own the AsyncSqliteSaver context for the application lifespan."""
+    """在应用生命周期内持有 AsyncSqliteSaver 上下文。"""
 
     def __init__(self, path: Path) -> None:
-        """Configure the dedicated checkpoint database path."""
+        """配置专用检查点数据库路径。"""
         self.path = path
         self.saver: AsyncSqliteSaver | None = None
         self._context: Any = None
 
     async def start(self) -> AsyncSqliteSaver:
-        """Open the saver once and enable strict MessagePack decoding."""
+        """仅打开一次存储器，并启用严格的 MessagePack 解码。"""
         if self.saver is not None:
             return self.saver
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -30,14 +30,14 @@ class CheckpointLifecycle:
         return self.saver
 
     async def close(self) -> None:
-        """Close the saver and release the SQLite file handle."""
+        """关闭存储器并释放 SQLite 文件句柄。"""
         if self._context is not None:
             await self._context.__aexit__(None, None, None)
         self._context = None
         self.saver = None
 
     async def reset(self) -> None:
-        """Close and remove the checkpoint database and its sidecar files."""
+        """关闭并移除检查点数据库及其附属文件。"""
         await self.close()
         for candidate in (
             self.path,

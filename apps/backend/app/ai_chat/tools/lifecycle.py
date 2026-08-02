@@ -1,4 +1,4 @@
-"""Generic persistence and dispatch for opaque business Tool Calls."""
+"""不透明业务工具调用的通用持久化和分派。"""
 
 from dataclasses import dataclass
 from typing import Literal
@@ -21,7 +21,7 @@ from app.ai_chat.types import JsonObject
 
 @dataclass(frozen=True)
 class ToolDispatch:
-    """Result returned to a business Graph after one complete Tool Call."""
+    """一次完整工具调用后返回给业务图的结果。"""
 
     tool_call_id: int
     provider_tool_call_id: str | None
@@ -32,10 +32,10 @@ class ToolDispatch:
 
 
 class ToolLifecycle:
-    """Persist Tool transport state while delegating all meaning to a Handler."""
+    """持久化工具传输状态，并将全部业务语义委托给处理器。"""
 
     def __init__(self, repositories: RepositoryFactory) -> None:
-        """Keep the stateless transaction-scoped repository factory."""
+        """保存无状态且限定在事务范围内的仓储工厂。"""
         self._repositories = repositories
 
     async def receive(
@@ -49,7 +49,7 @@ class ToolLifecycle:
         handlers: dict[str, ToolHandler],
         adapter_context: JsonObject,
     ) -> ToolDispatch:
-        """Validate, persist, and dispatch one fully assembled Tool Call."""
+        """校验、持久化并分派一个已完整组装的工具调用。"""
         handler = handlers.get(call.name)
         if handler is None:
             raise ToolProtocolError(f"Unknown tool: {call.name}")
@@ -111,7 +111,7 @@ class ToolLifecycle:
             target=target,
             adapter_context=adapter_context,
         )
-        validation = await handler.validate(context, arguments)
+        validation = await handler.invoke(context, arguments)
 
         async with database_module.db.session() as session:
             repository = self._repositories.create(session).tool_calls
@@ -162,7 +162,7 @@ class ToolLifecycle:
         subject: JsonObject,
         target: JsonObject,
     ) -> JsonObject:
-        """Invoke business resolution and return its opaque Tool Result."""
+        """调用业务审批处理，并返回其不透明工具结果。"""
         async with database_module.db.session() as session:
             row = await self._repositories.create(session).tool_calls.get(tool_call_id)
             if row is None:

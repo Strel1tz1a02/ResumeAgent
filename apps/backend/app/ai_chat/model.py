@@ -1,4 +1,4 @@
-"""LiteLLM streaming adapter used by business Graph nodes."""
+"""供业务图节点使用的 LiteLLM 流式适配器。"""
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,14 +11,14 @@ from app.llm import _calculate_timeout, get_router
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
-    """Read a field from either a mapping or provider object."""
+    """从映射或模型提供方对象中读取字段。"""
     if isinstance(value, Mapping):
         return value.get(key, default)
     return getattr(value, key, default)
 
 
 def _text(value: Any) -> str:
-    """Normalize LiteLLM text content without surfacing reasoning fields."""
+    """规范化 LiteLLM 文本内容，不暴露推理字段。"""
     if isinstance(value, str):
         return value
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
@@ -36,21 +36,21 @@ def _text(value: Any) -> str:
 
 @dataclass(frozen=True)
 class TextDelta:
-    """One visible assistant text fragment."""
+    """一段可见的助手文本增量。"""
 
     text: str
 
 
 @dataclass(frozen=True)
 class ToolCallsCompleted:
-    """Complete Tool Calls emitted only after all fragments are assembled."""
+    """仅在全部片段组装完成后发出的完整工具调用。"""
 
     calls: tuple[AssembledToolCall, ...]
 
 
 @dataclass(frozen=True)
 class ModelCompleted:
-    """Terminal model stream marker."""
+    """模型流结束标记。"""
 
     finish_reason: str | None
 
@@ -59,7 +59,7 @@ ModelStreamEvent = TextDelta | ToolCallsCompleted | ModelCompleted
 
 
 class AiChatModel:
-    """Stream visible text and atomically assembled Tool Calls through LiteLLM."""
+    """通过 LiteLLM 流式输出可见文本和原子组装的工具调用。"""
 
     async def stream(
         self,
@@ -69,7 +69,7 @@ class AiChatModel:
         tools_enabled: bool,
         max_tokens: int = 4096,
     ) -> AsyncIterator[ModelStreamEvent]:
-        """Call the configured model and normalize its streaming response."""
+        """调用已配置模型并规范化其流式响应。"""
         router, config = get_router()
         kwargs: dict[str, Any] = {
             "model": "primary",
@@ -86,7 +86,7 @@ class AiChatModel:
                     "type": "function",
                     "function": {
                         "name": name,
-                        "description": (handler.__doc__ or name).strip(),
+                        "description": handler.description.strip(),
                         "parameters": handler.schema(),
                     },
                 }

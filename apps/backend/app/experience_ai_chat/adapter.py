@@ -12,23 +12,17 @@ from app.ai_chat.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.types import (
     AdapterInput,
-    JsonValue,
     SubjectRef,
     TargetRef,
     ValidatedBinding,
 )
 from app.experience_ai_chat.context import build_model_messages
-from app.experience_ai_chat.graph import build_experience_graph
+from app.experience_ai_chat.graph import ExperienceInputState, build_experience_graph
 from app.experience_ai_chat.prompts import system_prompt
-from app.experience_ai_chat.tools import (
-    EvidenceAppendHandler,
-    EvidenceUpdateHandler,
-    FieldOverwriteHandler,
-)
-from app.repositories.evidence_repository import EvidenceRepository
+from app.experience_ai_chat.tools import ContentChangeHandler
 from app.repositories.experience_repository import ExperienceRepository
 from app.services.experience_field_service import ExperienceFieldService
-from app.services.experience_fields import EVIDENCE_TARGET_KEYS, EXPERIENCE_TARGET_KEYS
+from app.services.experience_fields import EXPERIENCE_TARGET_KEYS
 from app.services.experience_service import ExperienceService
 
 
@@ -37,17 +31,13 @@ class ExperienceAdapter(BaseAdapter):
 
     def __init__(self) -> None:
         """构造无请求状态、可长期复用的 Tool Handler 集合。"""
-        handlers: tuple[ToolHandler, ...] = (
-            FieldOverwriteHandler(),
-            EvidenceUpdateHandler(),
-            EvidenceAppendHandler(),
-        )
+        handlers: tuple[ToolHandler, ...] = (ContentChangeHandler(),) # ...：可以有任意多个 ToolHandler 类型的元素
         self._handlers = {handler.name: handler for handler in handlers}
 
     async def validate_binding(
         self, subject: SubjectRef, target: TargetRef
     ) -> ValidatedBinding:
-        """确认经历可编辑、目标白名单及 Evidence 所有权。"""
+        """校验能否创建一个绑定到指定业务对象和目标字段的会话"""
         if subject.type != "experience":
             raise ValueError("ExperienceAdapter only accepts experience subjects")
         try:
@@ -65,34 +55,40 @@ class ExperienceAdapter(BaseAdapter):
             if key in EXPERIENCE_TARGET_KEYS:
                 if ref_id is not None:
                     raise ValueError("experience field cannot bind evidence id")
-            elif key in EVIDENCE_TARGET_KEYS:
-                if ref_id is None or ref_id not in (item.evidence_ids or []):
-                    raise ValueError("evidence target is not owned by experience")
-                if await EvidenceRepository(session).get(ref_id) is None:
-                    raise ValueError("evidence does not exist")
-            elif key == "evidence_new":
+            elif key == "evidence":
                 if ref_id is not None:
-                    raise ValueError("new evidence target cannot bind an id")
+                    raise ValueError("evidence conversation must bind the collection")
             else:
                 raise ValueError("unsupported experience target")
-            await ExperienceFieldService(session).snapshot(experience_id, key, ref_id)
+            snapshot_key = "evidence_new" if key == "evidence" else key
+            await ExperienceFieldService(session).snapshot(
+                experience_id, snapshot_key, ref_id
+            )
+
         return ValidatedBinding(
             subject=SubjectRef(type="experience", id=str(experience_id)),
             target=TargetRef(key=target.key, ref_id=target.ref_id),
         )
 
-    async def parse_input(self, value: AdapterInput) -> dict[str, JsonValue]:
+    async def parse_input(self, value: AdapterInput) -> ExperienceInputState:
         """只读取已保存经历，构造可序列化 Graph State。"""
         experience_id = int(value["subject"]["id"])
-        key = str(value["target"]["key"])
-        ref_id_value = value["target"].get("ref_id")
+        key = str(value["target"]["key"]) # 目标字段的名称
+        ref_id_value = value["target"].get("ref_id") # Evidence ID / None
         ref_id = int(ref_id_value) if isinstance(ref_id_value, int) else None
         async with database_module.db.session() as session:
             detail = await ExperienceService(session).get(experience_id)
+            snapshot_key = "evidence_new" if key == "evidence" else key
             snapshot = await ExperienceFieldService(session).snapshot(
-                experience_id, key, ref_id
+                experience_id, snapshot_key, ref_id
             )
         detail_json = detail.model_dump(mode="json")
+        evidence_revisions = {
+            str(state.ref_id): state.revision
+            for state in detail.field_states
+            if key == "evidence" and state.key == "action" and state.ref_id is not None
+        }
+        target_value = detail_json["evidence_items"] if key == "evidence" else snapshot.value
         prompt = system_prompt(value["language"], key)
         messages = build_model_messages(
             prompt=prompt,
@@ -103,22 +99,22 @@ class ExperienceAdapter(BaseAdapter):
             history=list(value["messages"]),
             pending=list(value["pending_tool_results"]),
         )
-        return {
-            "experience": detail_json,
-            "target_value": snapshot.value,
-            "normalized_target_value": snapshot.normalized_value,
-            "target_revision": snapshot.revision,
-            "target_status": snapshot.status,
-            "system_prompt": prompt,
-            "model_messages": messages,
-            "tools_enabled": value["run_kind"] != "opening" and value["tools_enabled"],
-        }
+        return ExperienceInputState(
+            experience=detail_json,
+            target_value=target_value,
+            normalized_target_value=target_value,
+            target_revision=snapshot.revision,
+            target_status=snapshot.status,
+            evidence_revisions=evidence_revisions,
+            system_prompt=prompt,
+            model_messages=messages,
+            tools_enabled=value["run_kind"] != "opening" and value["tools_enabled"],
+        )
 
     def build_graph(self, runtime: AiChatRuntime) -> StateGraph:
         """返回由经历业务定义、尚未编译的 Graph。"""
         return build_experience_graph(runtime)
 
     def get_tool_handlers(self) -> Mapping[str, ToolHandler]:
-        """返回经历业务允许的三个 Tool Handler。"""
+        """返回经历业务唯一的内容修改 Tool Handler。"""
         return self._handlers
-

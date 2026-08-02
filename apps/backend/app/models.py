@@ -138,7 +138,7 @@ class ApiKey(Base):
 
 
 class ExperienceItem(Base):
-    """A person-level experience record, independent from resume documents."""
+    """一条与简历文档解耦的个人经历记录。"""
 
     __tablename__ = "experience_items"
 
@@ -164,7 +164,7 @@ class ExperienceItem(Base):
 
 
 class EvidenceItem(Base):
-    """One ordered action/result/metric fact referenced by an experience."""
+    """一条由经历引用的有序行动、结果和指标事实。"""
 
     __tablename__ = "evidence_items"
 
@@ -177,7 +177,7 @@ class EvidenceItem(Base):
 
 
 class ExperienceFieldState(Base):
-    """Completeness hint and optimistic revision for one experience save field."""
+    """一个经历保存字段的完整度提示和乐观修订号。"""
 
     __tablename__ = "experience_field_states"
     __table_args__ = (

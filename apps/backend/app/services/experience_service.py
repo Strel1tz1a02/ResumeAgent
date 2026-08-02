@@ -1,4 +1,4 @@
-"""Application service for person-level experience library records."""
+"""个人经历库记录的应用服务。"""
 
 from __future__ import annotations
 
@@ -35,19 +35,19 @@ _NON_NULLABLE_UPDATE_FIELDS = frozenset(
 
 
 class ExperienceDomainError(Exception):
-    """Base class for expected experience-library application errors."""
+    """经历库可预期应用错误的基类。"""
 
 
 class ExperienceNotFoundError(ExperienceDomainError):
-    """Raised when an experience identifier does not resolve to a record."""
+    """经历标识符无法找到记录时抛出。"""
 
 
 class ExperienceConflictError(ExperienceDomainError):
-    """Raised when an otherwise valid mutation conflicts with stored state."""
+    """其他方面有效的修改与已存储状态冲突时抛出。"""
 
 
 class ExperienceReadyConflictError(ExperienceConflictError):
-    """Raised when a draft does not yet meet the readiness threshold."""
+    """草稿尚未达到就绪阈值时抛出。"""
 
     def __init__(self, completeness: int, missing_dimensions: list[str]) -> None:
         super().__init__("Experience is not complete enough to mark ready")
@@ -56,11 +56,11 @@ class ExperienceReadyConflictError(ExperienceConflictError):
 
 
 class ExperienceValidationError(ExperienceDomainError):
-    """Raised for business-rule validation errors after request parsing."""
+    """请求解析后的业务规则校验失败时抛出。"""
 
 
 class ExperienceService:
-    """Own experience transactions, derived completeness, and response assembly."""
+    """负责经历事务、派生完整度和响应组装。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -69,7 +69,7 @@ class ExperienceService:
         self._fields = ExperienceFieldService(session)
 
     async def create(self, request: ExperienceCreate) -> ExperienceDetail:
-        """Create a draft record and persist its authoritative completeness score."""
+        """创建草稿记录并持久化其权威完整度分数。"""
         fields = request.model_dump()
         fields["kind"] = request.kind.value
         try:
@@ -91,12 +91,12 @@ class ExperienceService:
             raise
 
     async def get(self, experience_id: int) -> ExperienceDetail:
-        """Return one record with evidence expanded in its stored order."""
+        """返回一条记录，并按保存顺序展开其证据。"""
         item = await self._get_or_raise(experience_id)
         return await self._detail(item)
 
     async def list(self, query: ExperienceListQuery) -> ExperienceListResponse:
-        """List concise experience rows under the repository's search/filter contract."""
+        """按仓储搜索和筛选契约列出简要经历记录。"""
         try:
             rows = await self._experiences.list(
                 q=query.q,
@@ -112,7 +112,7 @@ class ExperienceService:
         )
 
     async def patch(self, experience_id: int, request: ExperienceUpdate) -> ExperienceDetail:
-        """Update editable fields, validating merged state and refreshing completeness."""
+        """更新可编辑字段，同时校验合并状态并刷新完整度。"""
         fields = request.model_dump(exclude_unset=True)
         expected_field_revisions = fields.pop("expected_field_revisions", {})
         if "kind" in fields and fields["kind"] is not None:
@@ -158,7 +158,7 @@ class ExperienceService:
             raise
 
     async def mark_ready(self, experience_id: int) -> ExperienceDetail:
-        """Promote a sufficiently complete active record to ready in one write transaction."""
+        """在一个写事务中将完整度达标的活动记录提升为就绪。"""
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_or_raise(experience_id)
@@ -187,11 +187,11 @@ class ExperienceService:
             raise
 
     async def archive(self, experience_id: int) -> ExperienceDetail:
-        """Archive a record as the reversible normal-delete lifecycle action."""
+        """归档记录，作为可恢复的普通删除生命周期操作。"""
         return await self._transition_status(experience_id, "archived")
 
     async def restore(self, experience_id: int) -> ExperienceDetail:
-        """Restore an archived record as a draft regardless of its former readiness."""
+        """将已归档记录恢复为草稿，不保留此前的就绪状态。"""
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_or_raise(experience_id)
@@ -215,12 +215,12 @@ class ExperienceService:
             raise
 
     async def deletion_impact(self, experience_id: int) -> DeletionImpactResponse:
-        """Return the stable deletion-review shape without consulting future match/resume links."""
+        """返回稳定的删除审查结构，暂不查询未来的匹配或简历关联。"""
         await self._get_or_raise(experience_id)
         return DeletionImpactResponse(affected_matches=[], affected_resumes=[])
 
     async def permanently_delete(self, experience_id: int) -> None:
-        """Irreversibly delete an archived record and only its currently owned evidence."""
+        """永久删除已归档记录及其当前拥有的证据。"""
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_or_raise(experience_id)
@@ -250,7 +250,7 @@ class ExperienceService:
         experience_id: int,
         target_status: Literal["draft", "ready", "archived"],
     ) -> ExperienceDetail:
-        """Serialize lifecycle writes so a stale action cannot silently overwrite another action."""
+        """串行执行生命周期写入，避免陈旧操作静默覆盖其他操作。"""
         try:
             await self._experiences.acquire_ownership_write_lock()
             item = await self._get_or_raise(experience_id)
@@ -276,7 +276,7 @@ class ExperienceService:
         return item
 
     async def _repair_evidence_references(self, item: ExperienceItem) -> ExperienceItem:
-        """Normalize tolerated historical JSON corruption before any write propagates it."""
+        """在写入传播前规范化已容忍的历史 JSON 异常。"""
         evidence_items = await self._evidence.get_many_ordered(item.evidence_ids or [])
         valid_ids = list(dict.fromkeys(evidence.id for evidence in evidence_items))
         return await self._experiences.set_evidence_ids_if_current(
@@ -314,7 +314,7 @@ class ExperienceService:
         )
 
     async def _guidance(self, item: ExperienceItem):
-        """Calculate live completeness without trusting a potentially stale persisted score."""
+        """计算实时完整度，不依赖可能陈旧的持久化分数。"""
         _, guidance = await self._evidence_and_guidance(item)
         return guidance
 

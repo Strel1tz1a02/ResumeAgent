@@ -1,4 +1,4 @@
-"""Queries and mutations for experience evidence records."""
+"""经历证据记录的查询与修改。"""
 
 from datetime import datetime, timedelta, timezone
 import logging
@@ -18,7 +18,7 @@ def _updated_at() -> str:
 
 
 def _next_updated_at(observed_updated_at: str) -> str:
-    """Generate an evidence audit timestamp strictly later than its observed version."""
+    """生成严格晚于已读取版本的证据审计时间戳。"""
     observed = datetime.fromisoformat(observed_updated_at)
     current = datetime.fromisoformat(_updated_at())
     if current > observed:
@@ -27,23 +27,23 @@ def _next_updated_at(observed_updated_at: str) -> str:
 
 
 class EvidenceRepository:
-    """Access evidence rows and derive ownership from experience evidence IDs."""
+    """访问证据记录，并根据经历的证据 ID 推导所有权。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def create(self, item: EvidenceItem) -> EvidenceItem:
-        """Store evidence and populate its generated identifier without committing."""
+        """保存证据并回填生成的标识符，但不自行提交。"""
         self._session.add(item)
         await self._session.flush()
         return item
 
     async def get(self, evidence_id: int) -> EvidenceItem | None:
-        """Return an evidence row if it exists."""
+        """证据存在时返回对应记录。"""
         return await self._session.get(EvidenceItem, evidence_id)
 
     async def get_many_ordered(self, evidence_ids: list[int]) -> list[EvidenceItem]:
-        """Expand evidence IDs while preserving the caller's stored order."""
+        """展开证据 ID，并保持调用方保存的顺序。"""
         if not evidence_ids:
             return []
         rows = await self._session.scalars(
@@ -56,7 +56,7 @@ class EvidenceRepository:
         return [by_id[evidence_id] for evidence_id in evidence_ids if evidence_id in by_id]
 
     async def update_fields(self, evidence_id: int, fields: dict[str, Any]) -> EvidenceItem:
-        """Apply known ORM fields to evidence without committing."""
+        """将已知 ORM 字段应用到证据，但不自行提交。"""
         item = await self.get(evidence_id)
         if item is None:
             raise ValueError(f"evidence {evidence_id} does not exist")
@@ -70,7 +70,7 @@ class EvidenceRepository:
         return item
 
     async def delete(self, evidence_id: int) -> bool:
-        """Delete unowned evidence; referenced evidence must be detached first."""
+        """删除无主证据；仍被引用的证据必须先解除关联。"""
         item = await self.get(evidence_id)
         if item is None:
             return False
@@ -82,7 +82,7 @@ class EvidenceRepository:
         return True
 
     async def find_owner_experience_id(self, evidence_id: int) -> int | None:
-        """Return the sole owning experience ID, detecting corrupted shared ownership."""
+        """返回唯一所属经历 ID，并检测异常的共享所有权。"""
         experiences = await self._session.scalars(select(ExperienceItem))
         owners = [
             item.experience_id

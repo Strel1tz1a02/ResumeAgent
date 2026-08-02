@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExperienceChatTarget(BaseModel):
-    """一个具体经历字段或 Evidence 字段目标。"""
+    """一个具体经历字段或整个 Evidence 集合会话目标。"""
 
     model_config = ConfigDict(extra="forbid")
     key: str = Field(min_length=1, max_length=80)
@@ -16,7 +16,7 @@ class ExperienceChatTarget(BaseModel):
 
 
 class ConversationCreateRequest(BaseModel):
-    """创建字段绑定会话。"""
+    """创建经历字段或 Evidence 集合绑定会话。"""
 
     model_config = ConfigDict(extra="forbid")
     experience_id: int = Field(gt=0)
@@ -53,4 +53,3 @@ class ConversationCloseRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(default="left_field", min_length=1, max_length=100)
-

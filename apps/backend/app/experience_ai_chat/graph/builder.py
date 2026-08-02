@@ -56,11 +56,8 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             "assembled_tool_call": None,
             "tool_dispatch": None,
             "tool_outcome": None,
+            "resumed_approval":None
         }
-
-    async def load_context(state: ExperienceGraphState) -> JsonObject:
-        """上下文已由 Adapter 原子读取，此节点只形成明确编排边界。"""
-        return {}
 
     async def agent_stream(state: ExperienceGraphState) -> JsonObject:
         """流式执行模型，并在结束后一次性暴露完整 Tool 参数。"""
@@ -115,6 +112,9 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
                 "target_revision_at_generation_start": state["target_revision"],
                 "normalized_target_value_at_generation_start": state.get(
                     "normalized_target_value"
+                ),
+                "evidence_revisions_at_generation_start": state.get(
+                    "evidence_revisions", {}
                 ),
             },
         )
@@ -191,7 +191,6 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
 
     graph = StateGraph(ExperienceGraphState)
     graph.add_node("prepare_turn", prepare_turn)
-    graph.add_node("load_context", load_context)
     graph.add_node("agent_stream", agent_stream)
     graph.add_node("persist_answer", persist_answer)
     graph.add_node("validate_tool_call", validate_tool_call)
@@ -203,8 +202,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
     graph.add_node("persist_continuation", persist_continuation)
 
     graph.add_edge(START, "prepare_turn")
-    graph.add_edge("prepare_turn", "load_context")
-    graph.add_edge("load_context", "agent_stream")
+    graph.add_edge("prepare_turn", "agent_stream")
     graph.add_conditional_edges("agent_stream", route_model_output)
     graph.add_edge("persist_answer", END)
     graph.add_conditional_edges("validate_tool_call", route_tool)

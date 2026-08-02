@@ -1,4 +1,4 @@
-"""Pure, deterministic completeness scoring for experience-library records."""
+"""经历库记录的纯函数、确定性完整度评分。"""
 
 from dataclasses import dataclass
 from typing import Protocol, Sequence
@@ -42,7 +42,7 @@ _QUESTIONS: dict[str, dict[str, str]] = {
 
 
 class ExperienceLike(Protocol):
-    """The persisted experience fields consumed by completeness scoring."""
+    """完整度评分使用的已持久化经历字段。"""
 
     kind: str
     title: str
@@ -55,7 +55,7 @@ class ExperienceLike(Protocol):
 
 
 class EvidenceLike(Protocol):
-    """The evidence fields consumed by completeness scoring."""
+    """完整度评分使用的证据字段。"""
 
     action: str
     result: str | None
@@ -64,7 +64,7 @@ class EvidenceLike(Protocol):
 
 @dataclass(frozen=True)
 class CompletenessResult:
-    """A score plus stable, localization-neutral guidance keys."""
+    """分数以及稳定、与本地化无关的引导键。"""
 
     completeness: int
     missing_dimensions: list[str]
@@ -85,7 +85,7 @@ def calculate_completeness(
     *,
     language: str = "zh",
 ) -> CompletenessResult:
-    """Score the eight factual dimensions without mutating persisted records."""
+    """对八个事实维度评分，不修改持久化记录。"""
     dimensions = (
         (
             "identity",
@@ -117,7 +117,7 @@ def calculate_completeness(
 
 
 def question_for_dimension(dimension: str, language: str = "zh") -> str:
-    """Return deterministic localized guidance for one missing dimension."""
+    """为一个缺失维度返回确定性的本地化引导。"""
     questions = _QUESTIONS.get(language, _QUESTIONS["zh"])
     return questions.get(
         dimension,

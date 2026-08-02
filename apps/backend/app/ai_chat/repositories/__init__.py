@@ -1,4 +1,4 @@
-"""Repository exports for AI Chat persistence."""
+"""AI 对话持久化仓储的公开入口。"""
 
 from app.ai_chat.repositories.conversation_repository import ConversationRepository
 from app.ai_chat.repositories.factory import AiChatRepositories, RepositoryFactory

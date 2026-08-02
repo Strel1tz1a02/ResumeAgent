@@ -1,67 +1,67 @@
-"""Stable internal exceptions raised by the AI Chat runtime."""
+"""AI 对话运行时抛出的稳定内部异常。"""
 
 
 class AiChatError(Exception):
-    """Base class for expected AI Chat errors."""
+    """可预期 AI 对话错误的基类。"""
 
     code = "ai_chat_error"
 
 
 class AdapterRegistrationError(AiChatError):
-    """Raised when an Adapter cannot be registered."""
+    """适配器无法注册时抛出。"""
 
     code = "adapter_registration_error"
 
 
 class AdapterNotRegisteredError(AiChatError):
-    """Raised when a persisted Adapter name is unavailable."""
+    """持久化的适配器名称不可用时抛出。"""
 
     code = "adapter_not_registered"
 
 
 class ConversationNotFoundError(AiChatError):
-    """Raised when a conversation does not exist."""
+    """会话不存在时抛出。"""
 
     code = "conversation_not_found"
 
 
 class ConversationEndedError(AiChatError):
-    """Raised when attempting to run an ended conversation."""
+    """尝试运行已结束会话时抛出。"""
 
     code = "conversation_ended"
 
 
 class RunInProgressError(AiChatError):
-    """Raised when a conversation already has a current run."""
+    """会话已经存在当前运行时抛出。"""
 
     code = "run_in_progress"
 
 
 class IdempotencyConflictError(AiChatError):
-    """Raised when an idempotency key is reused with conflicting input."""
+    """幂等键被冲突输入重复使用时抛出。"""
 
     code = "idempotency_conflict"
 
 
 class ToolCallNotFoundError(AiChatError):
-    """Raised when a Tool Call does not exist."""
+    """工具调用不存在时抛出。"""
 
     code = "tool_call_not_found"
 
 
 class ProposalStateError(AiChatError):
-    """Raised when a Tool Call cannot accept a decision."""
+    """工具调用无法接受审批决定时抛出。"""
 
     code = "proposal_state_error"
 
 
 class ToolProtocolError(AiChatError):
-    """Raised for malformed model Tool Call transport data."""
+    """模型工具调用传输数据格式错误时抛出。"""
 
     code = "tool_protocol_error"
 
 
 class GraphExecutionError(AiChatError):
-    """Raised when a business Graph cannot complete its run."""
+    """业务图无法完成运行时抛出。"""
 
     code = "graph_execution_error"

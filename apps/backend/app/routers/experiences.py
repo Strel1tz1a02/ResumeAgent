@@ -1,4 +1,4 @@
-"""HTTP endpoints for the person-level experience library."""
+"""个人经历库的 HTTP 接口。"""
 
 import logging
 from typing import Annotated
@@ -60,7 +60,7 @@ async def import_text(request: ExperienceImportTextRequest, session: Session) ->
 
 @router.post("", response_model=ExperienceDetail, status_code=status.HTTP_201_CREATED)
 async def create_experience(request: ExperienceCreate, session: Session) -> ExperienceDetail:
-    """Create one manually entered experience draft."""
+    """创建一条手动录入的经历草稿。"""
     try:
         return await ExperienceService(session).create(request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -72,7 +72,7 @@ async def list_experiences(
     session: Session,
     query: Annotated[ExperienceListQuery, Depends()],
 ) -> ExperienceListResponse:
-    """List the local experience library using its stable filters and sort modes."""
+    """使用稳定的筛选和排序方式列出本地经历库。"""
     try:
         return await ExperienceService(session).list(query)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -81,7 +81,7 @@ async def list_experiences(
 
 @router.get("/{experience_id}", response_model=ExperienceDetail)
 async def get_experience(experience_id: int, session: Session) -> ExperienceDetail:
-    """Fetch one experience with expanded ordered evidence."""
+    """获取一条经历，并按保存顺序展开证据。"""
     try:
         return await ExperienceService(session).get(experience_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -94,7 +94,7 @@ async def patch_experience(
     request: ExperienceUpdate,
     session: Session,
 ) -> ExperienceDetail:
-    """Apply a manual edit and recompute persisted completeness."""
+    """应用手动编辑并重新计算持久化完整度。"""
     try:
         return await ExperienceService(session).patch(experience_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -116,7 +116,7 @@ async def save_experience(
 
 @router.post("/{experience_id}/mark-ready", response_model=ExperienceDetail)
 async def mark_ready(experience_id: int, session: Session) -> ExperienceDetail:
-    """Mark a complete active experience ready for later resume use."""
+    """将完整的活动经历标记为就绪，供后续简历使用。"""
     try:
         return await ExperienceService(session).mark_ready(experience_id)
     except ExperienceReadyConflictError as error:
@@ -133,7 +133,7 @@ async def mark_ready(experience_id: int, session: Session) -> ExperienceDetail:
 
 @router.post("/{experience_id}/archive", response_model=ExperienceDetail)
 async def archive_experience(experience_id: int, session: Session) -> ExperienceDetail:
-    """Archive an experience as its reversible normal-delete action."""
+    """将经历归档，作为可恢复的普通删除操作。"""
     try:
         return await ExperienceService(session).archive(experience_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -142,7 +142,7 @@ async def archive_experience(experience_id: int, session: Session) -> Experience
 
 @router.post("/{experience_id}/restore", response_model=ExperienceDetail)
 async def restore_experience(experience_id: int, session: Session) -> ExperienceDetail:
-    """Restore an archived experience to draft state."""
+    """将已归档经历恢复为草稿状态。"""
     try:
         return await ExperienceService(session).restore(experience_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -151,7 +151,7 @@ async def restore_experience(experience_id: int, session: Session) -> Experience
 
 @router.get("/{experience_id}/deletion-impact", response_model=DeletionImpactResponse)
 async def deletion_impact(experience_id: int, session: Session) -> DeletionImpactResponse:
-    """Preview the stable impact shape for a pending permanent deletion."""
+    """预览待永久删除操作的稳定影响结构。"""
     try:
         return await ExperienceService(session).deletion_impact(experience_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -160,7 +160,7 @@ async def deletion_impact(experience_id: int, session: Session) -> DeletionImpac
 
 @router.delete("/{experience_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
 async def permanently_delete_experience(experience_id: int, session: Session) -> Response:
-    """Irreversibly delete an archived experience after its impact has been reviewed."""
+    """确认影响后永久删除已归档经历。"""
     try:
         await ExperienceService(session).permanently_delete(experience_id)
         try:
@@ -185,7 +185,7 @@ async def permanently_delete_experience(experience_id: int, session: Session) ->
 async def create_evidence(
     experience_id: int, request: EvidenceCreate, session: Session
 ) -> ExperienceDetail:
-    """Append one owned evidence fact and return the refreshed experience detail."""
+    """追加一条所属证据，并返回刷新后的经历详情。"""
     try:
         return await EvidenceService(session).create(experience_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -199,7 +199,7 @@ async def patch_evidence(
     request: EvidenceUpdate,
     session: Session,
 ) -> ExperienceDetail:
-    """Edit an evidence fact only through its owning experience."""
+    """只能通过证据所属经历编辑该证据。"""
     try:
         return await EvidenceService(session).patch(experience_id, evidence_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -208,7 +208,7 @@ async def patch_evidence(
 
 @router.delete("/{experience_id}/evidence/{evidence_id}", response_model=ExperienceDetail)
 async def delete_evidence(experience_id: int, evidence_id: int, session: Session) -> ExperienceDetail:
-    """Delete an owned evidence fact and remove its JSON reference atomically."""
+    """删除所属证据，并原子移除其 JSON 引用。"""
     try:
         return await EvidenceService(session).delete(experience_id, evidence_id)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:
@@ -221,7 +221,7 @@ async def reorder_evidence(
     request: EvidenceReorder,
     session: Session,
 ) -> ExperienceDetail:
-    """Persist a client order only when it is a permutation of the current evidence IDs."""
+    """仅当客户端顺序是当前证据 ID 的完整排列时才持久化。"""
     try:
         return await EvidenceService(session).reorder(experience_id, request)
     except (ExperienceNotFoundError, ExperienceConflictError, ExperienceValidationError) as error:

@@ -145,9 +145,7 @@ class ExperienceFieldService:
             experience_id, EVIDENCE_TARGET_KEYS, ref_id=evidence_id
         )
 
-    async def snapshot(
-        self, experience_id: int, key: str, ref_id: int | None
-    ) -> FieldSnapshot:
+    async def snapshot( self, experience_id: int, key: str, ref_id: int | None) -> FieldSnapshot:
         """读取 Adapter/Tool 使用的严格目标快照。"""
         item = await self._experiences.get(experience_id)
         if item is None:
@@ -156,10 +154,12 @@ class ExperienceFieldService:
             state = await self.require_state(experience_id, key)
             value: Any = list(item.evidence_ids or [])
             return self._snapshot(key, None, value, state)
+
         if key in EXPERIENCE_TARGET_KEYS and ref_id is None:
             state = await self.require_state(experience_id, key)
             value = getattr(item, key)
             return self._snapshot(key, None, value, state)
+
         if key in EVIDENCE_TARGET_KEYS and ref_id is not None:
             if ref_id not in (item.evidence_ids or []):
                 raise FieldStateInvariantError("evidence does not belong to experience")
@@ -169,12 +169,11 @@ class ExperienceFieldService:
             state = await self.require_state(experience_id, key, ref_id)
             value = getattr(evidence, key)
             return self._snapshot(key, ref_id, value, state)
+
         raise FieldStateInvariantError(f"invalid experience target: {key}")
 
     @staticmethod
-    def _snapshot(
-        key: str, ref_id: int | None, value: Any, state: ExperienceFieldState
-    ) -> FieldSnapshot:
+    def _snapshot(key: str, ref_id: int | None, value: Any, state: ExperienceFieldState ) -> FieldSnapshot:
         return FieldSnapshot(
             key=key,
             ref_id=ref_id,

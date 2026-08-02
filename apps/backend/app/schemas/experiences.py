@@ -1,4 +1,4 @@
-"""Pydantic contracts for the person-level experience library."""
+"""个人经历库的 Pydantic 契约。"""
 
 import re
 from enum import Enum
@@ -50,7 +50,7 @@ def _normalize_labels(value: object) -> list[str]:
 
 
 class _ExperienceWritable(BaseModel):
-    """Editable fields shared by creates and patches."""
+    """创建与局部更新共用的可编辑字段。"""
 
     kind: ExperienceKind | None = None
     title: str | None = None
@@ -87,7 +87,7 @@ class _ExperienceWritable(BaseModel):
 
 
 class ExperienceCreate(_ExperienceWritable):
-    """Client-supplied fields for manually creating an experience."""
+    """客户端手动创建经历时提供的字段。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -99,7 +99,7 @@ class ExperienceCreate(_ExperienceWritable):
 
 
 class ExperienceUpdate(_ExperienceWritable):
-    """Client-supplied partial update; server-owned fields remain inaccessible."""
+    """客户端提供的局部更新；服务端字段保持不可写。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -137,7 +137,7 @@ class ExperienceGlobalSave(BaseModel):
 
 
 class ExperienceRead(BaseModel):
-    """Stored experience fields returned to clients."""
+    """返回给客户端的已存储经历字段。"""
 
     experience_id: int
     kind: ExperienceKind
@@ -161,7 +161,7 @@ class ExperienceRead(BaseModel):
 
 
 class ExperienceDetail(ExperienceRead):
-    """An experience with expanded evidence and recomputed guidance."""
+    """包含展开证据和重算引导信息的经历。"""
 
     evidence_items: list[EvidenceRead] = Field(default_factory=list)
     missing_dimensions: list[str] = Field(default_factory=list)
@@ -170,7 +170,7 @@ class ExperienceDetail(ExperienceRead):
 
 
 class ExperienceFieldStateRead(BaseModel):
-    """One field status and revision returned to the experience editor."""
+    """返回给经历编辑器的一项字段状态和修订号。"""
 
     key: str
     ref_id: int | None = None
@@ -179,7 +179,7 @@ class ExperienceFieldStateRead(BaseModel):
 
 
 class ExperienceListQuery(BaseModel):
-    """Supported local-library filters and sort modes."""
+    """本地经历库支持的筛选和排序方式。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -190,14 +190,14 @@ class ExperienceListQuery(BaseModel):
 
 
 class ExperienceListResponse(BaseModel):
-    """List response shaped for later pagination without changing item contracts."""
+    """为后续分页预留结构且不改变项目契约的列表响应。"""
 
     items: list[ExperienceRead] = Field(default_factory=list)
     total: int = Field(ge=0, default=0)
 
 
 class ExperienceCompleteness(BaseModel):
-    """Derived, non-persisted completeness guidance."""
+    """派生且不持久化的完整度引导信息。"""
 
     completeness: int = Field(ge=0, le=100)
     missing_dimensions: list[str] = Field(default_factory=list)
@@ -205,7 +205,7 @@ class ExperienceCompleteness(BaseModel):
 
 
 class ExperienceImportTextRequest(BaseModel):
-    """Transient source text used only for one structured import request."""
+    """仅用于一次结构化导入请求的临时源文本。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -220,21 +220,21 @@ class ExperienceImportTextRequest(BaseModel):
 
 
 class ReadyConflictResponse(BaseModel):
-    """Current score and missing facts returned when ready marking is rejected."""
+    """标记就绪被拒绝时返回的当前分数和缺失事实。"""
 
     completeness: int = Field(ge=0, le=100)
     missing_dimensions: list[str] = Field(default_factory=list)
 
 
 class DeletionImpactMatch(BaseModel):
-    """One future matching record affected by permanent deletion."""
+    """受永久删除影响的一条未来匹配记录。"""
 
     match_id: int
     job_title: str
 
 
 class DeletionImpactResponse(BaseModel):
-    """Stable forward-compatible impact contract for permanent deletion review."""
+    """用于永久删除审查的稳定、向前兼容影响契约。"""
 
     affected_matches: list[DeletionImpactMatch] = Field(default_factory=list)
     affected_resumes: list[str] = Field(default_factory=list)

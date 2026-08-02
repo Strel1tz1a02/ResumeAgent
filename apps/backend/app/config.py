@@ -320,7 +320,7 @@ class Settings(BaseSettings):
 
     @property
     def ai_chat_checkpoint_path(self) -> Path:
-        """Path to the independent LangGraph checkpoint SQLite database."""
+        """独立 LangGraph 检查点 SQLite 数据库的路径。"""
         return self.data_dir / "ai_chat_checkpoints.db"
 
     @property

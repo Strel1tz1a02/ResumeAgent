@@ -1,4 +1,4 @@
-"""Conversation persistence using a caller-owned transaction."""
+"""使用调用方事务的会话持久化。"""
 
 from typing import Any
 
@@ -9,10 +9,10 @@ from app.ai_chat.models import AiChatConversation, utcnow_iso
 
 
 class ConversationRepository:
-    """Read and mutate AI Chat conversations without committing."""
+    """读取和修改 AI 对话会话，但不自行提交。"""
 
     def __init__(self, session: AsyncSession) -> None:
-        """Bind repository operations to a caller-owned session."""
+        """将仓储操作绑定到调用方持有的会话。"""
         self._session = session
 
     async def create(
@@ -23,7 +23,7 @@ class ConversationRepository:
         target: dict[str, Any],
         language: str,
     ) -> AiChatConversation:
-        """Persist a new active conversation and populate its integer ID."""
+        """持久化新的使用中会话，并回填整数 ID。"""
         row = AiChatConversation(
             adapter=adapter,
             subject=subject,
@@ -35,11 +35,11 @@ class ConversationRepository:
         return row
 
     async def get(self, conversation_id: int) -> AiChatConversation | None:
-        """Return a conversation by ID."""
+        """根据 ID 返回会话。"""
         return await self._session.get(AiChatConversation, conversation_id)
 
     async def end(self, row: AiChatConversation, reason: str) -> AiChatConversation:
-        """End an active conversation idempotently."""
+        """幂等结束使用中的会话。"""
         if row.status != "ended":
             now = utcnow_iso()
             row.status = "ended"
@@ -50,7 +50,7 @@ class ConversationRepository:
         return row
 
     async def delete(self, conversation_id: int) -> bool:
-        """Delete one conversation and its foreign-key dependants."""
+        """删除一个会话及其外键依赖记录。"""
         result = await self._session.execute(
             delete(AiChatConversation).where(AiChatConversation.id == conversation_id)
         )
@@ -59,7 +59,7 @@ class ConversationRepository:
     async def ids_for_subject(
         self, adapter: str, subject: dict[str, Any]
     ) -> list[int]:
-        """Return conversation IDs bound to an opaque business subject."""
+        """返回绑定到不透明业务主体的会话 ID。"""
         result = await self._session.execute(
             select(AiChatConversation.id).where(
                 AiChatConversation.adapter == adapter,

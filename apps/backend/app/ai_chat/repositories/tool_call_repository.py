@@ -1,4 +1,4 @@
-"""Tool Call persistence using a caller-owned transaction."""
+"""使用调用方事务的工具调用持久化。"""
 
 from typing import Any
 
@@ -9,10 +9,10 @@ from app.ai_chat.models import AiChatToolCall, utcnow_iso
 
 
 class ToolCallRepository:
-    """Persist opaque Tool payloads and generic delivery state."""
+    """持久化不透明工具载荷和通用投递状态。"""
 
     def __init__(self, session: AsyncSession) -> None:
-        """Bind repository operations to a caller-owned session."""
+        """将仓储操作绑定到调用方持有的会话。"""
         self._session = session
 
     async def create(
@@ -24,7 +24,7 @@ class ToolCallRepository:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> AiChatToolCall:
-        """Persist one fully assembled Tool Call."""
+        """持久化一个已完整组装的工具调用。"""
         row = AiChatToolCall(
             conversation_id=conversation_id,
             run_id=run_id,
@@ -37,13 +37,13 @@ class ToolCallRepository:
         return row
 
     async def get(self, tool_call_id: int) -> AiChatToolCall | None:
-        """Return a Tool Call by ID."""
+        """根据 ID 返回工具调用。"""
         return await self._session.get(AiChatToolCall, tool_call_id)
 
     async def get_by_resolution_id(
         self, conversation_id: int, client_resolution_id: str
     ) -> AiChatToolCall | None:
-        """Find an idempotent proposal resolution."""
+        """查找幂等的提案审批记录。"""
         result = await self._session.execute(
             select(AiChatToolCall).where(
                 AiChatToolCall.conversation_id == conversation_id,
@@ -55,7 +55,7 @@ class ToolCallRepository:
     async def get_by_provider_id(
         self, run_id: int, provider_tool_call_id: str
     ) -> AiChatToolCall | None:
-        """Find a Tool Call replayed by an interrupt-restarted node."""
+        """查找因中断节点重启而重放的工具调用。"""
         result = await self._session.execute(
             select(AiChatToolCall).where(
                 AiChatToolCall.run_id == run_id,
@@ -71,7 +71,7 @@ class ToolCallRepository:
         proposal_payload: dict[str, Any],
         guard_payload: dict[str, Any],
     ) -> None:
-        """Mark a Tool Call as waiting for a user decision."""
+        """将工具调用标记为等待用户决定。"""
         row.proposal_payload = proposal_payload
         row.guard_payload = guard_payload
         row.status = "awaiting_approval"
@@ -86,7 +86,7 @@ class ToolCallRepository:
         tool_result: dict[str, Any],
         client_resolution_id: str | None = None,
     ) -> None:
-        """Persist an immutable opaque Tool Result."""
+        """持久化不可变的不透明工具结果。"""
         row.status = "resolved"
         row.decision = decision
         row.tool_result = tool_result
@@ -97,7 +97,7 @@ class ToolCallRepository:
         await self._session.flush()
 
     async def pending_results(self, conversation_id: int) -> list[AiChatToolCall]:
-        """Return Tool Results not yet consumed by a successful model response."""
+        """返回尚未被成功模型响应消费的工具结果。"""
         result = await self._session.execute(
             select(AiChatToolCall)
             .where(
@@ -110,7 +110,7 @@ class ToolCallRepository:
         return list(result.scalars().all())
 
     async def mark_consumed(self, rows: list[AiChatToolCall]) -> None:
-        """Mark Tool Results consumed after a complete model response."""
+        """在模型完整响应后将工具结果标记为已消费。"""
         now = utcnow_iso()
         for row in rows:
             row.delivery_status = "consumed"

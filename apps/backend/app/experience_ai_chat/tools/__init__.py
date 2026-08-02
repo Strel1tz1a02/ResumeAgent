@@ -1,8 +1,5 @@
-"""经历业务 Tool Handler。"""
+"""经历业务唯一的内容修改 Tool Handler。"""
 
-from app.experience_ai_chat.tools.evidence_append import EvidenceAppendHandler
-from app.experience_ai_chat.tools.evidence_update import EvidenceUpdateHandler
-from app.experience_ai_chat.tools.field_overwrite import FieldOverwriteHandler
+from app.experience_ai_chat.tools.content_change import ContentChangeHandler
 
-__all__ = ["EvidenceAppendHandler", "EvidenceUpdateHandler", "FieldOverwriteHandler"]
-
+__all__ = ["ContentChangeHandler"]

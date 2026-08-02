@@ -1,4 +1,4 @@
-"""Tool protocols and lifecycle helpers."""
+"""工具协议和生命周期辅助类型。"""
 
 from app.ai_chat.tools.handler import (
     ApprovalProposal,
