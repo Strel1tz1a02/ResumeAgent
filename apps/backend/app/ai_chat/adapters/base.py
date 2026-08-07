@@ -6,16 +6,11 @@ from typing import TYPE_CHECKING
 
 from langgraph.graph import StateGraph
 
-from app.ai_chat.types import (
-    AdapterInput,
-    AdapterState,
-    SubjectRef,
-    TargetRef,
-    ValidatedBinding,
-)
+from app.ai_chat.graph.state import AdapterInput, BaseState
+from app.ai_chat.types import SubjectRef, TargetRef, ValidatedBinding
 
 if TYPE_CHECKING:
-    from app.ai_chat.runtime import AiChatRuntime
+    from app.ai_chat.graph.runtime import AiChatRuntime
     from app.ai_chat.tools.handler import ToolHandler
 
 
@@ -32,8 +27,8 @@ class BaseAdapter(ABC): # ABC：要求子类必须实现父类要求的方法
         """在持久化前校验并规范化业务绑定。"""
 
     @abstractmethod
-    async def parse_input(self, value: AdapterInput) -> AdapterState:
-        """为一次业务图调用创建强类型、可序列化的业务状态。"""
+    async def parse_input(self, value: AdapterInput) -> BaseState:
+        """把统一调用输入转换成具体业务 Graph 的完整状态。"""
 
     @abstractmethod
     def build_graph(self, runtime: "AiChatRuntime") -> StateGraph:

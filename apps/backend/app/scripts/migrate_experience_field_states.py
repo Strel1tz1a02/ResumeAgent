@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import Engine, inspect, text
 
 from app.models import Base, _utcnow_iso
-from app.services.experience_fields import (
+from app.experience.services.experience_fields import (
     EVIDENCE_TARGET_KEYS,
     EXPERIENCE_TARGET_KEYS,
     field_status,
@@ -48,8 +48,8 @@ def migrate(engine: Engine) -> None:
                 connection.execute(
                     text(
                         "INSERT OR IGNORE INTO experience_field_states "
-                        "(experience_id,target_key,ref_id,status,revision,created_at,updated_at) "
-                        "VALUES (:experience_id,:target_key,0,:status,0,:now,:now)"
+                        "(experience_id,target_key,ref_id,status,created_at,updated_at) "
+                        "VALUES (:experience_id,:target_key,0,:status,:now,:now)"
                     ),
                     {
                         "experience_id": experience_id,
@@ -73,8 +73,8 @@ def migrate(engine: Engine) -> None:
                     connection.execute(
                         text(
                             "INSERT OR IGNORE INTO experience_field_states "
-                            "(experience_id,target_key,ref_id,status,revision,created_at,updated_at) "
-                            "VALUES (:experience_id,:target_key,:ref_id,:status,0,:now,:now)"
+                            "(experience_id,target_key,ref_id,status,created_at,updated_at) "
+                            "VALUES (:experience_id,:target_key,:ref_id,:status,:now,:now)"
                         ),
                         {
                             "experience_id": experience_id,
@@ -87,8 +87,8 @@ def migrate(engine: Engine) -> None:
             connection.execute(
                 text(
                     "INSERT OR IGNORE INTO experience_field_states "
-                    "(experience_id,target_key,ref_id,status,revision,created_at,updated_at) "
-                    "VALUES (:experience_id,'evidence_new',0,:status,0,:now,:now)"
+                    "(experience_id,target_key,ref_id,status,created_at,updated_at) "
+                    "VALUES (:experience_id,'evidence_new',0,:status,:now,:now)"
                 ),
                 {
                     "experience_id": experience_id,

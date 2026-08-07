@@ -97,8 +97,18 @@ export function ExperienceAiChatProvider({
         setPhase('ready');
         return;
       }
+      if (event.event === 'proposal.resolved') {
+        setProposal(null);
+        return;
+      }
       if (event.event.endsWith('.requested')) {
         streamRef.current?.abort();
+        setMessages((current) => {
+          const last = current.at(-1);
+          return last?.role === 'assistant' && last.content.length === 0
+            ? current.slice(0, -1)
+            : current;
+        });
         setProposal(event.data as unknown as ExperienceProposal);
         setPhase('approval');
         return;
@@ -122,10 +132,12 @@ export function ExperienceAiChatProvider({
     async (
       events: AsyncGenerator<ExperienceChatEvent>,
       controller: AbortController,
-      silentError = false
+      silentError = false,
+      onEvent?: (event: ExperienceChatEvent) => void
     ) => {
       try {
         for await (const event of events) {
+          onEvent?.(event);
           applyEvent(event);
           // 同一个网络包里可能包含多个 delta。让出一个浏览器任务，避免 React
           // 将它们全部批处理成一次最终渲染，保证文本仍然逐段可见。
@@ -135,8 +147,8 @@ export function ExperienceAiChatProvider({
         if (!controller.signal.aborted) {
           if (!silentError) {
             setError(reason instanceof Error ? reason.message : 'response_failed');
+            setPhase('ready');
           }
-          setPhase('ready');
         }
       } finally {
         if (streamRef.current === controller) streamRef.current = null;
@@ -191,7 +203,7 @@ export function ExperienceAiChatProvider({
 
   const send = useCallback(async () => {
     const content = input.trim();
-    if (phase !== 'ready' || conversationId === null || !content) return;
+    if (phase !== 'ready' || conversationId === null || proposal !== null || !content) return;
     setInput('');
     setError(null);
     setMessages((current) => [...current, { id: clientId('user'), role: 'user', content }]);
@@ -202,26 +214,31 @@ export function ExperienceAiChatProvider({
       streamExperienceMessage(conversationId, content, clientId('message'), controller.signal),
       controller
     );
-  }, [consume, conversationId, input, phase]);
+  }, [consume, conversationId, input, phase, proposal]);
 
   const resolve = useCallback(
     async (decision: 'approve' | 'reject') => {
-      if (phase !== 'approval' || proposal === null) return;
+      if (phase === 'generating' || proposal === null) return;
+      const currentProposal = proposal;
+      let accepted = false;
       setPhase('generating');
       setError(null);
       const controller = new AbortController();
       streamRef.current = controller;
       await consume(
         resolveExperienceProposal(
-          proposal.proposal_id,
+          currentProposal.proposal_id,
           decision,
           clientId('resolution'),
           controller.signal
         ),
         controller,
-        true
+        true,
+        (event) => {
+          if (event.event === 'proposal.resolved') accepted = true;
+        }
       );
-      if (!controller.signal.aborted) setPhase('ready');
+      if (!controller.signal.aborted) setPhase(accepted ? 'ready' : 'approval');
     },
     [consume, phase, proposal]
   );

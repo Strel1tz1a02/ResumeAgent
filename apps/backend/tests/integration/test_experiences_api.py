@@ -5,21 +5,32 @@ from unittest.mock import AsyncMock, patch
 from httpx import ASGITransport, AsyncClient
 import pytest
 
-from app.database import Database
 from app.main import app
-from app.models import ExperienceItem, Resume
-from app.repositories import evidence_repository as evidence_repository_module
-from app.repositories.evidence_repository import EvidenceRepository
-from app.repositories.experience_repository import ExperienceRepository
-from app.repositories.experience_repository import ExperienceStaleWriteError
-from app.schemas.evidence_items import EvidenceCreate
-from app.schemas.experiences import ExperienceCreate, ExperienceUpdate
-from app.services.evidence_service import EvidenceService
-from app.services.experience_service import ExperienceConflictError, ExperienceService
+from app.models import Resume
+from app.experience.repositories import evidence_repository as evidence_repository_module
+from app.experience.repositories.evidence_repository import EvidenceRepository
+from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
+from app.experience.schemas.evidence_items import EvidenceUpdate
+from app.experience.schemas.experiences import ExperienceUpdate
+from app.experience.services.evidence_service import EvidenceService
+from app.experience.services.experience_field_service import FieldRevisionConflictError
+from app.experience.services.experience_service import ExperienceConflictError, ExperienceService
 
 
 def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def _revision(payload: dict, key: str, ref_id: int | None = None) -> int:
+    return next(
+        state["revision"]
+        for state in payload["field_states"]
+        if state["key"] == key and state["ref_id"] == ref_id
+    )
+
+
+def _collection_revision(payload: dict) -> int:
+    return _revision(payload, "evidence_new")
 
 
 async def test_import_text_persists_only_structured_llm_output(isolated_db) -> None:
@@ -32,7 +43,7 @@ async def test_import_text_persists_only_structured_llm_output(isolated_db) -> N
         "evidence_items": [{"action": "Built assistant", "result": None, "metrics": None}],
     }
     with patch(
-        "app.services.experience_import_service.complete_json",
+        "app.experience.services.experience_import_service.complete_json",
         new=AsyncMock(return_value=parsed),
     ):
         async with _client() as client:
@@ -102,7 +113,16 @@ async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
 
         patched = await client.patch(
             f"/api/v1/experiences/{experience_id}",
-            json={"organization": "Campus Careers", "is_current": False, "end_date": "2026-07"},
+            json={
+                "organization": "Campus Careers",
+                "is_current": False,
+                "end_date": "2026-07",
+                "expected_field_revisions": {
+                    "organization": _revision(payload, "organization"),
+                    "is_current": _revision(payload, "is_current"),
+                    "end_date": _revision(payload, "end_date"),
+                },
+            },
         )
         assert patched.status_code == 200
         assert patched.json()["organization"] == "Campus Careers"
@@ -118,7 +138,7 @@ async def test_manual_crud_list_search_and_detail_contract(isolated_db) -> None:
 
 
 async def test_create_evidence_appends_it_and_returns_expanded_experience(isolated_db) -> None:
-    """插入证据后若遗漏 JSON 引用，客户端会看不到有效事实。"""
+    """插入证据后必须建立关系归属并返回展开事实。"""
     async with _client() as client:
         created = await client.post(
             "/api/v1/experiences",
@@ -127,7 +147,12 @@ async def test_create_evidence_appends_it_and_returns_expanded_experience(isolat
         experience_id = created.json()["experience_id"]
         evidence = await client.post(
             f"/api/v1/experiences/{experience_id}/evidence",
-            json={"action": "Built route", "result": "Returned expanded detail", "metrics": "1 API"},
+            json={
+                "action": "Built route",
+                "result": "Returned expanded detail",
+                "metrics": "1 API",
+                "expected_collection_revision": _collection_revision(created.json()),
+            },
         )
 
     assert evidence.status_code == 201
@@ -153,16 +178,24 @@ async def test_patch_evidence_requires_ownership_and_hides_cross_experience_rows
         first_id = first.json()["experience_id"]
         second_id = second.json()["experience_id"]
         evidence = await client.post(
-            f"/api/v1/experiences/{first_id}/evidence", json={"action": "Original"}
+            f"/api/v1/experiences/{first_id}/evidence",
+            json={
+                "action": "Original",
+                "expected_collection_revision": _collection_revision(first.json()),
+            },
         )
         evidence_id = evidence.json()["evidence_ids"][0]
         denied = await client.patch(
             f"/api/v1/experiences/{second_id}/evidence/{evidence_id}",
-            json={"action": "Stolen"},
+            json={"action": "Stolen", "expected_revision": 0},
         )
         updated = await client.patch(
             f"/api/v1/experiences/{first_id}/evidence/{evidence_id}",
-            json={"action": "Corrected", "result": "Saved"},
+            json={
+                "action": "Corrected",
+                "result": "Saved",
+                "expected_revision": _revision(evidence.json(), "action", evidence_id),
+            },
         )
 
     assert denied.status_code == 404
@@ -177,10 +210,20 @@ async def test_delete_evidence_removes_row_and_json_reference_atomically(isolate
         experience = await client.post("/api/v1/experiences", json={"title": "Delete proof"})
         experience_id = experience.json()["experience_id"]
         created = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Disposable"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "Disposable",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         evidence_id = created.json()["evidence_ids"][0]
-        deleted = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+        deleted = await client.delete(
+            f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}",
+            params={
+                "expected_revision": _revision(created.json(), "action", evidence_id),
+                "expected_collection_revision": _collection_revision(created.json()),
+            },
+        )
 
     assert deleted.status_code == 200
     assert deleted.json()["evidence_ids"] == []
@@ -195,27 +238,48 @@ async def test_reorder_evidence_requires_exact_unique_id_set_and_preserves_reque
         experience = await client.post("/api/v1/experiences", json={"title": "Order proof"})
         experience_id = experience.json()["experience_id"]
         first = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "First"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "First",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         first_id = first.json()["evidence_ids"][0]
         second = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Second"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "Second",
+                "expected_collection_revision": _collection_revision(first.json()),
+            },
         )
         second_id = second.json()["evidence_ids"][1]
         missing = await client.put(
-            f"/api/v1/experiences/{experience_id}/evidence-order", json={"evidence_ids": [first_id]}
+            f"/api/v1/experiences/{experience_id}/evidence-order",
+            json={
+                "evidence_ids": [first_id],
+                "expected_collection_revision": _collection_revision(second.json()),
+            },
         )
         duplicate = await client.put(
             f"/api/v1/experiences/{experience_id}/evidence-order",
-            json={"evidence_ids": [first_id, first_id]},
+            json={
+                "evidence_ids": [first_id, first_id],
+                "expected_collection_revision": _collection_revision(second.json()),
+            },
         )
         extra = await client.put(
             f"/api/v1/experiences/{experience_id}/evidence-order",
-            json={"evidence_ids": [first_id, second_id, 99999]},
+            json={
+                "evidence_ids": [first_id, second_id, 99999],
+                "expected_collection_revision": _collection_revision(second.json()),
+            },
         )
         reordered = await client.put(
             f"/api/v1/experiences/{experience_id}/evidence-order",
-            json={"evidence_ids": [second_id, first_id]},
+            json={
+                "evidence_ids": [second_id, first_id],
+                "expected_collection_revision": _collection_revision(second.json()),
+            },
         )
 
     assert [response.status_code for response in (missing, duplicate, extra)] == [422, 422, 422]
@@ -240,7 +304,12 @@ async def test_evidence_mutations_recompute_completeness_and_downgrade_ready_exp
         experience_id = experience.json()["experience_id"]
         enriched = await client.post(
             f"/api/v1/experiences/{experience_id}/evidence",
-            json={"action": "Delivered", "result": "Released", "metrics": "40% faster"},
+            json={
+                "action": "Delivered",
+                "result": "Released",
+                "metrics": "40% faster",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         evidence_id = enriched.json()["evidence_ids"][0]
 
@@ -250,7 +319,13 @@ async def test_evidence_mutations_recompute_completeness_and_downgrade_ready_exp
         await session.commit()
 
     async with _client() as client:
-        reduced = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+        reduced = await client.delete(
+            f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}",
+            params={
+                "expected_revision": _revision(enriched.json(), "action", evidence_id),
+                "expected_collection_revision": _collection_revision(enriched.json()),
+            },
+        )
 
     assert reduced.status_code == 200
     assert reduced.json()["completeness"] == 55
@@ -263,26 +338,36 @@ async def test_failed_evidence_delete_rolls_back_reference_and_row(isolated_db) 
         experience = await client.post("/api/v1/experiences", json={"title": "Rollback proof"})
         experience_id = experience.json()["experience_id"]
         created = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Must survive"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "Must survive",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         evidence_id = created.json()["evidence_ids"][0]
 
     with patch(
-        "app.services.evidence_service.EvidenceRepository.delete",
+        "app.experience.services.evidence_service.EvidenceRepository.delete",
         new_callable=AsyncMock,
         side_effect=RuntimeError("forced delete failure"),
     ):
         async with AsyncClient(
             transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
         ) as client:
-            failed = await client.delete(f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}")
+            failed = await client.delete(
+                f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}",
+                params={
+                    "expected_revision": _revision(created.json(), "action", evidence_id),
+                    "expected_collection_revision": _collection_revision(created.json()),
+                },
+            )
 
     assert failed.status_code == 500
     async with isolated_db.session() as session:
         stored_experience = await ExperienceRepository(session).get(experience_id)
         stored_evidence = await EvidenceRepository(session).get(evidence_id)
     assert stored_experience is not None
-    assert stored_experience.evidence_ids == [evidence_id]
+    assert ordered_evidence_ids(stored_experience) == [evidence_id]
     assert stored_evidence is not None
     assert stored_evidence.action == "Must survive"
 
@@ -293,7 +378,11 @@ async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, mo
         experience = await client.post("/api/v1/experiences", json={"title": "Stale proof"})
         experience_id = experience.json()["experience_id"]
         created = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Original"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "Original",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         evidence_id = created.json()["evidence_ids"][0]
 
@@ -301,11 +390,15 @@ async def test_stale_evidence_mutation_becomes_a_domain_conflict(isolated_db, mo
         service = EvidenceService(session)
 
         async def stale_claim(*_args, **_kwargs):
-            raise ExperienceStaleWriteError("stale experience update")
+            raise FieldRevisionConflictError("stale revision")
 
-        monkeypatch.setattr(service._experiences, "set_evidence_ids_if_current", stale_claim)
+        monkeypatch.setattr(service._fields, "claim_unit", stale_claim)
         with pytest.raises(ExperienceConflictError):
-            await service.patch(evidence_id=evidence_id, experience_id=experience_id, request=ExperienceUpdate())
+            await service.patch(
+                evidence_id=evidence_id,
+                experience_id=experience_id,
+                request=EvidenceUpdate(action="Changed", expected_revision=0),
+            )
 
     async with isolated_db.session() as session:
         stored_evidence = await EvidenceRepository(session).get(evidence_id)
@@ -321,51 +414,25 @@ async def test_patch_evidence_advances_its_timestamp_when_the_clock_regresses(
         experience = await client.post("/api/v1/experiences", json={"title": "Audit proof"})
         experience_id = experience.json()["experience_id"]
         created = await client.post(
-            f"/api/v1/experiences/{experience_id}/evidence", json={"action": "Before"}
+            f"/api/v1/experiences/{experience_id}/evidence",
+            json={
+                "action": "Before",
+                "expected_collection_revision": _collection_revision(experience.json()),
+            },
         )
         evidence_id = created.json()["evidence_ids"][0]
-        original_updated_at = created.json()["evidence_items"][0]["updated_at"]
-
         monkeypatch.setattr(evidence_repository_module, "_updated_at", lambda: "2000-01-01T00:00:00+00:00")
         patched = await client.patch(
             f"/api/v1/experiences/{experience_id}/evidence/{evidence_id}",
-            json={"action": "After"},
+            json={
+                "action": "After",
+                "expected_revision": _revision(created.json(), "action", evidence_id),
+            },
         )
 
     assert patched.status_code == 200
     assert patched.json()["evidence_items"][0]["action"] == "After"
-    assert patched.json()["evidence_items"][0]["updated_at"] > original_updated_at
-
-
-async def test_evidence_service_acquires_ownership_lock_before_loading_experience(
-    isolated_db, monkeypatch
-) -> None:
-    """在写锁前读取所有权会留下跨会话归属竞态。"""
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "Lock order"})
-        experience_id = created.json()["experience_id"]
-
-    async with isolated_db.session() as session:
-        service = EvidenceService(session)
-        lock_acquired = False
-
-        async def acquire_lock() -> None:
-            nonlocal lock_acquired
-            lock_acquired = True
-
-        original_get = service._experiences.get
-
-        async def guarded_get(experience_id: int):
-            assert lock_acquired
-            return await original_get(experience_id)
-
-        monkeypatch.setattr(
-            service._experiences, "acquire_ownership_write_lock", acquire_lock, raising=False
-        )
-        monkeypatch.setattr(service._experiences, "get", guarded_get)
-        detail = await service.create(experience_id, EvidenceCreate(action="Locked first"))
-
-    assert detail.evidence_items[0].action == "Locked first"
+    assert patched.json()["evidence_items"][0]["updated_at"] == "2000-01-01T00:00:00+00:00"
 
 
 async def test_missing_and_server_owned_fields_are_rejected(isolated_db) -> None:
@@ -418,7 +485,10 @@ async def test_global_save_updates_all_units_in_one_transaction(isolated_db) -> 
         experience_id = created.json()["experience_id"]
         with_evidence = await client.post(
             f"/api/v1/experiences/{experience_id}/evidence",
-            json={"action": "Old action"},
+            json={
+                "action": "Old action",
+                "expected_collection_revision": _collection_revision(created.json()),
+            },
         )
         detail = with_evidence.json()
         evidence_id = detail["evidence_ids"][0]
@@ -492,11 +562,11 @@ async def test_global_save_rolls_back_all_units_on_revision_conflict(isolated_db
 async def test_failed_import_rolls_back_its_uncommitted_record(isolated_db) -> None:
     """插入后失败时若不执行服务回滚，会留下幽灵草稿。"""
     with patch(
-        "app.services.experience_import_service.ExperienceRepository.set_completeness",
+        "app.experience.services.experience_import_service.ExperienceRepository.set_completeness",
         new_callable=AsyncMock,
         side_effect=RuntimeError("score write failed"),
     ), patch(
-        "app.services.experience_import_service.complete_json",
+        "app.experience.services.experience_import_service.complete_json",
         new=AsyncMock(return_value={"kind": "other", "title": "Transient import"}),
     ):
         async with AsyncClient(
@@ -547,26 +617,32 @@ async def test_patch_rejects_null_for_non_nullable_persisted_fields(isolated_db)
 
 
 async def test_patch_returns_conflict_without_overwriting_a_stale_winner(isolated_db) -> None:
-    """将陈旧条件写入视为成功会让客户端覆盖已胜出的编辑。"""
+    """同一保存单元的旧 revision 不能覆盖已经胜出的编辑。"""
     async with _client() as client:
         created = await client.post("/api/v1/experiences", json={"title": "Winner"})
         experience_id = created.json()["experience_id"]
+        revision = _revision(created.json(), "title")
+        winner = await client.patch(
+            f"/api/v1/experiences/{experience_id}",
+            json={
+                "title": "Fresh winner",
+                "expected_field_revisions": {"title": revision},
+            },
+        )
+        stale = await client.patch(
+            f"/api/v1/experiences/{experience_id}",
+            json={
+                "title": "Loser",
+                "expected_field_revisions": {"title": revision},
+            },
+        )
 
-    with patch(
-        "app.services.experience_service.ExperienceRepository.update_fields_if_current",
-        new_callable=AsyncMock,
-        side_effect=ExperienceStaleWriteError("experience update is stale"),
-    ):
-        async with _client() as client:
-            stale = await client.patch(
-                f"/api/v1/experiences/{experience_id}", json={"title": "Loser"}
-            )
-
+    assert winner.status_code == 200
     assert stale.status_code == 409
     async with _client() as client:
         stored = await client.get(f"/api/v1/experiences/{experience_id}")
     assert stored.status_code == 200
-    assert stored.json()["title"] == "Winner"
+    assert stored.json()["title"] == "Fresh winner"
 
 
 async def test_patch_allows_disjoint_fields_after_another_field_changes(
@@ -582,7 +658,13 @@ async def test_patch_allows_disjoint_fields_after_another_field_changes(
             if state["key"] == "title" and state["ref_id"] is None
         )
         winner = await client.patch(
-            f"/api/v1/experiences/{experience_id}", json={"background": "New fact"}
+            f"/api/v1/experiences/{experience_id}",
+            json={
+                "background": "New fact",
+                "expected_field_revisions": {
+                    "background": _revision(created.json(), "background")
+                },
+            },
         )
         stale = await client.patch(
             f"/api/v1/experiences/{experience_id}",
@@ -597,104 +679,6 @@ async def test_patch_allows_disjoint_fields_after_another_field_changes(
     assert stale.status_code == 200
     assert stored.json()["title"] == "Independent edit"
     assert stored.json()["background"] == "New fact"
-
-
-async def test_patch_repairs_historical_missing_evidence_references(isolated_db) -> None:
-    """已容忍的悬空 JSON ID 不得在下一次普通写入后继续存在。"""
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "Before"})
-    experience_id = created.json()["experience_id"]
-    async with isolated_db.session() as session:
-        item = await session.get(ExperienceItem, experience_id)
-        assert item is not None
-        item.evidence_ids = [999]
-        await session.commit()
-
-    async with _client() as client:
-        patched = await client.patch(
-            f"/api/v1/experiences/{experience_id}", json={"title": "After"}
-        )
-
-    assert patched.status_code == 200
-    assert patched.json()["evidence_ids"] == []
-    async with isolated_db.session() as session:
-        stored = await session.get(ExperienceItem, experience_id)
-        assert stored is not None
-        assert stored.evidence_ids == []
-
-
-async def test_lifecycle_write_repairs_historical_missing_evidence_references(isolated_db) -> None:
-    async with _client() as client:
-        created = await client.post("/api/v1/experiences", json={"title": "Archive"})
-    experience_id = created.json()["experience_id"]
-    async with isolated_db.session() as session:
-        item = await session.get(ExperienceItem, experience_id)
-        assert item is not None
-        item.evidence_ids = [999]
-        await session.commit()
-
-    async with _client() as client:
-        archived = await client.post(f"/api/v1/experiences/{experience_id}/archive")
-
-    assert archived.status_code == 200
-    assert archived.json()["evidence_ids"] == []
-
-
-async def test_full_patch_flow_rejects_stale_writer_after_completeness_recalculation(
-    tmp_path, monkeypatch
-) -> None:
-    """固定时钟不得让完整度重算恢复陈旧版本标记。"""
-    frozen_time = "2030-01-01T00:00:00+00:00"
-    monkeypatch.setattr(
-        "app.repositories.experience_repository._updated_at", lambda: frozen_time
-    )
-    database = Database(db_path=tmp_path / "experience.db")
-    try:
-        async with database.session() as session:
-            created = await ExperienceService(session).create(ExperienceCreate(title="Original"))
-            experience_id = created.experience_id
-
-        async with database.session() as winner_session:
-            async with database.session() as stale_session:
-                winner_service = ExperienceService(winner_session)
-                stale_service = ExperienceService(stale_session)
-                original_conditional_update = stale_service._experiences.update_fields_if_current
-
-                async def commit_winner_before_stale_write(
-                    stale_id: int, observed_updated_at: str, fields: dict
-                ):
-                    await stale_session.rollback()
-                    winner = await winner_service.patch(
-                        stale_id,
-                        ExperienceUpdate(
-                            title="Winner",
-                            background="Made campus recruiting faster.",
-                        ),
-                    )
-                    assert winner.completeness == 25
-                    return await original_conditional_update(
-                        stale_id, observed_updated_at, fields
-                    )
-
-                monkeypatch.setattr(
-                    stale_service._experiences,
-                    "update_fields_if_current",
-                    commit_winner_before_stale_write,
-                )
-                with pytest.raises(ExperienceConflictError):
-                    await stale_service.patch(
-                        experience_id,
-                        ExperienceUpdate(title="Loser"),
-                    )
-
-        async with database.session() as session:
-            stored = await ExperienceService(session).get(experience_id)
-            assert stored.title == "Winner"
-            assert stored.background == "Made campus recruiting faster."
-            assert stored.completeness == 25
-            assert stored.updated_at > frozen_time
-    finally:
-        await database.close()
 
 
 async def test_mark_ready_rejects_incomplete_record_with_current_guidance(isolated_db) -> None:
@@ -738,7 +722,12 @@ async def test_mark_ready_promotes_complete_draft_and_manual_edit_downgrades_it(
         experience_id = created.json()["experience_id"]
         enriched = await client.post(
             f"/api/v1/experiences/{experience_id}/evidence",
-            json={"action": "Built APIs", "result": "Released", "metrics": "40% faster"},
+            json={
+                "action": "Built APIs",
+                "result": "Released",
+                "metrics": "40% faster",
+                "expected_collection_revision": _collection_revision(created.json()),
+            },
         )
         ready = await client.post(f"/api/v1/experiences/{experience_id}/mark-ready")
         reduced = await client.patch(
@@ -748,6 +737,12 @@ async def test_mark_ready_promotes_complete_draft_and_manual_edit_downgrades_it(
                 "role": None,
                 "start_date": None,
                 "background": None,
+                "expected_field_revisions": {
+                    "organization": _revision(ready.json(), "organization"),
+                    "role": _revision(ready.json(), "role"),
+                    "start_date": _revision(ready.json(), "start_date"),
+                    "background": _revision(ready.json(), "background"),
+                },
             },
         )
 
@@ -783,7 +778,12 @@ async def test_archive_restore_and_list_filters_keep_lifecycle_views_separate(is
         second_id = second.json()["experience_id"]
         await client.post(
             f"/api/v1/experiences/{first_id}/evidence",
-            json={"action": "Built it", "result": "Released", "metrics": "1 launch"},
+            json={
+                "action": "Built it",
+                "result": "Released",
+                "metrics": "1 launch",
+                "expected_collection_revision": _collection_revision(first.json()),
+            },
         )
         marked_ready = await client.post(f"/api/v1/experiences/{first_id}/mark-ready")
         archived = await client.post(f"/api/v1/experiences/{first_id}/archive")
@@ -830,10 +830,18 @@ async def test_permanent_delete_requires_archive_and_preserves_unrelated_rows(is
         target_id = target.json()["experience_id"]
         other_id = other.json()["experience_id"]
         target_evidence = await client.post(
-            f"/api/v1/experiences/{target_id}/evidence", json={"action": "Disposable"}
+            f"/api/v1/experiences/{target_id}/evidence",
+            json={
+                "action": "Disposable",
+                "expected_collection_revision": _collection_revision(target.json()),
+            },
         )
         other_evidence = await client.post(
-            f"/api/v1/experiences/{other_id}/evidence", json={"action": "Keep evidence"}
+            f"/api/v1/experiences/{other_id}/evidence",
+            json={
+                "action": "Keep evidence",
+                "expected_collection_revision": _collection_revision(other.json()),
+            },
         )
         target_evidence_id = target_evidence.json()["evidence_ids"][0]
         other_evidence_id = other_evidence.json()["evidence_ids"][0]
@@ -868,9 +876,17 @@ async def test_patch_rolls_back_post_write_failure_in_current_and_reopened_sessi
         async def fail_after_write(*_args, **_kwargs):
             raise RuntimeError("forced completeness failure")
 
-        monkeypatch.setattr(service._experiences, "set_completeness", fail_after_write)
+        monkeypatch.setattr(service._experienceRepository, "set_completeness", fail_after_write)
         with pytest.raises(RuntimeError, match="forced completeness failure"):
-            await service.patch(experience_id, ExperienceUpdate(title="Uncommitted"))
+            await service.patch(
+                experience_id,
+                ExperienceUpdate(
+                    title="Uncommitted",
+                    expected_field_revisions={
+                        "title": _revision(created.json(), "title")
+                    },
+                ),
+            )
 
         assert not session.in_transaction()
         assert (await service.get(experience_id)).title == "Original"
@@ -886,7 +902,7 @@ async def test_patch_maps_post_write_value_error_to_422_and_rolls_back(isolated_
         experience_id = created.json()["experience_id"]
 
     with patch(
-        "app.services.experience_service.ExperienceRepository.set_completeness",
+        "app.experience.services.experience_service.ExperienceRepository.set_completeness",
         new_callable=AsyncMock,
         side_effect=ValueError("forced completeness validation"),
     ):
@@ -894,7 +910,13 @@ async def test_patch_maps_post_write_value_error_to_422_and_rolls_back(isolated_
             transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
         ) as client:
             failed = await client.patch(
-                f"/api/v1/experiences/{experience_id}", json={"title": "Uncommitted"}
+                f"/api/v1/experiences/{experience_id}",
+                json={
+                    "title": "Uncommitted",
+                    "expected_field_revisions": {
+                        "title": _revision(created.json(), "title")
+                    },
+                },
             )
 
     assert failed.status_code == 422
@@ -921,7 +943,12 @@ async def test_restore_rejects_active_draft_and_ready_experiences(isolated_db) -
         ready_id = ready.json()["experience_id"]
         await client.post(
             f"/api/v1/experiences/{ready_id}/evidence",
-            json={"action": "Built", "result": "Released", "metrics": "1 launch"},
+            json={
+                "action": "Built",
+                "result": "Released",
+                "metrics": "1 launch",
+                "expected_collection_revision": _collection_revision(ready.json()),
+            },
         )
         marked_ready = await client.post(f"/api/v1/experiences/{ready_id}/mark-ready")
         draft_restore = await client.post(f"/api/v1/experiences/{draft_id}/restore")

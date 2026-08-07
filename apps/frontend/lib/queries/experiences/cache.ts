@@ -1,13 +1,19 @@
 import type { QueryClient } from '@tanstack/react-query';
-import type {
-  ExperienceDetail,
-  ExperienceListResponse,
-  ExperienceRead,
-} from '@/lib/api/experiences';
+import type { ExperienceDetail, ExperienceListResponse } from '@/lib/api/experiences';
 import { experienceKeys, type ExperienceLibraryView } from './keys';
 
-function isOlder(current: ExperienceRead | undefined, next: ExperienceRead): boolean {
-  return Boolean(current && current.updated_at.localeCompare(next.updated_at) > 0);
+function revisionKey(key: string, refId: number | null): string {
+  return `${key}:${refId ?? 'root'}`;
+}
+
+function hasStaleRevision(current: ExperienceDetail, next: ExperienceDetail): boolean {
+  const currentRevisions = new Map(
+    current.field_states.map((state) => [revisionKey(state.key, state.ref_id), state.revision])
+  );
+  return next.field_states.some((state) => {
+    const observed = currentRevisions.get(revisionKey(state.key, state.ref_id));
+    return observed !== undefined && state.revision < observed;
+  });
 }
 
 function updateList(
@@ -30,7 +36,6 @@ function updateList(
   if (index === -1) {
     return { items: [detail, ...current.items], total: current.total + 1 };
   }
-  if (isOlder(current.items[index], detail)) return current;
   return {
     ...current,
     items: current.items.map((item) =>
@@ -42,7 +47,7 @@ function updateList(
 export function writeExperienceDetail(client: QueryClient, detail: ExperienceDetail): void {
   let accepted = detail;
   client.setQueryData<ExperienceDetail>(experienceKeys.detail(detail.experience_id), (current) => {
-    if (current && isOlder(current, detail)) {
+    if (current && hasStaleRevision(current, detail)) {
       accepted = current;
       return current;
     }

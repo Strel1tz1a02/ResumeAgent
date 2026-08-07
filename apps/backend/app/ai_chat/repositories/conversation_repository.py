@@ -17,7 +17,7 @@ class ConversationRepository:
 
     async def create(
         self,
-        *,
+        *, # * 后面的参数必须通过“参数名”传入，不能按位置传入
         adapter: str,
         subject: dict[str, Any],
         target: dict[str, Any],

@@ -1,0 +1,39 @@
+"""通用 Graph 的输入、运行和审批恢复状态。"""
+
+from typing import Literal, TypedDict
+
+from app.ai_chat.tools.results import PendingToolResult
+from app.ai_chat.types import JsonObject
+
+
+class ApprovalInput(TypedDict):
+    """传入恢复后业务图的审批决定和工具结果。"""
+
+    tool_call_id: int
+    decision: Literal["approve", "reject"]
+    tool_result: JsonObject
+
+
+class AdapterInput(TypedDict):
+    """通用聊天层提供给 Adapter 的统一调用输入。"""
+
+    conversation_id: int
+    run_id: int
+    subject: JsonObject
+    target: JsonObject
+    language: str
+    run_kind: str
+    tools_enabled: bool
+    messages: list[JsonObject]
+    pending_tool_results: list[PendingToolResult]
+
+
+class BaseState(TypedDict):
+    """所有业务 Graph 的公共状态基础。"""
+
+    conversation_id: int
+    run_id: int
+    subject: JsonObject
+    target: JsonObject
+    run_kind: str
+    tools_enabled: bool

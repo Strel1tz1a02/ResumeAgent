@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.models import AiChatToolCall, utcnow_iso
@@ -95,6 +95,30 @@ class ToolCallRepository:
         row.resolved_at = utcnow_iso()
         row.updated_at = row.resolved_at
         await self._session.flush()
+
+    async def claim_resolution(
+        self,
+        tool_call_id: int,
+        *,
+        decision: str,
+        client_resolution_id: str,
+    ) -> bool:
+        """原子认领待审批 Tool Call，防止跨进程重复执行业务副作用。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "awaiting_approval",
+                AiChatToolCall.client_resolution_id.is_(None),
+            )
+            .values(
+                decision=decision,
+                client_resolution_id=client_resolution_id,
+                updated_at=utcnow_iso(),
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
 
     async def pending_results(self, conversation_id: int) -> list[AiChatToolCall]:
         """返回尚未被成功模型响应消费的工具结果。"""

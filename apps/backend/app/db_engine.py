@@ -66,8 +66,20 @@ def init_models_sync(engine: Engine) -> None:
     import app.ai_chat.models  # noqa: F401
 
     from app.scripts.migrate_experience_field_states import migrate
+    from app.scripts.migrate_experience_evidence_items import (
+        migrate as migrate_experience_evidence_items,
+    )
+    from app.scripts.migrate_experience_revisions import (
+        migrate as migrate_experience_revisions,
+    )
+    from app.scripts.migrate_unified_experience_revision_units import (
+        migrate as migrate_unified_experience_revision_units,
+    )
 
     migrate(engine)
+    migrate_experience_evidence_items(engine)
+    migrate_experience_revisions(engine)
+    migrate_unified_experience_revision_units(engine)
 
     # ``create_all`` does not ALTER existing SQLite tables. Keep this additive
     # migration idempotent so older local databases can load resumes safely.

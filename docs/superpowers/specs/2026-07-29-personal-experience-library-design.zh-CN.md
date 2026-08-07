@@ -26,8 +26,8 @@
 5. 导入后的草稿由 AI 问询和手动编辑逐步原地修正；本阶段不为每次修正创建经历版本。
 6. 经历库保存的是个人层级数据，而不是简历层级数据。
 7. `experience_id` 和证据 ID 都使用普通自增整数。
-8. 一条经历可以关联多条证据。经历通过 `evidence_ids` JSON 整数数组保存这些证据的
-   有序 ID。
+8. 一条经历可以关联多条证据。`experience_evidence_items` 关系表保存唯一归属和顺序；
+   API 中的 `evidence_ids` 由关系表派生。
 9. 行动、结果和指标不能拆成三个相互独立的数组。三者组成一个 `EvidenceItem`，从而
    保留行动与对应结果、量化指标之间的因果关系。
 10. 完整度保存为后端计算的 0～100 整数。
@@ -126,7 +126,6 @@ flowchart LR
 | `end_date` | String(7) | 是 | null | `YYYY-MM`，必须与 `is_current` 状态一致 |
 | `is_current` | Boolean | 否 | false | 为 true 时，`end_date` 必须为空 |
 | `background` | Text | 是 | null | 结构化的背景、问题或目标 |
-| `evidence_ids` | JSON | 否 | `[]` | 指向 `evidence_items` 的有序且不重复的整数 ID |
 | `technologies` | JSON | 否 | `[]` | 有序、规范化的技术名称 |
 | `tags` | JSON | 否 | `[]` | 扁平标签，不构建分类树 |
 | `notes` | Text | 是 | null | 私人工作备注，不自动进入简历 |
@@ -150,30 +149,26 @@ flowchart LR
 
 | 字段 | 类型 | 可空 | 默认值 | 说明 |
 |---|---|---:|---|---|
-| `id` | Integer PK | 否 | 自增 | 保存在 `ExperienceItem.evidence_ids` 中的证据 ID |
+| `id` | Integer PK | 否 | 自增 | 由关系表引用的证据 ID |
 | `action` | Text | 否 | 无 | 用户采取的具体行动 |
 | `result` | Text | 是 | null | 该行动产生的结果 |
 | `metrics` | Text | 是 | null | 支撑该结果的量化指标 |
 | `created_at` | String | 否 | 当前 UTC 时间 | |
 | `updated_at` | String | 否 | 当前 UTC 时间 | |
 
-### 5.3 JSON 引用约束
+### 5.3 `ExperienceEvidence`
 
-SQLite 无法对 JSON 数组中的 ID 建立数据库外键，因此 Service 和 Repository 必须在
-事务中保证以下不变量：
+表名：`experience_evidence_items`
 
-1. `evidence_ids` 中的每个 ID 都实际存在。
-2. 同一条经历中，一个 ID 最多出现一次。
-3. `evidence_ids` 的顺序就是证据的展示顺序。
-4. 当前阶段每条证据只属于一条经历，不支持跨经历共享。
-5. 创建证据时，插入证据和将 ID 追加进经历必须在同一事务中完成。
-6. 删除证据时，从数组移除 ID 和删除证据记录必须在同一事务中完成。
-7. 永久删除经历时，同时删除该经历拥有的全部证据。
-8. 读取时如果发现历史脏数据，应记录缺失证据 ID，并返回仍然有效的证据；后续写入必须
-   修复或拒绝非法引用，不能继续传播脏数据。
+| 字段 | 类型 | 可空 | 说明 |
+|---|---|---:|---|
+| `experience_id` | Integer FK | 否 | 指向 `experience_items`，删除经历时级联删除关系 |
+| `evidence_id` | Integer FK | 否 | 指向 `evidence_items`，全表唯一，保证单一归属 |
+| `position` | Integer | 否 | 从 0 开始的展示顺序，同一经历内唯一且非负 |
 
-API 使用复数名称 `evidence_ids`，因为它是 JSON 数组。单数 `evidence_id` 只用于针对
-某一条证据的路由和操作。
+`(experience_id, evidence_id)` 为复合主键。数据库外键、唯一约束和检查约束负责存在性、
+单一归属、去重与顺序位置约束；Service 只负责业务事务、重排请求集合一致性和经历版本并发。
+API 继续返回派生的有序 `evidence_ids`，避免改变前端契约。
 
 ## 6. 完整度
 
@@ -615,7 +610,7 @@ API 模块复用现有 `lib/api/client.ts`，不得另建一套 base URL 或超�
 
 - 经历 CRUD 和筛选。
 - 在共享事务中创建、修改和删除证据。
-- 回滚后不存在孤立证据或悬空 JSON ID。
+- 外键阻止悬空 Evidence ID，唯一约束阻止跨经历共享。
 - 永久删除时删除所属证据。
 - 活动查询不返回归档记录。
 - 展开详情严格保持 `evidence_ids` 顺序。

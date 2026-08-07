@@ -1,18 +1,18 @@
 """Real-SQLite behavior tests for the experience repositories."""
 
-import asyncio
-import logging
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.database import Database
-from app.models import EvidenceItem, ExperienceItem
-from app.repositories.evidence_repository import EvidenceRepository
-from app.repositories import experience_repository as experience_repository_module
-from app.repositories.experience_repository import (
-    ExperienceRepository,
-    ExperienceStaleWriteError,
+from app.models import EvidenceItem, ExperienceEvidence, ExperienceItem
+from app.experience.repositories.evidence_repository import EvidenceRepository
+from app.experience.repositories import experience_repository as experience_repository_module
+from app.experience.repositories.experience_repository import ExperienceRepository
+from app.experience.repositories.experience_revision_repository import (
+    ExperienceRevisionRepository,
+    RevisionConflictError,
 )
 
 
@@ -60,7 +60,10 @@ async def test_repositories_preserve_evidence_order(tmp_path) -> None:
             await experiences.set_evidence_ids(item.experience_id, [second.id, first.id])
             await session.commit()
 
-            assert [row.id for row in await evidence.get_many_ordered([second.id, first.id])] == [second.id, first.id]
+            assert [
+                row.id
+                for row in await evidence.list_for_experience(item.experience_id)
+            ] == [second.id, first.id]
     finally:
         await database.close()
 
@@ -177,8 +180,8 @@ async def test_experience_updates_persist_editable_fields_and_reject_system_fiel
         await database.close()
 
 
-async def test_conditional_experience_update_rejects_a_stale_independent_session(tmp_path) -> None:
-    """An unconditional second writer would overwrite the first session's committed edit."""
+async def test_revision_claim_is_database_compare_and_swap(tmp_path) -> None:
+    """只有一个使用相同 expected revision 的写入者能成功。"""
     database = Database(db_path=tmp_path / "experience.db")
     try:
         async with database.session() as session:
@@ -186,48 +189,56 @@ async def test_conditional_experience_update_rejects_a_stale_independent_session
                 ExperienceItem(kind="project", title="Original")
             )
             experience_id = item.experience_id
+            revisions = ExperienceRevisionRepository(session)
+            await revisions.create(experience_id, "unit", "identity")
             await session.commit()
 
-        async with database.session() as winner_session:
-            async with database.session() as stale_session:
-                winner_repository = ExperienceRepository(winner_session)
-                stale_repository = ExperienceRepository(stale_session)
-                winner_observed = await winner_repository.get(experience_id)
-                stale_observed = await stale_repository.get(experience_id)
-                assert winner_observed is not None
-                assert stale_observed is not None
-                observed_updated_at = stale_observed.updated_at
-
-                # The stale session has captured its version and releases its read transaction.
-                await stale_session.rollback()
-                winner = await winner_repository.update_fields_if_current(
-                    experience_id,
-                    winner_observed.updated_at,
-                    {"title": "Winner"},
-                )
-                await winner_session.commit()
-
-                assert winner.updated_at != observed_updated_at
-                with pytest.raises(ExperienceStaleWriteError, match="stale"):
-                    await stale_repository.update_fields_if_current(
-                        experience_id,
-                        observed_updated_at,
-                        {"title": "Loser"},
-                    )
-                await stale_session.rollback()
+        async with database.session() as session:
+            assert await ExperienceRevisionRepository(session).claim(
+                experience_id, "unit", "identity", 0
+            ) == 1
+            await session.commit()
 
         async with database.session() as session:
-            stored = await ExperienceRepository(session).get(experience_id)
-            assert stored is not None
-            assert stored.title == "Winner"
+            with pytest.raises(RevisionConflictError, match="stale revision"):
+                await ExperienceRevisionRepository(session).claim(
+                    experience_id, "unit", "identity", 0
+                )
+            await session.rollback()
     finally:
         await database.close()
 
 
-async def test_all_experience_mutations_advance_updated_at_under_a_fixed_clock(
+async def test_revision_verify_uses_cas_without_advancing_unchanged_unit(
+    tmp_path,
+) -> None:
+    """全局保存可固定集合快照，但未改变集合时不得制造新版本。"""
+    database = Database(db_path=tmp_path / "experience.db")
+    try:
+        async with database.session() as session:
+            item = await ExperienceRepository(session).create(
+                ExperienceItem(kind="project", title="Original")
+            )
+            revisions = ExperienceRevisionRepository(session)
+            await revisions.create(item.experience_id, "collection", "evidence")
+            await session.commit()
+            await revisions.verify(item.experience_id, "collection", "evidence", 0)
+            assert await revisions.current(
+                item.experience_id, "collection", "evidence"
+            ) == 0
+            with pytest.raises(RevisionConflictError, match="stale revision"):
+                await revisions.verify(
+                    item.experience_id, "collection", "evidence", 1
+                )
+            await session.rollback()
+    finally:
+        await database.close()
+
+
+async def test_updated_at_is_only_an_audit_timestamp(
     tmp_path, monkeypatch
 ) -> None:
-    """Reusing or regressing a frozen timestamp would weaken future stale-write checks."""
+    """审计时间可以相同，不再承担并发版本语义。"""
     frozen_time = "2030-01-01T00:00:00+00:00"
     monkeypatch.setattr(experience_repository_module, "_updated_at", lambda: frozen_time)
     database = Database(db_path=tmp_path / "experience.db")
@@ -242,102 +253,16 @@ async def test_all_experience_mutations_advance_updated_at_under_a_fixed_clock(
             await session.commit()
 
             first = await experiences.update_fields(item.experience_id, {"title": "Edited"})
-            assert first.updated_at > frozen_time
-            first_updated_at = first.updated_at
+            assert first.updated_at == frozen_time
 
             second = await experiences.set_evidence_ids(item.experience_id, [proof.id])
-            assert second.updated_at > first_updated_at
-            second_updated_at = second.updated_at
+            assert second.updated_at == frozen_time
 
             third = await experiences.set_completeness(item.experience_id, 10)
-            assert third.updated_at > second_updated_at
-            third_updated_at = third.updated_at
+            assert third.updated_at == frozen_time
 
             fourth = await experiences.set_status(item.experience_id, "archived")
-            assert fourth.updated_at > third_updated_at
-    finally:
-        await database.close()
-
-
-async def test_conditional_evidence_reference_update_rejects_stale_version(tmp_path) -> None:
-    """A stale evidence append must not overwrite a newer ordered JSON reference set."""
-    database = Database(db_path=tmp_path / "experience.db")
-    try:
-        async with database.session() as session:
-            experiences = ExperienceRepository(session)
-            evidence = EvidenceRepository(session)
-            item = await experiences.create(ExperienceItem(kind="project", title="Concurrent evidence"))
-            first = await evidence.create(EvidenceItem(action="First"))
-            second = await evidence.create(EvidenceItem(action="Second"))
-            experience_id = item.experience_id
-            observed_updated_at = item.updated_at
-            await session.commit()
-
-        async with database.session() as session:
-            experiences = ExperienceRepository(session)
-            winner = await experiences.set_evidence_ids_if_current(
-                experience_id, observed_updated_at, [first.id]
-            )
-            await session.commit()
-            assert winner.evidence_ids == [first.id]
-
-        async with database.session() as session:
-            experiences = ExperienceRepository(session)
-            with pytest.raises(ExperienceStaleWriteError, match="stale"):
-                await experiences.set_evidence_ids_if_current(
-                    experience_id, observed_updated_at, [second.id]
-                )
-            await session.rollback()
-
-        async with database.session() as session:
-            stored = await ExperienceRepository(session).get(experience_id)
-            assert stored is not None
-            assert stored.evidence_ids == [first.id]
-    finally:
-        await database.close()
-
-
-async def test_sqlite_ownership_write_lock_serializes_cross_experience_assignment(tmp_path) -> None:
-    """Without a lock before ownership reads, two sessions can both claim the same JSON evidence ID."""
-    database = Database(db_path=tmp_path / "experience.db")
-    try:
-        async with database.session() as session:
-            experiences = ExperienceRepository(session)
-            evidence = EvidenceRepository(session)
-            first = await experiences.create(ExperienceItem(kind="project", title="First owner"))
-            second = await experiences.create(ExperienceItem(kind="project", title="Second owner"))
-            proof = await evidence.create(EvidenceItem(action="Exclusive"))
-            await session.commit()
-
-        second_attempted_lock = asyncio.Event()
-
-        async with database.session() as first_session:
-            async with database.session() as second_session:
-                first_repository = ExperienceRepository(first_session)
-                second_repository = ExperienceRepository(second_session)
-
-                async def assign_second() -> None:
-                    second_attempted_lock.set()
-                    await second_repository.acquire_ownership_write_lock()
-                    with pytest.raises(ValueError, match="already belongs"):
-                        await second_repository.set_evidence_ids(second.experience_id, [proof.id])
-                    await second_session.rollback()
-
-                await first_repository.acquire_ownership_write_lock()
-                await first_repository.set_evidence_ids(first.experience_id, [proof.id])
-                second_task = asyncio.create_task(assign_second())
-                await second_attempted_lock.wait()
-                await asyncio.sleep(0)
-                await first_session.commit()
-                await second_task
-
-        async with database.session() as session:
-            first_stored = await ExperienceRepository(session).get(first.experience_id)
-            second_stored = await ExperienceRepository(session).get(second.experience_id)
-            assert first_stored is not None
-            assert second_stored is not None
-            assert first_stored.evidence_ids == [proof.id]
-            assert second_stored.evidence_ids == []
+            assert fourth.updated_at == frozen_time
     finally:
         await database.close()
 
@@ -436,24 +361,23 @@ async def test_evidence_updates_persist_editable_fields_and_reject_system_fields
         await database.close()
 
 
-async def test_ordered_evidence_expansion_warns_only_about_missing_ids(tmp_path, caplog) -> None:
-    """Missing evidence must be observable without disturbing valid caller order or leaking text."""
+async def test_relation_foreign_key_rejects_missing_evidence(tmp_path) -> None:
+    """关系表外键直接阻止悬空 Evidence ID。"""
     database = Database(db_path=tmp_path / "experience.db")
     try:
         async with database.session() as session:
-            evidence = EvidenceRepository(session)
-            first = await evidence.create(EvidenceItem(action="Sensitive user action"))
-            second = await evidence.create(EvidenceItem(action="Second"))
-            await session.commit()
-
-            with caplog.at_level(logging.WARNING, logger="app.repositories.evidence_repository"):
-                expanded = await evidence.get_many_ordered(
-                    [second.id, 998, first.id, second.id, 999]
+            experience = await ExperienceRepository(session).create(
+                ExperienceItem(kind="project", title="Foreign key")
+            )
+            session.add(
+                ExperienceEvidence(
+                    experience_id=experience.experience_id,
+                    evidence_id=999,
+                    position=0,
                 )
-
-            assert [item.id for item in expanded] == [second.id, first.id, second.id]
-            assert caplog.messages == [
-                "Missing evidence IDs while expanding references: [998, 999]"
-            ]
+            )
+            with pytest.raises(IntegrityError):
+                await session.flush()
+            await session.rollback()
     finally:
         await database.close()

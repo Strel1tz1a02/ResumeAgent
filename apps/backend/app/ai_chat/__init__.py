@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.ai_chat.adapters.base import BaseAdapter
-    from app.ai_chat.service import AiChatService
+    from app.ai_chat.services import AiChatService
 
 
 def register_adapter(adapter: "BaseAdapter") -> None:

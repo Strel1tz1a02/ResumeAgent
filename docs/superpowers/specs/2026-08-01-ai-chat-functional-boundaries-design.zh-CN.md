@@ -206,13 +206,15 @@ EvidenceItem
 
 通用审批模块不应该直接比较字段 revision。它只把持久化的 `guard_payload` 交给业务 Handler。
 
-## 2.7 自动续跑和失败处理
+## 2.7 审批收尾和 Tool Result 延迟投递
 
 通用聊天负责：
 
-- 审批后立即续跑一次；
-- 立即续跑禁止 Tool；
-- 模型失败不回滚已经完成的业务操作；
+- 审批后恢复相同 checkpoint，使 Graph 完成中断收尾；
+- 是否立即调用模型由业务 Graph 决定，通用层不得写死；
+- Graph 输出模型文本时，通用层负责流式发送、消息持久化和 Tool Result consumed；
+- Graph 不调用模型时，Tool Result 保持 pending，等待下一条用户消息补传；
+- 收尾失败不回滚已经完成的业务操作；
 - 保存 pending Tool Result；
 - 静默恢复输入；
 - 下一条用户消息中补传 Tool Result；
@@ -220,7 +222,7 @@ EvidenceItem
 - 正常补传时允许 Tool；
 - 判断 Tool Result 是否 consumed。
 
-业务不需要为每个模块重新实现续跑和补传。
+业务不需要为每个模块重新实现 checkpoint 恢复和 Tool Result 补传。
 
 业务只需要保证：
 
@@ -237,7 +239,7 @@ EvidenceItem
 - 定义业务 API 的请求、响应和错误映射；
 - 在业务前端实现消息、输入、审批和页面联动。
 
-通用层仍负责取消、失败、审批、续跑和 pending Tool Result 等后端状态，但不决定其 UI 表现。
+通用层仍负责取消、失败、审批、checkpoint 收尾和 pending Tool Result 等后端状态，但不决定其 UI 表现。
 
 ---
 
@@ -336,11 +338,11 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 - 自己计算本应由领域服务维护的派生值；
 - 为 AI 单独建立一套与手动编辑不同的数据一致性规则。
 
-### 3.2.5 parse_input 的强类型边界
+### 3.2.5 parse_input 的 State 转换边界
 
-`BaseAdapter.parse_input()` 返回通用 `AdapterState` 的业务子类，而不是没有结构约束的字典。每个业务自行定义专属输入类，例如 `ExperienceInputState`。通用 Graph Runner 不理解其中字段，只调用 `model_dump(mode="json")` 将其转换成可序列化数据，再与通用运行输入合并后交给 LangGraph。
+`AdapterInput` 是通用聊天层提供的统一调用输入；`BaseState` 是所有业务 Graph 的公共状态基础。`BaseAdapter.parse_input()` 的核心职责是把前者转换为扩展 `BaseState` 的完整业务 State，例如 `ExperienceState`。
 
-这样既能在业务层获得字段校验、类型提示和明确命名，也不会让 Pydantic 对象进入 checkpoint。
+Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值可 JSON 序列化并直接交给 LangGraph。State 中不得包含 ORM、Pydantic 对象、数据库 Session、异常对象、流连接或回调函数。
 
 ## 3.3 解释 subject 和 target
 
@@ -436,7 +438,7 @@ Tool 名称、调用条件和参数提交规则不写死在系统 Prompt。通�
 | Tool 校验 | 聚合参数、调用 Handler | 类型校验、no-change、guard |
 | 形成提案 | 持久化、原子事件、interrupt | proposal 展示数据 |
 | 用户审批 | 幂等、状态流转、resume | 应用业务修改或判断失效 |
-| 自动续跑 | Tool Result、无工具调用、失败补传 | 提供业务结果 |
+| 审批收尾 | 恢复 checkpoint、持久化可选续答、投递 Tool Result | 决定直接结束或继续调用模型 |
 | 页面回写 | 透传 business payload | 精确更新业务表单 |
 | 删除清理 | 提供按 subject 清理接口 | 决定何时调用清理 |
 
@@ -512,27 +514,34 @@ apps/backend/app/
 ├── ai_chat/                              # 通用聊天模块
 │   ├── __init__.py
 │   ├── container.py                      # 注册表、checkpoint 与 Service 生命周期
-│   ├── service.py                        # AiChatService；通用流程入口
-│   ├── runtime.py                        # AiChatRuntime；Graph 执行依赖
-│   ├── registry.py                       # AdapterRegistry
-│   ├── models.py                         # 会话、消息、run、Tool Call ORM 模型
-│   ├── model.py                          # LiteLLM 流式适配器
-│   ├── types.py                          # 通用内部传输类型
+│   ├── types.py                          # JSON 和业务绑定引用类型
 │   ├── errors.py                         # 稳定内部错误
 │   │
 │   ├── adapters/
 │   │   ├── __init__.py
-│   │   └── base.py                       # BaseAdapter、AdapterInput、绑定引用协议
+│   │   ├── base.py                       # BaseAdapter 抽象协议
+│   │   └── registry.py                   # AdapterRegistry
 │   │
 │   ├── graph/
 │   │   ├── __init__.py
-│   │   └── runner.py                     # 编译、astream、interrupt/resume
+│   │   ├── runner.py                     # 编译、astream、interrupt/resume
+│   │   ├── runtime.py                    # AiChatRuntime；Graph 执行依赖
+│   │   └── state.py                      # 统一调用输入、Graph 基础状态和审批恢复类型
+│   │
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── models.py                     # 会话、消息、run、Tool Call ORM 模型
+│   │
+│   ├── services/
+│   │   ├── __init__.py
+│   │   └── service.py                    # AiChatService；通用流程入口
 │   │
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── handler.py                    # ToolHandler 抽象协议
 │   │   ├── lifecycle.py                  # Tool Call 通用生命周期
-│   │   └── buffer.py                     # Tool 参数分片聚合
+│   │   ├── buffer.py                     # Tool 参数分片聚合
+│   │   └── results.py                    # Tool 提案、结果和延迟投递类型
 │   │
 │   ├── repositories/
 │   │   ├── __init__.py
@@ -547,43 +556,53 @@ apps/backend/app/
 │   │
 │   └── streaming/
 │       ├── __init__.py
-│       └── events.py                     # 供业务 API 转换的内部事件
+│       ├── events.py                     # 供业务 API 转换的内部事件
+│       └── model.py                      # LiteLLM 流式适配器
 │
-├── experience_ai_chat/                   # 经历业务 AI 接入层
+└── experience/                           # 完整经历业务模块
 │   ├── __init__.py
-│   ├── adapter.py                        # ExperienceAdapter
-│   ├── context.py                        # 经历模型上下文构造
-│   ├── prompts.py                        # 经历补全 Prompt
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   └── adapter.py                    # ExperienceAdapter
+│   ├── routers/
+│   │   ├── __init__.py
+│   │   ├── ai_chat.py                    # 经历专用聊天 API/SSE 转换
+│   │   └── experiences.py                # 经历库 CRUD API
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── ai_chat.py                    # 经历聊天请求、响应和业务事件
+│   │   ├── evidence_items.py
+│   │   └── experiences.py
 │   │
 │   ├── graph/
 │   │   ├── __init__.py
 │   │   ├── state.py                      # 经历 Graph 扩展 State
 │   │   ├── builder.py                    # 经历 Graph 定义
-│   │   └── nodes/
-│   │       ├── __init__.py
-│   │       ├── prepare_turn.py
-│   │       ├── agent_stream.py
-│   │       ├── validate_tool_call.py
-│   │       ├── approval.py
-│   │       └── continuation.py
+│   │   ├── context.py                    # 经历模型上下文构造
+│   │   └── prompts.py                    # 经历补全 Prompt
 │   │
-│   └── tools/
-│       ├── __init__.py
-│       ├── common.py                       # Tool 上下文解析
-│       └── content_change.py               # 统一内容修改路由 Handler
-│
-├── services/
-│   ├── experience_service.py              # 经历领域写入与业务规则
-│   ├── experience_completeness_service.py
-│   └── evidence_service.py
-│
-└── repositories/
-    ├── experience_repository.py           # 经历领域持久化
-    └── evidence_repository.py
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── common.py                     # Tool 上下文解析
+│   │   └── content_change.py             # 统一内容修改路由 Handler
+│   ├── services/
+│   │   ├── experience_service.py         # 经历领域写入与业务规则
+│   │   ├── evidence_service.py
+│   │   ├── experience_field_service.py
+│   │   ├── experience_global_save_service.py
+│   │   ├── experience_import_service.py
+│   │   ├── experience_ai_mutation_service.py
+│   │   ├── experience_completeness_service.py
+│   │   └── experience_fields.py
+│   └── repositories/
+│       ├── experience_repository.py      # 经历领域持久化
+│       ├── evidence_repository.py
+│       ├── experience_field_state_repository.py
+│       └── experience_revision_repository.py
 ```
 
 ## 6.2 对外接入边界
 
 通用聊天是内部后端运行库，不提供通用 HTTP Router、SSE API 或前端 UI。具体业务的 Router/Service 取得 `AiChatService`，把内部 `AiChatEvent` 转换为该业务的 API 与 SSE 协议。业务前端也由具体业务模块负责，不在 `ai_chat/` 下建立通用前端目录。
 
-上图中的 `experience_ai_chat/` 是后续经历适配层的规划目录，本轮不创建；当前生产 `AdapterRegistry` 保持为空。
+`experience/` 是完整的经历业务模块，包含经历库 HTTP 接口、应用服务、数据访问以及 AI Chat 业务适配层；通用 `ai_chat/` 不反向依赖它。

@@ -5,8 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.types import JsonObject
+from app.ai_chat.tools.results import ToolResult, ToolValidation
 
 
 @dataclass(frozen=True)
@@ -19,31 +21,7 @@ class ToolContext:
     subject: JsonObject
     target: JsonObject
     adapter_context: JsonObject = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ApprovalProposal:
-    """执行前必须审批的不透明提案。"""
-
-    proposal_payload: JsonObject
-    guard_payload: JsonObject
-
-
-@dataclass(frozen=True)
-class ImmediateToolResult:
-    """无需用户审批的不透明工具结果。"""
-
-    payload: JsonObject
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    """审批决定后产生的不透明结果。"""
-
-    payload: JsonObject
-
-
-ToolValidation = ApprovalProposal | ImmediateToolResult
+    session: AsyncSession | None = None
 
 
 class ToolHandler(ABC):

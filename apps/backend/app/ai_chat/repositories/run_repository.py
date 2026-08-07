@@ -1,6 +1,8 @@
 """使用调用方事务的运行记录持久化。"""
 
-from sqlalchemy import select
+from collections.abc import Collection
+
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.models import AiChatRun, utcnow_iso
@@ -41,11 +43,29 @@ class RunRepository:
         )
         return result.scalar_one_or_none()
 
-    async def set_status(
-        self, row: AiChatRun, status: str, error_code: str | None = None
-    ) -> None:
-        """设置运行状态，并结束终态运行。"""
-        row.status = status
-        row.error_code = error_code
-        row.finished_at = None if status in {"running", "suspended"} else utcnow_iso()
+    async def transition(
+        self,
+        run_id: int,
+        *,
+        from_statuses: Collection[str],
+        to_status: str,
+        error_code: str | None = None,
+    ) -> bool:
+        """只允许从声明的来源状态原子转换 Run。"""
+        finished_at = (
+            None if to_status in {"running", "suspended"} else utcnow_iso()
+        )
+        result = await self._session.execute(
+            update(AiChatRun)
+            .where(
+                AiChatRun.id == run_id,
+                AiChatRun.status.in_(tuple(from_statuses)),
+            )
+            .values(
+                status=to_status,
+                error_code=error_code,
+                finished_at=finished_at,
+            )
+        )
         await self._session.flush()
+        return result.rowcount == 1

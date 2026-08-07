@@ -7,13 +7,11 @@ from typing import Any
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-from app.ai_chat.adapters.base import BaseAdapter
-from app.ai_chat.model import AiChatModel
-from app.ai_chat.registry import AdapterRegistry
-from app.ai_chat.runtime import AiChatRuntime
+from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
+from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
-from app.ai_chat.tools.lifecycle import ToolLifecycle
-from app.ai_chat.types import AdapterInput, ApprovalInput, JsonObject
+from app.ai_chat.graph.state import AdapterInput, ApprovalInput
+from app.ai_chat.types import JsonObject
 
 
 class GraphRunner:
@@ -23,71 +21,56 @@ class GraphRunner:
         self,
         registry: AdapterRegistry,
         checkpointer: AsyncSqliteSaver,
-        model: AiChatModel,
-        tool_lifecycle: ToolLifecycle,
+        runtime: AiChatRuntime,
     ) -> None:
         """保存共享依赖和按适配器名称索引的业务图缓存。"""
         self._registry = registry
         self._checkpointer = checkpointer
-        self._model = model
-        self._tool_lifecycle = tool_lifecycle
+        self._runtime = runtime
         self._graphs: dict[str, Any] = {}
 
     def _compiled(self, adapter: BaseAdapter) -> Any:
         """在当前进程中仅编译一次适配器业务图。"""
         name = adapter.adapter_name()
         if name not in self._graphs:
-            runtime = AiChatRuntime(
-                self._model,
-                adapter.get_tool_handlers(),
-                self._tool_lifecycle,
-            )
-            self._graphs[name] = adapter.build_graph(runtime).compile(
-                checkpointer=self._checkpointer
-            )
+            runtime = self._runtime.bind_tools(adapter.get_tool_handlers())
+            self._graphs[name] = adapter.build_graph(runtime).compile(checkpointer=self._checkpointer)
         return self._graphs[name]
 
     async def stream(
         self,
         *,
         adapter_name: str,
-        value: AdapterInput,
-        resume: JsonObject | ApprovalInput | None = None,
+        value: AdapterInput, # 本次执行需要的通用输入
+        resume: JsonObject | ApprovalInput | None = None, # 是否从之前的 interrupt 恢复，不是简历的意思
     ) -> AsyncIterator[AiChatEvent]:
         """使用稳定的会话线程 ID 运行或恢复业务图。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
-        if resume is None:
-            business_state = await adapter.parse_input(value)
-            graph_input: Any = {
-                **value,
-                **business_state.model_dump(mode="json"),
-            }
-            json.dumps(graph_input, ensure_ascii=False)
-        else:
-            graph_input = Command(resume=resume)
+        if resume is None: # 首次运行
+            graph_input: Any = await adapter.parse_input(value)
+            json.dumps(graph_input, ensure_ascii=False) # 转换成 JSON 字符串
+        else: # 审批恢复
+            graph_input = Command(resume=resume) # resume 传给 interrupt() 作为其返回值
         config = {
             "configurable": {
-                "thread_id": f"ai-chat:{value['conversation_id']}",
+                "thread_id": f"ai-chat:{value['conversation_id']}", # configurable 专门给 Checkpointer 等组件使用，Checkpointer 使用 thread_id 来存取和恢复 checkpoint
             }
         }
         if resume is not None:
-            await graph.aupdate_state(
+            await graph.aupdate_state( # interrupt 恢复后，写入最新外部事实
                 config,
                 {
                     "run_id": value["run_id"],
                     "run_kind": value["run_kind"],
                     "tools_enabled": value["tools_enabled"],
-                    "approval": value.get("approval"),
-                    "messages": value["messages"],
-                    "pending_tool_results": value["pending_tool_results"],
                 },
             )
         async for part in graph.astream(
             graph_input,
             config=config,
-            stream_mode=["messages", "updates", "custom"],
-            version="v2",
+            stream_mode=["messages", "updates", "custom"], # LangGraph 预定义的 stream_mode 名称
+            version="v2",# LangGraph 使用 v2 流事件格式：{ "type": "...","data": ...}
         ):
             event = self._normalize(part)
             if event is not None:
@@ -107,23 +90,41 @@ class GraphRunner:
                 return data
             if isinstance(data, dict) and isinstance(data.get("event"), str):
                 payload = data.get("data")
-                return AiChatEvent(
-                    data["event"], payload if isinstance(payload, dict) else {}
-                )
+                return AiChatEvent(data["event"], payload if isinstance(payload, dict) else {})
+
         if event_type == "messages":
             message = data[0] if isinstance(data, tuple) and data else data
             content = getattr(message, "content", "")
             if isinstance(content, str) and content:
                 return AiChatEvent("assistant.delta", {"text": content})
+
         if event_type == "updates" and isinstance(data, dict):
             interrupts = data.get("__interrupt__")
             if interrupts:
-                interrupt = interrupts[0]
-                payload = getattr(interrupt, "value", interrupt)
-                if isinstance(payload, dict):
-                    return AiChatEvent("_graph.interrupted", {"payload": payload})
+                return AiChatEvent("_graph.interrupted", {})
         return None
 
     async def delete_thread(self, conversation_id: int) -> None:
         """删除一个会话的全部检查点。"""
         await self._checkpointer.adelete_thread(f"ai-chat:{conversation_id}")
+
+    async def ensure_interrupted(self, *, adapter_name: str, conversation_id: int) -> bool:
+        """将提案已落库但尚未记录暂停的旧 Graph 推进到 interrupt。"""
+        adapter = self._registry.get(adapter_name)
+        graph = self._compiled(adapter)
+        config = {
+            "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
+        }
+        snapshot = await graph.aget_state(config)
+        if any(getattr(task, "interrupts", ()) for task in snapshot.tasks):
+            return True
+        async for part in graph.astream(
+            None,
+            config=config,
+            stream_mode=["updates", "custom"],
+            version="v2",
+        ):
+            event = self._normalize(part)
+            if event is not None and event.event == "_graph.interrupted":
+                return True
+        return False

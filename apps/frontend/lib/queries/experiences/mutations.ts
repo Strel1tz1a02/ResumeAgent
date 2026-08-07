@@ -17,7 +17,7 @@ import {
   reorderEvidence,
   saveExperience,
   restoreExperience,
-  type EvidenceCreate,
+  type EvidenceCreateRequest,
   type EvidenceUpdate,
   type ExperienceCreate,
   type ExperienceGlobalSave,
@@ -110,7 +110,7 @@ export function useCreateEvidenceMutation(experienceId: number) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-create'),
-    mutationFn: (payload: EvidenceCreate) => createEvidence(experienceId, payload),
+    mutationFn: (payload: EvidenceCreateRequest) => createEvidence(experienceId, payload),
     scope: experienceMutationScope(experienceId),
     onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
@@ -131,7 +131,17 @@ export function useDeleteEvidenceMutation(experienceId: number) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-delete'),
-    mutationFn: (evidenceId: number) => deleteEvidence(experienceId, evidenceId),
+    mutationFn: (value: {
+      evidenceId: number;
+      expectedRevision: number;
+      expectedCollectionRevision: number;
+    }) =>
+      deleteEvidence(
+        experienceId,
+        value.evidenceId,
+        value.expectedRevision,
+        value.expectedCollectionRevision
+      ),
     scope: experienceMutationScope(experienceId),
     onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });
@@ -141,7 +151,8 @@ export function useReorderEvidenceMutation(experienceId: number) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: experienceMutationKeys.item(experienceId, 'evidence-reorder'),
-    mutationFn: (evidenceIds: number[]) => reorderEvidence(experienceId, evidenceIds),
+    mutationFn: (value: { evidenceIds: number[]; expectedCollectionRevision: number }) =>
+      reorderEvidence(experienceId, value.evidenceIds, value.expectedCollectionRevision),
     scope: experienceMutationScope(experienceId),
     onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
   });

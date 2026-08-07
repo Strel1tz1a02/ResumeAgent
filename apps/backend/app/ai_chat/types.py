@@ -1,6 +1,6 @@
-"""AI 对话边界共享的可序列化类型。"""
+"""AI Chat 跨组件共享的基础类型。"""
 
-from typing import Literal, NotRequired, TypeAlias, TypedDict
+from typing import TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,61 +32,3 @@ class ValidatedBinding(BaseModel):
 
     subject: SubjectRef
     target: TargetRef
-
-
-class AdapterState(BaseModel):
-    """具体 Adapter 返回给通用 Graph Runner 的可序列化业务状态。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class PendingToolResult(TypedDict):
-    """等待模型完整响应的不透明工具结果。"""
-
-    tool_call_id: int
-    provider_tool_call_id: str | None
-    tool_name: str
-    arguments: JsonObject
-    result: JsonObject
-
-
-class ApprovalInput(TypedDict):
-    """传入恢复后业务图的审批决定和工具结果。"""
-
-    tool_call_id: int
-    decision: Literal["approve", "reject"]
-    tool_result: JsonObject
-
-
-class AdapterInput(TypedDict):
-    """由具体适配器解析的通用单次运行输入。"""
-
-    conversation_id: int
-    run_id: int
-    adapter: str
-    subject: JsonObject
-    target: JsonObject
-    language: str
-    run_kind: str
-    tools_enabled: bool
-    messages: list[JsonObject]
-    pending_tool_results: list[PendingToolResult]
-    user_message_id: NotRequired[int]
-    approval: NotRequired[ApprovalInput]
-
-
-class AiChatBaseState(TypedDict):
-    """在所有适配器中语义一致的可序列化状态字段。"""
-
-    conversation_id: int
-    run_id: int
-    adapter: str
-    subject: JsonObject
-    target: JsonObject
-    language: str
-    run_kind: str
-    tools_enabled: bool
-    messages: list[JsonObject]
-    pending_tool_results: list[PendingToolResult]
-    user_message_id: NotRequired[int]
-    approval: NotRequired[ApprovalInput]

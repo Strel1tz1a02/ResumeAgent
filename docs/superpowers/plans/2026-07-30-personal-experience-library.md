@@ -18,7 +18,7 @@
 - Completeness is a persisted server-computed integer from 0 to 100; clients never set it.
 - Existing resumes are never changed by experience edits, archive, restore, or permanent deletion.
 - Archive is the default delete; permanent deletion is available only for archived records and deletes owned evidence transactionally.
-- New persistence operations live in `app/repositories/experience_repository.py` and `app/repositories/evidence_repository.py`, not in `database.py`; `database.py` may only expose shared session plumbing.
+- New persistence operations live in `app/experience/repositories/experience_repository.py` and `app/experience/repositories/evidence_repository.py`, not in `database.py`; `database.py` may only expose shared session plumbing.
 - Do not add migration tooling or migration scripts; fresh development databases use current metadata `create_all`.
 - AI writes only typed patches through the application service and never writes the database directly.
 - Do not persist AI conversation history.
@@ -33,9 +33,9 @@
 
 **Files:**
 - Modify: `apps/backend/app/models.py`
-- Create: `apps/backend/app/schemas/experiences.py`
-- Create: `apps/backend/app/schemas/evidence_items.py`
-- Create: `apps/backend/app/services/experience_completeness_service.py`
+- Create: `apps/backend/app/experience/schemas/experiences.py`
+- Create: `apps/backend/app/experience/schemas/evidence_items.py`
+- Create: `apps/backend/app/experience/services/experience_completeness_service.py`
 - Create: `apps/backend/tests/unit/test_experience_completeness.py`
 - Create: `apps/backend/tests/unit/test_experience_schemas.py`
 
@@ -131,7 +131,7 @@ Expected: all selected tests pass and existing ORM initialization remains valid.
 - [ ] **Step 9: Commit Task 1**
 
 ```bash
-git add apps/backend/app/models.py apps/backend/app/schemas/experiences.py apps/backend/app/schemas/evidence_items.py apps/backend/app/services/experience_completeness_service.py apps/backend/tests/unit/test_experience_completeness.py apps/backend/tests/unit/test_experience_schemas.py
+git add apps/backend/app/models.py apps/backend/app/experience/schemas/experiences.py apps/backend/app/experience/schemas/evidence_items.py apps/backend/app/experience/services/experience_completeness_service.py apps/backend/tests/unit/test_experience_completeness.py apps/backend/tests/unit/test_experience_schemas.py
 git commit -m "feat: define experience library domain"
 ```
 
@@ -143,8 +143,8 @@ git commit -m "feat: define experience library domain"
 - Modify: `apps/backend/app/database.py`
 - Create: `apps/backend/app/repositories/__init__.py`
 - Create: `apps/backend/app/repositories/session.py`
-- Create: `apps/backend/app/repositories/experience_repository.py`
-- Create: `apps/backend/app/repositories/evidence_repository.py`
+- Create: `apps/backend/app/experience/repositories/experience_repository.py`
+- Create: `apps/backend/app/experience/repositories/evidence_repository.py`
 - Create: `apps/backend/tests/unit/test_experience_repositories.py`
 
 **Interfaces:**
@@ -164,9 +164,9 @@ async def test_repositories_preserve_evidence_order(tmp_path) -> None:
         item = await experiences.create(ExperienceItem(kind="project", title="Agent"))
         first = await evidence.create(EvidenceItem(action="First"))
         second = await evidence.create(EvidenceItem(action="Second"))
-        item.evidence_ids = [second.id, first.id]
+        await experiences.set_evidence_ids(item.experience_id, [second.id, first.id])
         await session.commit()
-        assert [row.id for row in await evidence.get_many_ordered(item.evidence_ids)] == [second.id, first.id]
+        assert [row.id for row in await evidence.list_for_experience(item.experience_id)] == [second.id, first.id]
 ```
 
 - [ ] **Step 2: Run repository tests and verify RED**
@@ -190,7 +190,7 @@ Do not add experience CRUD to `Database`.
 
 - [ ] **Step 4: Implement repositories**
 
-`ExperienceRepository` provides typed methods `create`, `get`, `list`, `update_fields`, `set_evidence_ids`, and `delete`. Its list method accepts `q`, `kind`, `status`, and `sort`, defaulting to draft+ready and searching the approved columns. `EvidenceRepository` provides `create`, `get`, `get_many_ordered`, `update_fields`, `delete`, and `find_owner_experience_id`; it validates ownership against `ExperienceItem.evidence_ids`.
+`ExperienceRepository` provides typed methods `create`, `get`, `list`, `update_fields`, `set_evidence_ids`, and `delete`. Its list method accepts `q`, `kind`, `status`, and `sort`, defaulting to draft+ready and searching the approved columns. `EvidenceRepository` provides `create`, `get`, `list_for_experience`, `get_for_experience`, `update_fields`, `delete`, and `find_owner_experience_id`; evidence ownership and order are enforced by `experience_evidence_items`.
 
 `get_repository_session()` dynamically imports `app.database.db` inside the dependency so the existing `isolated_db` monkeypatch remains authoritative:
 
@@ -219,9 +219,9 @@ git commit -m "feat: add experience repositories"
 ### Task 3: Text import and manual experience CRUD API
 
 **Files:**
-- Create: `apps/backend/app/services/experience_import_service.py`
-- Create: `apps/backend/app/services/experience_service.py`
-- Create: `apps/backend/app/routers/experiences.py`
+- Create: `apps/backend/app/experience/services/experience_import_service.py`
+- Create: `apps/backend/app/experience/services/experience_service.py`
+- Create: `apps/backend/app/experience/routers/experiences.py`
 - Modify: `apps/backend/app/main.py`
 - Create: `apps/backend/tests/integration/test_experiences_api.py`
 
@@ -272,7 +272,7 @@ Expected: all selected tests pass; resume behavior is unchanged.
 - [ ] **Step 7: Commit Task 3**
 
 ```bash
-git add apps/backend/app/services/experience_import_service.py apps/backend/app/services/experience_service.py apps/backend/app/routers/experiences.py apps/backend/app/main.py apps/backend/tests/integration/test_experiences_api.py
+git add apps/backend/app/experience/services/experience_import_service.py apps/backend/app/experience/services/experience_service.py apps/backend/app/experience/routers/experiences.py apps/backend/app/main.py apps/backend/tests/integration/test_experiences_api.py
 git commit -m "feat: add experience text import and CRUD"
 ```
 
@@ -281,15 +281,15 @@ git commit -m "feat: add experience text import and CRUD"
 ### Task 4: Transactional evidence operations
 
 **Files:**
-- Create: `apps/backend/app/services/evidence_service.py`
-- Modify: `apps/backend/app/routers/experiences.py`
-- Modify: `apps/backend/app/services/experience_service.py`
+- Create: `apps/backend/app/experience/services/evidence_service.py`
+- Modify: `apps/backend/app/experience/routers/experiences.py`
+- Modify: `apps/backend/app/experience/services/experience_service.py`
 - Modify: `apps/backend/tests/unit/test_experience_repositories.py`
 - Modify: `apps/backend/tests/integration/test_experiences_api.py`
 
 **Interfaces:**
 - Consumes: repository methods and expanded responses from Tasks 2–3.
-- Produces: evidence create/patch/delete/reorder endpoints, atomic JSON-reference maintenance, and automatic completeness/status updates.
+- Produces: evidence create/patch/delete/reorder endpoints, atomic relation-table ownership/order maintenance, and automatic completeness/status updates.
 
 - [ ] **Step 1: Add failing transaction and API tests**
 
@@ -337,7 +337,7 @@ Expected: repository and API evidence cases pass, including rollback coverage.
 - [ ] **Step 6: Commit Task 4**
 
 ```bash
-git add apps/backend/app/services/evidence_service.py apps/backend/app/services/experience_service.py apps/backend/app/routers/experiences.py apps/backend/tests/unit/test_experience_repositories.py apps/backend/tests/integration/test_experiences_api.py
+git add apps/backend/app/experience/services/evidence_service.py apps/backend/app/experience/services/experience_service.py apps/backend/app/experience/routers/experiences.py apps/backend/tests/unit/test_experience_repositories.py apps/backend/tests/integration/test_experiences_api.py
 git commit -m "feat: manage structured experience evidence"
 ```
 
@@ -346,8 +346,8 @@ git commit -m "feat: manage structured experience evidence"
 ### Task 5: Readiness, search, archive, restore, and permanent deletion
 
 **Files:**
-- Modify: `apps/backend/app/services/experience_service.py`
-- Modify: `apps/backend/app/routers/experiences.py`
+- Modify: `apps/backend/app/experience/services/experience_service.py`
+- Modify: `apps/backend/app/experience/routers/experiences.py`
 - Modify: `apps/backend/tests/integration/test_experiences_api.py`
 
 **Interfaces:**
@@ -387,7 +387,7 @@ Expected: all selected tests pass and resume persistence remains untouched.
 - [ ] **Step 6: Commit Task 5**
 
 ```bash
-git add apps/backend/app/services/experience_service.py apps/backend/app/routers/experiences.py apps/backend/tests/integration/test_experiences_api.py
+git add apps/backend/app/experience/services/experience_service.py apps/backend/app/experience/routers/experiences.py apps/backend/tests/integration/test_experiences_api.py
 git commit -m "feat: add experience lifecycle controls"
 ```
 
@@ -397,10 +397,10 @@ git commit -m "feat: add experience lifecycle controls"
 
 **Files:**
 - Create: `apps/backend/app/prompts/experience_enrichment.py`
-- Create: `apps/backend/app/services/experience_enrichment_service.py`
+- Create: `apps/backend/app/experience/services/experience_enrichment_service.py`
 - Modify: `apps/backend/app/llm.py`
-- Modify: `apps/backend/app/schemas/experiences.py`
-- Modify: `apps/backend/app/routers/experiences.py`
+- Modify: `apps/backend/app/experience/schemas/experiences.py`
+- Modify: `apps/backend/app/experience/routers/experiences.py`
 - Create: `apps/backend/tests/unit/test_experience_enrichment_service.py`
 - Modify: `apps/backend/tests/integration/test_experiences_api.py`
 - Modify: `apps/backend/tests/unit/test_prompt_guardrails.py`
@@ -416,7 +416,7 @@ Mock `complete_json` and cover experience-field patch, one-evidence patch, new-e
 ```python
 async def test_answer_cannot_patch_server_owned_fields(service) -> None:
     mocked_result = {"experience_updates": {"status": "ready", "completeness": 100}}
-    with patch("app.services.experience_enrichment_service.complete_json", return_value=mocked_result):
+    with patch("app.experience.services.experience_enrichment_service.complete_json", return_value=mocked_result):
         with pytest.raises(InvalidEnrichmentPatch):
             await service.apply_answer(experience_id=1, question_id="background", answer="More context")
 ```
@@ -453,7 +453,7 @@ Expected: all selected tests pass, including rollback and fallback cases.
 - [ ] **Step 7: Commit Task 6**
 
 ```bash
-git add apps/backend/app/prompts/experience_enrichment.py apps/backend/app/services/experience_enrichment_service.py apps/backend/app/schemas/experiences.py apps/backend/app/routers/experiences.py apps/backend/app/llm.py apps/backend/tests/unit/test_experience_enrichment_service.py apps/backend/tests/integration/test_experiences_api.py apps/backend/tests/unit/test_prompt_guardrails.py
+git add apps/backend/app/prompts/experience_enrichment.py apps/backend/app/experience/services/experience_enrichment_service.py apps/backend/app/experience/schemas/experiences.py apps/backend/app/experience/routers/experiences.py apps/backend/app/llm.py apps/backend/tests/unit/test_experience_enrichment_service.py apps/backend/tests/integration/test_experiences_api.py apps/backend/tests/unit/test_prompt_guardrails.py
 git commit -m "feat: add AI experience enrichment"
 ```
 

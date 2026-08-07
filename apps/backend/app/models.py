@@ -9,8 +9,19 @@ never sees ORM objects — preserving the TinyDB-era contracts.
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def _utcnow_iso() -> str:
@@ -152,7 +163,6 @@ class ExperienceItem(Base):
     end_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, default=False)
     background: Mapped[str | None] = mapped_column(Text, nullable=True)
-    evidence_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     technologies: Mapped[list[str]] = mapped_column(JSON, default=list)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -162,6 +172,13 @@ class ExperienceItem(Base):
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso, index=True)
 
+    evidence_links: Mapped[list["ExperienceEvidence"]] = relationship(
+        back_populates="experience",
+        cascade="all, delete-orphan",
+        order_by="ExperienceEvidence.position",
+        lazy="selectin",
+        passive_deletes=True,
+    )
 
 class EvidenceItem(Base):
     """一条由经历引用的有序行动、结果和指标事实。"""
@@ -176,8 +193,35 @@ class EvidenceItem(Base):
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
 
 
+class ExperienceEvidence(Base):
+    """保存经历对 EvidenceItem 的唯一归属和展示顺序。"""
+
+    __tablename__ = "experience_evidence_items"
+    __table_args__ = (
+        UniqueConstraint("evidence_id", name="uq_experience_evidence_item_owner"),
+        UniqueConstraint(
+            "experience_id", "position", name="uq_experience_evidence_item_position"
+        ),
+        CheckConstraint("position >= 0", name="ck_experience_evidence_item_position"),
+        Index("ix_experience_evidence_items_experience_id", "experience_id"),
+    )
+
+    experience_id: Mapped[int] = mapped_column(
+        ForeignKey("experience_items.experience_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    evidence_id: Mapped[int] = mapped_column(
+        ForeignKey("evidence_items.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    experience: Mapped[ExperienceItem] = relationship(back_populates="evidence_links")
+    evidence: Mapped[EvidenceItem] = relationship(lazy="joined")
+
+
 class ExperienceFieldState(Base):
-    """一个经历保存字段的完整度提示和乐观修订号。"""
+    """一个经历字段只供前端提醒使用的完善状态。"""
 
     __tablename__ = "experience_field_states"
     __table_args__ = (
@@ -194,6 +238,37 @@ class ExperienceFieldState(Base):
     target_key: Mapped[str] = mapped_column(String(80), nullable=False)
     ref_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="incomplete")
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class ExperienceRevision(Base):
+    """经历数据单元和 Evidence 集合的统一乐观锁。"""
+
+    __tablename__ = "experience_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "experience_id",
+            "scope",
+            "unit_key",
+            "ref_id",
+            name="uq_experience_revision_target",
+        ),
+        CheckConstraint(
+            "scope IN ('unit', 'collection')",
+            name="ck_experience_revision_scope",
+        ),
+        CheckConstraint("revision >= 0", name="ck_experience_revision_nonnegative"),
+        Index("ix_experience_revisions_experience_id", "experience_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experience_id: Mapped[int] = mapped_column(
+        ForeignKey("experience_items.experience_id", ondelete="CASCADE"), nullable=False
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    unit_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    ref_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)

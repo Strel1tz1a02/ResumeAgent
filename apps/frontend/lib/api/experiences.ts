@@ -76,11 +76,15 @@ export interface EvidenceCreate {
   metrics?: string | null;
 }
 
+export interface EvidenceCreateRequest extends EvidenceCreate {
+  expected_collection_revision: number;
+}
+
 export interface EvidenceUpdate {
   action?: string | null;
   result?: string | null;
   metrics?: string | null;
-  expected_revision?: number;
+  expected_revision: number;
 }
 
 export interface ExperienceEvidenceSave {
@@ -293,7 +297,7 @@ export async function deleteExperiencePermanently(experienceId: number): Promise
 
 export async function createEvidence(
   experienceId: number,
-  payload: EvidenceCreate
+  payload: EvidenceCreateRequest
 ): Promise<ExperienceDetail> {
   return parseResponse<ExperienceDetail>(
     await apiPost(`${experiencePath(experienceId)}/evidence`, payload),
@@ -317,11 +321,17 @@ export async function patchEvidence(
 
 export async function deleteEvidence(
   experienceId: number,
-  evidenceId: number
+  evidenceId: number,
+  expectedRevision: number,
+  expectedCollectionRevision: number
 ): Promise<ExperienceDetail> {
+  const params = new URLSearchParams({
+    expected_revision: String(expectedRevision),
+    expected_collection_revision: String(expectedCollectionRevision),
+  });
   return parseResponse<ExperienceDetail>(
     await apiDelete(
-      `${experiencePath(experienceId)}/evidence/${encodeURIComponent(String(evidenceId))}`
+      `${experiencePath(experienceId)}/evidence/${encodeURIComponent(String(evidenceId))}?${params}`
     ),
     'Failed to delete evidence'
   );
@@ -329,10 +339,14 @@ export async function deleteEvidence(
 
 export async function reorderEvidence(
   experienceId: number,
-  evidenceIds: number[]
+  evidenceIds: number[],
+  expectedCollectionRevision: number
 ): Promise<ExperienceDetail> {
   return parseResponse<ExperienceDetail>(
-    await apiPut(`${experiencePath(experienceId)}/evidence-order`, { evidence_ids: evidenceIds }),
+    await apiPut(`${experiencePath(experienceId)}/evidence-order`, {
+      evidence_ids: evidenceIds,
+      expected_collection_revision: expectedCollectionRevision,
+    }),
     'Failed to reorder evidence'
   );
 }

@@ -49,10 +49,19 @@ export function ExperienceChatPanel() {
             {JSON.stringify(proposalValue(chat.proposal), null, 2)}
           </pre>
           <div className="mt-3 flex gap-2">
-            <Button size="sm" onClick={() => void chat.resolve('approve')}>
+            <Button
+              size="sm"
+              disabled={chat.phase === 'generating'}
+              onClick={() => void chat.resolve('approve')}
+            >
               {t('experiences.ai.approve')}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void chat.resolve('reject')}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={chat.phase === 'generating'}
+              onClick={() => void chat.resolve('reject')}
+            >
               {t('experiences.ai.reject')}
             </Button>
           </div>
@@ -74,7 +83,7 @@ export function ExperienceChatPanel() {
         <Button
           className="self-stretch"
           onClick={() => void chat.send()}
-          disabled={chat.phase !== 'ready' || !chat.input.trim()}
+          disabled={chat.phase !== 'ready' || chat.proposal !== null || !chat.input.trim()}
         >
           <Send className="h-4 w-4" />
         </Button>

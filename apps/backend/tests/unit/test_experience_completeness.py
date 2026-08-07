@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from app.prompts.templates import get_language_name
-from app.services.experience_completeness_service import calculate_completeness
+from app.experience.services.experience_completeness_service import calculate_completeness
 
 
 def test_complete_experience_scores_100() -> None:

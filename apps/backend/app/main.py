@@ -27,9 +27,9 @@ from app.routers import (
     resume_wizard_router,
     resumes_router,
 )
-from app.routers.experiences import router as experiences_router
-from app.experience_ai_chat import ExperienceAdapter
-from app.experience_ai_chat.router import router as experience_ai_chat_router
+from app.experience import ExperienceAdapter
+from app.experience.routers import ai_chat_router as experience_ai_chat_router
+from app.experience.routers import experiences_router
 from app.ai_chat import register_adapter
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ _configure_application_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
+    """FastAPI 应用的“生命周期管理函数”，负责在服务启动时初始化资源（yeild 前），在服务关闭时释放资源（yeild 后）"""
     # Startup
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     # Import a legacy TinyDB database into SQLite if present (idempotent).

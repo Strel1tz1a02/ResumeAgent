@@ -55,6 +55,7 @@ const detail = (overrides: Partial<ExperienceDetail> = {}): ExperienceDetail => 
   evidence_items: [],
   missing_dimensions: ['result'],
   suggested_questions: ['What changed?'],
+  field_states: [],
   ...overrides,
 });
 
@@ -62,6 +63,10 @@ const list = (items: ExperienceDetail[]): ExperienceListResponse => ({
   items,
   total: items.length,
 });
+
+const backgroundRevision = (revision: number) => [
+  { key: 'background', ref_id: null, status: 'complete' as const, revision },
+];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -94,16 +99,24 @@ describe('experience query cache', () => {
     expect(experienceKeys.deletionImpact(7)).toEqual(['experiences', 'deletion-impact', 7]);
   });
 
-  it('moves an authoritative detail between status lists without accepting an older version', () => {
+  it('moves an authoritative detail between status lists without accepting a stale revision', () => {
     const client = createExperienceQueryClient();
-    const newer = detail({ title: 'New title', updated_at: '2025-01-04T00:00:00Z' });
+    const newer = detail({
+      title: 'New title',
+      updated_at: '2025-01-03T00:00:00Z',
+      field_states: backgroundRevision(2),
+    });
     client.setQueryData(experienceKeys.list('active'), list([detail()]));
     client.setQueryData(experienceKeys.list('archived'), list([]));
 
     writeExperienceDetail(client, newer);
     writeExperienceDetail(
       client,
-      detail({ title: 'Late old title', updated_at: '2025-01-03T00:00:00Z' })
+      detail({
+        title: 'Late old title',
+        updated_at: '2025-01-05T00:00:00Z',
+        field_states: backgroundRevision(1),
+      })
     );
 
     expect(client.getQueryData<ExperienceDetail>(experienceKeys.detail(1))?.title).toBe(
@@ -129,15 +142,23 @@ describe('experience query cache', () => {
     ).toBe('Archived title');
   });
 
-  it('uses the newest detail when a late response fills a previously empty list cache', () => {
+  it('uses the highest-revision detail when a late response fills an empty list cache', () => {
     const client = createExperienceQueryClient();
-    const newest = detail({ title: 'Newest title', updated_at: '2025-01-05T00:00:00Z' });
+    const newest = detail({
+      title: 'Newest title',
+      updated_at: '2025-01-03T00:00:00Z',
+      field_states: backgroundRevision(2),
+    });
     client.setQueryData(experienceKeys.detail(1), newest);
     client.setQueryData(experienceKeys.list('active'), list([]));
 
     writeExperienceDetail(
       client,
-      detail({ title: 'Late old title', updated_at: '2025-01-03T00:00:00Z' })
+      detail({
+        title: 'Late old title',
+        updated_at: '2025-01-05T00:00:00Z',
+        field_states: backgroundRevision(1),
+      })
     );
 
     expect(
@@ -210,7 +231,10 @@ describe('experience query cache', () => {
 
     act(() => {
       result.current.patch.mutate({ title: 'Queued metadata' });
-      result.current.evidence.mutate({ action: 'Queued evidence' });
+      result.current.evidence.mutate({
+        action: 'Queued evidence',
+        expected_collection_revision: 0,
+      });
     });
 
     await waitFor(() => expect(api.patchExperience).toHaveBeenCalledTimes(1));

@@ -72,6 +72,14 @@ export function EvidenceListEditor({
   const loadedExperienceIdRef = useRef(experience.experience_id);
   const loadedResetSignalRef = useRef(resetSignal);
   const archived = experience.status === 'archived';
+  const collectionRevision =
+    (experience.field_states ?? []).find(
+      (state) => state.key === 'evidence_new' && state.ref_id === null
+    )?.revision ?? 0;
+  const evidenceRevision = (evidenceId: number) =>
+    (experience.field_states ?? []).find(
+      (state) => state.key === 'action' && state.ref_id === evidenceId
+    )?.revision ?? 0;
   const submitting =
     createMutation.isPending ||
     patchMutation.isPending ||
@@ -200,6 +208,7 @@ export function EvidenceListEditor({
         action: newEvidence.action.trim(),
         result: newEvidence.result.trim() || null,
         metrics: newEvidence.metrics.trim() || null,
+        expected_collection_revision: collectionRevision,
       },
       { onSuccess: () => setNewEvidence({ action: '', result: '', metrics: '' }) }
     );
@@ -214,16 +223,18 @@ export function EvidenceListEditor({
         action: draft.action.trim(),
         result: draft.result.trim() || null,
         metrics: draft.metrics.trim() || null,
-        expected_revision: (experience.field_states ?? []).find(
-          (state) => state.key === 'action' && state.ref_id === id
-        )?.revision,
+        expected_revision: evidenceRevision(id),
       },
     });
   };
 
   const remove = (id: number) => {
     if (submitting) return;
-    deleteMutation.mutate(id);
+    deleteMutation.mutate({
+      evidenceId: id,
+      expectedRevision: evidenceRevision(id),
+      expectedCollectionRevision: collectionRevision,
+    });
   };
 
   const move = (index: number, direction: -1 | 1) => {
@@ -231,7 +242,10 @@ export function EvidenceListEditor({
     if (submitting || nextIndex < 0 || nextIndex >= experience.evidence_items.length) return;
     const ids = experience.evidence_items.map((item) => item.id);
     [ids[index], ids[nextIndex]] = [ids[nextIndex], ids[index]];
-    reorderMutation.mutate(ids);
+    reorderMutation.mutate({
+      evidenceIds: ids,
+      expectedCollectionRevision: collectionRevision,
+    });
   };
 
   const fields = (

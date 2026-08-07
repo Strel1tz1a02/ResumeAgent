@@ -122,10 +122,15 @@ describe('experience API client', () => {
       new_evidence: null,
       expected_collection_revision: 1,
     });
-    await createEvidence(7, { action: 'Built API', result: 'Launched', metrics: '20%' });
-    await patchEvidence(7, 3, { metrics: '30%' });
-    await reorderEvidence(7, [3, 4]);
-    await deleteEvidence(7, 3);
+    await createEvidence(7, {
+      action: 'Built API',
+      result: 'Launched',
+      metrics: '20%',
+      expected_collection_revision: 1,
+    });
+    await patchEvidence(7, 3, { metrics: '30%', expected_revision: 2 });
+    await reorderEvidence(7, [3, 4], 3);
+    await deleteEvidence(7, 3, 2, 4);
 
     const calls = fetchMock.mock.calls.map(([url, options]) => ({
       url: String(url),
@@ -156,19 +161,27 @@ describe('experience API client', () => {
       {
         url: '/api/v1/experiences/7/evidence',
         method: 'POST',
-        body: JSON.stringify({ action: 'Built API', result: 'Launched', metrics: '20%' }),
+        body: JSON.stringify({
+          action: 'Built API',
+          result: 'Launched',
+          metrics: '20%',
+          expected_collection_revision: 1,
+        }),
       },
       {
         url: '/api/v1/experiences/7/evidence/3',
         method: 'PATCH',
-        body: JSON.stringify({ metrics: '30%' }),
+        body: JSON.stringify({ metrics: '30%', expected_revision: 2 }),
       },
       {
         url: '/api/v1/experiences/7/evidence-order',
         method: 'PUT',
-        body: JSON.stringify({ evidence_ids: [3, 4] }),
+        body: JSON.stringify({ evidence_ids: [3, 4], expected_collection_revision: 3 }),
       },
-      { url: '/api/v1/experiences/7/evidence/3', method: 'DELETE' },
+      {
+        url: '/api/v1/experiences/7/evidence/3?expected_revision=2&expected_collection_revision=4',
+        method: 'DELETE',
+      },
     ]);
   });
 

@@ -3,8 +3,8 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
-from app.schemas.experiences import (
+from app.experience.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
+from app.experience.schemas.experiences import (
     DeletionImpactResponse,
     ExperienceCompleteness,
     ExperienceCreate,

@@ -10,12 +10,8 @@ from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.tools.buffer import AssembledToolCall
-from app.ai_chat.tools.handler import (
-    ApprovalProposal,
-    ImmediateToolResult,
-    ToolContext,
-    ToolHandler,
-)
+from app.ai_chat.tools.handler import ToolContext, ToolHandler
+from app.ai_chat.tools.results import ApprovalProposal, ImmediateToolResult
 from app.ai_chat.types import JsonObject
 
 
@@ -161,12 +157,36 @@ class ToolLifecycle:
         handler: ToolHandler,
         subject: JsonObject,
         target: JsonObject,
+        client_resolution_id: str,
     ) -> JsonObject:
-        """调用业务审批处理，并返回其不透明工具结果。"""
+        """在同一数据库事务内认领审批、执行业务写入并持久化结果。"""
         async with database_module.db.session() as session:
-            row = await self._repositories.create(session).tool_calls.get(tool_call_id)
+            repository = self._repositories.create(session).tool_calls
+            row = await repository.get(tool_call_id)
             if row is None:
                 raise ToolProtocolError("Tool call does not exist")
+            if row.status == "resolved":
+                if (
+                    row.decision != decision
+                    or row.client_resolution_id != client_resolution_id
+                ):
+                    raise ToolProtocolError("Tool call was resolved with another decision")
+                return dict(row.tool_result or {})
+            claimed = await repository.claim_resolution(
+                tool_call_id,
+                decision=decision,
+                client_resolution_id=client_resolution_id,
+            )
+            if not claimed:
+                await session.refresh(row)
+                if (
+                    row.status == "resolved"
+                    and row.decision == decision
+                    and row.client_resolution_id == client_resolution_id
+                ):
+                    return dict(row.tool_result or {})
+                raise ToolProtocolError("Tool call resolution is already claimed")
+            await session.refresh(row)
             arguments = handler.arguments_schema.model_validate(row.arguments)
             context = ToolContext(
                 conversation_id=row.conversation_id,
@@ -174,10 +194,18 @@ class ToolLifecycle:
                 tool_call_id=row.id,
                 subject=subject,
                 target=target,
+                session=session,
             )
             proposal = dict(row.proposal_payload or {})
             guard = dict(row.guard_payload or {})
-        result = await handler.resolve(
-            context, arguments, proposal, guard, decision
-        )
-        return result.payload
+            result = await handler.resolve(
+                context, arguments, proposal, guard, decision
+            )
+            await repository.resolve(
+                row,
+                decision=decision,
+                tool_result=result.payload,
+                client_resolution_id=row.client_resolution_id,
+            )
+            await session.commit()
+            return result.payload

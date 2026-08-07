@@ -32,8 +32,9 @@ record lifecycle changes.
    editing; it is not copied into successive experience versions in this phase.
 6. The experience library is person-level data, not resume-level data.
 7. `experience_id` and evidence IDs are ordinary auto-incrementing integers.
-8. A single experience may contain multiple evidence records. The experience stores
-   their ordered IDs in `evidence_ids`, a JSON array of integers.
+8. A single experience may contain multiple evidence records. The
+   `experience_evidence_items` relation stores ownership and order; API `evidence_ids`
+   are derived from it.
 9. Action, result, and metrics are not independent arrays. They form one evidence unit
    in `EvidenceItem` so their causal relationship is preserved.
 10. Completeness is stored as a server-computed integer from 0 to 100.
@@ -145,7 +146,6 @@ Table name: `experience_items`
 | `end_date` | String(7) | yes | null | `YYYY-MM`; mutually compatible with `is_current` |
 | `is_current` | Boolean | no | false | When true, `end_date` must be null |
 | `background` | Text | yes | null | Structured context/problem/goal |
-| `evidence_ids` | JSON | no | `[]` | Ordered, unique integer IDs pointing to `evidence_items` |
 | `technologies` | JSON | no | `[]` | Ordered, normalized strings |
 | `tags` | JSON | no | `[]` | Flat labels, not a hierarchy |
 | `notes` | Text | yes | null | Private working notes; not automatically used in resumes |
@@ -169,32 +169,27 @@ Table name: `evidence_items`
 
 | Column | Type | Null | Default | Notes |
 |---|---|---:|---|---|
-| `id` | Integer PK | no | autoincrement | Evidence ID stored in `ExperienceItem.evidence_ids` |
+| `id` | Integer PK | no | autoincrement | Evidence ID referenced by the relation table |
 | `action` | Text | no | none | Concrete action taken by the user |
 | `result` | Text | yes | null | Result caused by the action |
 | `metrics` | Text | yes | null | Quantitative proof for that result |
 | `created_at` | String | no | UTC now | |
 | `updated_at` | String | no | UTC now | |
 
-### 5.3 JSON-reference invariants
+### 5.3 `ExperienceEvidence`
 
-SQLite cannot enforce foreign keys embedded in a JSON array. The service and repository
-layers must therefore enforce these invariants transactionally:
+Table name: `experience_evidence_items`
 
-1. Every ID in `evidence_ids` exists.
-2. An ID appears at most once within an experience.
-3. Ordering in `evidence_ids` is the presentation ordering.
-4. Evidence is owned by exactly one experience in this phase and is not shared.
-5. Evidence creation inserts the evidence and appends its ID within one database
-   transaction.
-6. Evidence deletion removes its ID and deletes the evidence row within one transaction.
-7. Permanent experience deletion removes all evidence rows owned by that experience.
-8. Reads tolerate historical corruption by reporting missing evidence IDs in logs while
-   returning the valid evidence records; writes repair/reject invalid references rather
-   than propagating them.
+| Column | Type | Null | Notes |
+|---|---|---:|---|
+| `experience_id` | Integer FK | no | References `experience_items`; relation cascades on experience deletion |
+| `evidence_id` | Integer FK | no | References `evidence_items`; globally unique to enforce one owner |
+| `position` | Integer | no | Zero-based order, unique within one experience and non-negative |
 
-The API uses `evidence_ids` because the field is plural and JSON-valued. `evidence_id`
-is reserved for routes and operations concerning one evidence item.
+`(experience_id, evidence_id)` is the composite primary key. Database foreign keys,
+unique constraints, and a check constraint enforce existence, single ownership,
+deduplication, and valid positions. Services retain only transaction, reorder-set, and
+experience-version rules. The API still returns derived ordered `evidence_ids`.
 
 ## 6. Completeness
 
@@ -662,7 +657,7 @@ After a successful `import-text` response:
 
 - Experience CRUD and filters.
 - Evidence create/update/delete in a shared transaction.
-- Rollback leaves no orphan evidence or dangling JSON IDs.
+- Foreign keys reject dangling evidence IDs and uniqueness rejects shared ownership.
 - Permanent delete removes owned evidence.
 - Active queries exclude archived records.
 - Expanded detail preserves `evidence_ids` ordering.

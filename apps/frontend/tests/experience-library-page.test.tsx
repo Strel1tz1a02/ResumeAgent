@@ -119,7 +119,7 @@ vi.mock('@/lib/i18n', () => ({
 import { ExperienceLibraryPage } from '@/components/experiences/experience-library-page';
 import { createExperienceQueryClient } from '@/lib/queries/experiences/provider';
 
-const listItem: ExperienceRead = {
+const listItem: ExperienceRead & Pick<ExperienceDetail, 'field_states'> = {
   experience_id: 1,
   kind: 'project',
   title: 'Searchable project',
@@ -139,6 +139,7 @@ const listItem: ExperienceRead = {
   archived_at: null,
   created_at: '2025-01-01T00:00:00Z',
   updated_at: '2025-01-02T00:00:00Z',
+  field_states: [],
 };
 
 const imported: ExperienceDetail = {
@@ -634,6 +635,7 @@ describe('ExperienceLibraryPage', () => {
         action: 'Automated imports',
         result: 'Faster review',
         metrics: '40%',
+        expected_collection_revision: 0,
       })
     );
     expect(screen.getByLabelText('Action 4')).toHaveValue('Automated imports');

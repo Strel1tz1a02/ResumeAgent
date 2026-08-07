@@ -13,7 +13,7 @@
 - 经历字段对话 Graph；
 - 经历上下文和 Prompt；
 - 唯一的 `content_change` Tool Handler；
-- 字段状态与字段级 revision；
+- 字段状态，以及数据单元、Evidence 集合两类 revision；
 - 经历专用聊天 API 和前端接入；
 - 将现有无状态问答流程统一迁移到新对话流程。
 
@@ -24,7 +24,7 @@
 ### 2.1 本阶段包含
 
 - 每个具体字段组（可以是单字段）独立创建会话；
-- 会话多轮聊天、流式文本、审批、自动续跑和失败补传；
+- 会话多轮聊天、流式文本、审批收尾和 Tool Result 延迟补传；
 - 根据字段状态提供醒目程度不同的 AI 对话入口；
 - 手动局部保存、字段组保存和全局保存；
 - AI 提案前和审批时的字段级并发校验；
@@ -86,7 +86,7 @@ incomplete  # 未完善
 
 ### 3.4 输入与发送
 
-聊天输入框可以在生成、审批和续跑阶段继续输入草稿，但只有对话状态为 `ready` 时才允许发送或发起新一轮运行。
+聊天输入框可以在生成和审批阶段继续输入草稿，但只有对话状态为 `ready` 时才允许发送或发起新一轮运行。
 
 前端对话状态为：
 
@@ -124,7 +124,7 @@ ended
 
 所有 EvidenceItem 共享同一个 `{key: "evidence", ref_id: null}` 会话。用户从任意 EvidenceItem 的 action、result、metrics 或新增区域启动 AI 时，都进入这个集合会话；在同一会话中可以讨论多个 EvidenceItem。
 
-AI 修改已有 EvidenceItem 时，Tool `target.evidence_id` 必须显式携带目标 ID，`suggested_content` 必须是该 Item 完整的 `action/result/metrics` 对象。一次 Tool Call 只整体覆盖一个 EvidenceItem，其他 Item 不得连带变化。创建时 `evidence_id=null`，审批通过后追加到 `evidence_ids` 末尾。
+AI 修改已有 EvidenceItem 时，Tool `target.evidence_id` 必须显式携带目标 ID，`suggested_content` 必须是该 Item 完整的 `action/result/metrics` 对象。一次 Tool Call 只整体覆盖一个 EvidenceItem，其他 Item 不得连带变化。创建时 `evidence_id=null`，审批通过后在关系表末尾追加归属；API 返回派生的 `evidence_ids`。
 
 ### 4.2 文本导入与原文销毁
 
@@ -156,7 +156,7 @@ AI 修改已有 EvidenceItem 时，Tool `target.evidence_id` 必须显式携带�
 
 ## 5. 字段状态与 revision 数据模型
 
-新增表 `experience_field_states`，并使用正式、一次性的 schema/data migration 建表和回填，不在运行时临时补数据：
+字段状态和并发版本分表保存，并使用正式、一次性的 schema/data migration 建表和回填，不在运行时临时补数据：
 
 ```text
 experience_field_states
@@ -165,6 +165,17 @@ experience_field_states
 ├── target_key: string
 ├── ref_id: int                 # 经历字段固定为 0；Evidence 使用真实 ID
 ├── status: complete|incomplete
+├── created_at
+└── updated_at
+```
+
+```text
+experience_revisions
+├── id: int PK
+├── experience_id: int FK -> experience_items.experience_id ON DELETE CASCADE
+├── scope: unit|collection
+├── unit_key: string
+├── ref_id: int                 # Evidence 数据单元使用真实 ID，其他目标为 0
 ├── revision: int               # 从 0 开始，单调递增
 ├── created_at
 └── updated_at
@@ -174,8 +185,8 @@ experience_field_states
 
 - `(experience_id, target_key, ref_id)` 唯一；
 - `ref_id=0` 只作为经历字段的数据库哨兵值，对外仍返回 `null`；
-- revision 不允许减少；
-- 状态和 revision 都由领域服务维护；
+- `(experience_id, scope, unit_key, ref_id)` 唯一，revision 不允许减少；
+- 状态与 revision 由领域服务维护，但分别承担展示与并发职责；
 - 创建经历时初始化经历字段状态；
 - 创建 EvidenceItem 时初始化其三个字段状态；
 - 新增、删除或重排 EvidenceItem 时推进 `evidence_new` 对应的 collection revision；
@@ -186,8 +197,8 @@ migration 必须在应用接受请求前完成：
 
 1. 创建 `experience_field_states` 及约束；
 2. 扫描现有 ExperienceItem 和 EvidenceItem；
-3. 根据当前结构化值计算并写入字段状态，初始 revision 为 0；
-4. 为每个经历写入 `evidence_new` collection 状态和 revision；
+3. 根据当前结构化值计算并写入字段状态；
+4. 为每个经历回填普通保存单元、已有 Evidence 数据单元和 Evidence 集合 revision；
 5. 从 Experience ORM、Schema 和 API 中删除 `raw_input`；
 6. SQLite 需要重建 `experience_items` 表时，不复制旧 `raw_input` 列内容；
 7. 在 migration ledger 中记录版本，保证迁移只执行一次且可以安全重试未提交事务。
@@ -196,18 +207,22 @@ migration 必须在应用接受请求前完成：
 
 ### 5.1 revision 规则
 
-revision 属于保存单元的并发边界，但 API 按具体字段返回。一个保存单元成功改变值时，其所有成员字段 revision 一起增加一次：
+revision 只有两种 scope：
+
+- `unit`：所有可独立保存的数据单元。普通字段通过 `unit_key + ref_id=0` 标识；一个完整 EvidenceItem 通过 `unit_key=evidence + ref_id=evidence_id` 标识，action/result/metrics 共用；
+- `collection`：Evidence 的新增、删除和顺序。
+
+API 仍按具体字段返回它所属单元的 revision，因此同一保存单元的成员看到相同值：
 
 ```text
 保存 dates
-→ start_date.revision + 1
-→ end_date.revision + 1
-→ is_current.revision + 1
+→ dates 保存单元 revision + 1
+→ 三个字段响应中的 revision 同步变为新值
 ```
 
-值规范化后没有变化时不增加 revision。这样针对 `end_date` 创建的 AI 提案，也会在 `is_current` 被保存后自动失效。
+所有 revision 更新都执行数据库条件 UPDATE：只有 `revision = expected_revision` 的行才能原子推进。值规范化后没有变化时不增加 revision。全局保存只校验未变化的集合版本，不为未变化的集合推进版本。这样针对 `end_date` 创建的 AI 提案，也会在 `is_current` 被保存后自动失效。
 
-经历级 `updated_at` 继续用于列表排序和旧接口兼容，但不再作为 AI 覆盖的并发 guard。
+经历和 Evidence 的 `updated_at` 只记录审计时间、支持排序，不参与并发判断，也不要求单调递增。
 
 ### 5.2 状态计算
 
@@ -242,7 +257,7 @@ append_evidence(...) -> FieldMutationResult
 - 列表规范化；
 - completeness 重算；
 - ready 经历在完整度下降时回退为 draft；
-- `updated_at` 单调增长；
+- `updated_at` 审计时间更新；
 - 事务提交和回滚。
 
 `ExperienceAdapter` 和 `ContentChangeHandler` 不得直接写 `ExperienceRepository` 或 `EvidenceRepository`，也不得复制字段白名单、所有权、内容格式、no-change、revision 或保存规则。Handler 只解析参数并根据 target 形态路由到上述 Service 方法。
@@ -269,7 +284,7 @@ class ExperienceAdapter(BaseAdapter):
     async def parse_input(
         self,
         value: AdapterInput,
-    ) -> ExperienceInputState:
+    ) -> ExperienceState:
         ...
 
     def build_graph(self, runtime: AiChatRuntime) -> StateGraph:
@@ -314,40 +329,21 @@ register_adapter(ExperienceAdapter(...))
 
 ### 7.3 parse_input
 
-每次 opening、用户消息和失败补传都重新读取已保存业务数据，先生成经历专属的强类型输入对象。通用层只要求它继承 `AdapterState`，并在进入 Graph 前统一执行 `model_dump(mode="json")`：
+每次 opening、用户消息和失败补传都重新读取已保存业务数据。Adapter 将通用 `AdapterInput` 直接转换成经历 Graph 使用的完整 `ExperienceState`：
 
 ```python
-class ExperienceInputState(AdapterState):
-    experience: JsonObject
-    target_value: JsonValue
-    normalized_target_value: JsonValue
-    target_revision: int
-    target_status: Literal["complete", "incomplete"]
-    evidence_revisions: dict[str, int]
-    system_prompt: str
+class ExperienceState(BaseState):
+    revision_snapshot: JsonObject
     model_messages: list[JsonObject]
-    tools_enabled: bool
-```
-
-LangGraph checkpoint 内部仍使用可序列化的 TypedDict State：
-
-```python
-class ExperienceGraphState(AiChatBaseState):
-    experience: JsonObject
-    evidence_items: list[JsonObject]
-    target_snapshot: JsonObject
-    target_revision: int
-    target_status: Literal["complete", "incomplete"]
-    evidence_revisions: dict[str, int]
-    system_prompt: str
-    model_messages: list[JsonObject]
-    assembled_tool_call: JsonObject | None
-    tool_outcome: JsonObject | None
+    tool_call: JsonObject | None
+    proposal_id: int | None
 ```
 
 State 中不得保存 ORM、Pydantic 对象、数据库 Session、异常对象、流连接或回调函数。
 
-`ExperienceInputState` 只存在于 Adapter 与 Graph Runner 的输入边界；Graph Runner 序列化后才把普通 JSON 数据交给 LangGraph，因此 Pydantic 对象不会进入 checkpoint。
+Graph Runner 不再合并通用输入与业务扩展，也不理解经历字段；它只检查 Adapter 返回的完整 State 可以 JSON 序列化，然后直接交给 LangGraph。
+
+`tools_enabled` 只由通用 `BaseState` 保存。经历 Graph 的 `llm` 节点通过 `tools_enabled and run_kind != "opening"` 明确计算本轮是否向模型提供 Tool，不依赖 Adapter 输出覆盖通用字段。
 
 AI 只能感知已保存的数据。未保存草稿不进入 `parse_input()`，聊天框持续提示“未保存的内容 AI 无法感知”。
 
@@ -372,12 +368,26 @@ async def AiChatRuntime.receive_tool_call(
     ...
 ```
 
-经历 Graph 调用时传入：
+经历 Graph 只传入一个生成起点 revision 快照。普通字段快照为：
 
 ```json
 {
-  "target_revision_at_generation_start": 3,
-  "normalized_target_value_at_generation_start": "..."
+  "revision_snapshot": {
+    "scope": "field",
+    "revision": 3
+  }
+}
+```
+
+Evidence 集合会话允许模型选择新增或修改任意一个 Item，因此快照同时包含集合 revision 和当时各 Item revision。Handler 在解析完整 Tool 参数后只选择本次目标对应的一个 revision：
+
+```json
+{
+  "revision_snapshot": {
+    "scope": "evidence",
+    "collection_revision": 2,
+    "item_revisions": {"11": 4, "12": 1}
+  }
 }
 ```
 
@@ -422,47 +432,30 @@ opening 行为：
 ## 9. LangGraph 设计
 
 Graph 由 `ExperienceAdapter` 定义，通用聊天模块只负责读取、编译、执行和恢复。
+通用层仍支持其他业务 Graph 在审批恢复后继续调用模型；本 Graph 明确选择只收尾并结束。
 
 ```mermaid
 flowchart TD
-    A["prepare_turn"] --> B["agent_stream"]
-    B --> C{"模型输出"}
-
-    C -->|"普通文本"| D["persist_answer"]
-    D --> Z["END"]
-
-    C -->|"业务 Tool Call"| E["validate_tool_call"]
-    E --> F{"是否合法"}
-
-    F -->|"无效"| G["record_invalid_tool"]
-    G --> N["continue_without_tools"]
-
-    F -->|"建议值等于当前值"| H["record_no_change"]
-    H --> N
-
-    F -->|"有效新建议"| I["persist_proposal"]
-    I --> J["await_approval interrupt"]
-
-    J -->|"approve"| K["apply_proposal_transaction"]
-    J -->|"reject"| L["reject_proposal_transaction"]
-
-    K --> N
-    L --> N
-    N --> O["persist_continuation"]
-    O --> Z
+    A["START"] --> B["LLM"]
+    B --> C{"存在 Tool Call？"}
+    C -->|"否"| Z["END"]
+    C -->|"是"| D["tool_executor"]
+    D --> E{"需要用户审批？"}
+    E -->|"否"| Z
+    E -->|"是"| F["approver"]
+    F -->|"interrupt"| G["等待用户审批"]
+    G -->|"approve / reject"| F
+    F --> Z
 ```
 
 实现映射说明：
 
-- `persist_answer` 和 `persist_continuation` 的消息持久化由通用 `AiChatService` 完成，Graph 节点只产生流式事件和 State 更新；
-- `validate_tool_call + persist_proposal` 通过 `runtime.receive_tool_call()` 完成；
-- `validate_tool_call` 只接收 `content_change`；具体字段、Evidence 修改或 Evidence 追加由 Handler 路由到 Service，Graph 不识别这些业务分支；
-- `await_approval` 必须是独立节点，只在该节点调用 `interrupt()`；
-- 不得把业务写入放在 `interrupt()` 之前的同一节点中，避免节点重放造成重复副作用；
-- 审批时对应业务 Handler 的 `resolve()` 已经由通用 Service 调用，恢复后的 Graph 根据 `approval.tool_result` 生成业务事件并续跑；
-- Graph 只能定义一个 `continue_without_tools` 节点；无效 Tool、无实际变化、审批通过和审批拒绝全部汇合到该节点；
-- `continue_without_tools` 必须将 `tools_enabled=False` 传给 `runtime.stream_model()`；
-- 无效 Tool 和 no-change 使用 opaque `ImmediateToolResult`，随后进行一次无 Tool 解释，不进入审批。
+- `llm` 只负责模型流式调用、`assistant.delta` 事件和完整 Tool Call 组装；普通文本由通用 `AiChatService` 持久化；
+- `tool_executor` 通过 `runtime.receive_tool_call()` 把 `content_change` 交给通用 Tool Lifecycle；具体字段、Evidence 修改或 Evidence 追加由 Handler 路由到 Service，Graph 不识别这些业务分支；
+- Tool Lifecycle 在返回审批提案前已经完成持久化，`tool_executor` 只发送标准 `proposal.requested` 并记录 `proposal_id`；
+- `approver` 是唯一调用 `interrupt()` 的节点。审批时对应业务 Handler 的 `resolve()` 已经由通用 Service 调用；恢复后该节点根据 Tool Result 发送前端业务事件并直接结束；
+- 不得在 `approver` 调用 `interrupt()` 之前执行业务写入，避免节点重放造成重复副作用；
+- 无效 Tool 和 no-change 使用 opaque `ImmediateToolResult`，不进入审批，也不触发额外模型调用。
 - Graph 不包含 `load_context` 节点；业务上下文由 Adapter 在执行前构造，字段状态完整性由启动前 migration 保证，Graph 不编排任何 `ensure_field_states()` 节点。
 
 ## 10. 经历业务 Tool
@@ -563,7 +556,7 @@ proposal 必须先由通用 Tool 生命周期完整落库，再通过一条原�
 - 不写任何经历或 Evidence 业务数据；
 - 返回 `{"outcome":"rejected"}`；
 - 本次建议永久视为已拒绝；
-- Graph 自动续跑一次，且禁止 Tool。
+- Graph 恢复 checkpoint、发送拒绝事件后结束，不再次调用模型。
 
 `approve`：
 
@@ -614,6 +607,8 @@ AI 生成期间目标字段仍允许手动编辑和保存。Graph 在开始一�
 
 即使保存请求与 proposal 请求发生极短竞态，也由数据库事务顺序决定结果。若 proposal 先落库而保存随后完成，审批时的第二次 guard 校验仍会阻止旧建议覆盖新值。
 
+审批认领也必须使用数据库 CAS：只有 `awaiting_approval` 且尚无 `client_resolution_id` 的 Tool Call 能写入决定。同一事务内依次完成认领、业务 revision CAS、字段覆盖和 Tool Result 持久化；任一步失败都会整体回滚，不能依赖进程内锁。
+
 ### 11.2 未保存草稿
 
 - AI 只读取数据库值，无法感知未保存草稿；
@@ -632,19 +627,21 @@ AI 生成期间目标字段仍允许手动编辑和保存。Graph 在开始一�
 - 其他独立保存单元仍允许编辑和局部保存；
 - 输入框可以继续输入草稿，但不能发送；
 - 等待用户审批时关闭上一条 SSE 连接；
-- 用户做出决定后新建一次流连接接收自动续跑。
+- 用户做出决定后新建一次流连接接收审批收尾事件。
 
-## 12. 自动续跑与失败补传
+## 12. 审批收尾与 Tool Result 延迟投递
 
-审批完成后由通用 `AiChatService` 立即恢复相同 checkpoint：
+审批完成后由通用 `AiChatService` 恢复相同 checkpoint：
 
-1. Handler 先完成 approve/reject 并保存 Tool Result；
-2. 创建 `post_tool_continuation` run；
+1. Handler 在同一数据库事务中完成 approve/reject、业务写入和 Tool Result；
+2. 原 suspended run 通过 CAS 恢复为 running；
 3. `Command(resume=...)` 恢复 Graph；
-4. 将 `tools_enabled` 强制设为 false；
-5. Graph 先发出经历业务结果事件，再进行一次普通文本续跑。
+4. Graph 发出经历业务结果事件并直接结束，不调用模型；
+5. Tool Result 保持 `pending`，等待下一条用户消息随模型上下文投递。
 
-如果立即续跑失败：
+Run 只允许通过带来源状态条件的数据库 CAS 转换。`running -> suspended|completed|failed|cancelled`、`suspended -> running|completed|failed|cancelled` 的竞争只能有一个胜者，断流或关闭会话不能再被迟到的结果覆盖。若 Tool Result 已提交而 Graph 尚未完成收尾，使用相同审批幂等键重试时应从 suspended/cancelled 原 Run 恢复，并且不得再次执行字段覆盖。
+
+如果 checkpoint 收尾失败：
 
 - 不回滚已完成的字段覆盖或拒绝；
 - 前端不显示额外失败提示；
@@ -725,7 +722,7 @@ conversation.ended
 - `EvidenceUpdate` 增加该 Evidence 保存单元的 `expected_revision`；
 - 局部保存只提交一个完整保存单元及其 revision；
 - 全局保存提交所有脏保存单元及各自 revision；
-- 后端先校验全部涉及的 revision，再在一个事务中写入；
+- 后端使用数据库 CAS 认领全部涉及的 revision，再在同一事务中写入；
 - 冲突统一返回 409 和最新 `ExperienceDetail`；
 - `ExperienceDetail` 增加 `field_states`。
 
@@ -740,7 +737,7 @@ conversation.ended
 }
 ```
 
-新页面切换完成后删除 `expected_updated_at`；手动保存和 AI 覆盖统一只使用字段 revision，避免存在两套并发真相。
+删除 `expected_updated_at`；手动保存和 AI 覆盖统一只使用 `unit|collection` revision，避免存在多套并发真相。
 
 ## 14. 前端状态与 TanStack Query
 
@@ -768,7 +765,7 @@ experience:{experience_id}:unit:{unit_key}
 - 只合并服务端返回的目标字段、字段状态、revision、completeness 和 lifecycle；
 - 不用整个响应重置当前表单；
 - 保留其他字段的未保存草稿；
-- 旧 `updated_at` 响应不得覆盖 Query cache 中更新的数据；
+- Query cache 写入以请求生命周期和服务端返回的 revision 为准，不用 `updated_at` 判断并发新旧；
 - 切换经历前取消该经历的聊天流并结束会话。
 
 ### 14.4 颜色与文案
@@ -788,32 +785,46 @@ experience:{experience_id}:unit:{unit_key}
 
 ```text
 apps/backend/app/
-├── experience_ai_chat/
+├── experience/
 │   ├── __init__.py
-│   ├── adapter.py                         # ExperienceAdapter
-│   ├── router.py                          # 经历专用聊天 API/SSE 转换
-│   ├── schemas.py                         # 经历聊天请求、响应和业务事件
-│   ├── context.py                         # 已保存经历上下文构造
-│   ├── prompts.py                         # 中英文经历字段对话 Prompt
+│   ├── adapters/
+│   │   ├── __init__.py
+│   │   └── adapter.py                     # ExperienceAdapter
+│   ├── routers/
+│   │   ├── __init__.py
+│   │   ├── ai_chat.py                     # 经历专用聊天 API/SSE 转换
+│   │   └── experiences.py                 # 经历库 CRUD API
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── ai_chat.py                     # 经历聊天请求、响应和业务事件
+│   │   ├── evidence_items.py
+│   │   └── experiences.py
 │   ├── graph/
 │   │   ├── __init__.py
-│   │   ├── state.py                       # ExperienceGraphState
+│   │   ├── state.py                       # ExperienceState
 │   │   ├── builder.py                     # StateGraph 定义
-│   │   └── nodes/
-│   │       ├── __init__.py
-│   │       ├── prepare_turn.py
-│   │       ├── agent_stream.py
-│   │       ├── validate_tool_call.py
-│   │       ├── approval.py
-│   │       └── continuation.py
-│   └── tools/
-│       ├── __init__.py
-│       ├── common.py
-│       └── content_change.py
+│   │   ├── context.py                     # 已保存经历上下文构造
+│   │   └── prompts.py                     # 中英文经历字段对话 Prompt
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── common.py
+│   │   └── content_change.py
+│   ├── services/
+│   │   ├── experience_service.py
+│   │   ├── evidence_service.py
+│   │   ├── experience_field_service.py
+│   │   ├── experience_global_save_service.py
+│   │   ├── experience_import_service.py
+│   │   ├── experience_ai_mutation_service.py
+│   │   ├── experience_completeness_service.py
+│   │   └── experience_fields.py
+│   └── repositories/
+│       ├── experience_repository.py
+│       ├── evidence_repository.py
+│       ├── experience_field_state_repository.py
+│       └── experience_revision_repository.py
 │
 ├── models.py                              # ExperienceFieldState ORM
-├── repositories/
-│   └── experience_field_state_repository.py
 ├── scripts/
 │   └── migrate_experience_field_states.py # 一次性 schema/data migration
 └── services/
@@ -892,11 +903,11 @@ experience-question-panel.tsx
 - proposal 先入库再发原子事件；
 - interrupt 后 run suspended 且流结束；
 - approve/reject 恢复同一 checkpoint；
-- 审批续跑禁止 Tool；
+- 审批收尾不调用模型；
 - 生成期间保存导致建议不进入审批；
 - 审批期间外部保存导致覆盖失效；
 - 重复消息和重复审批无重复副作用；
-- 立即续跑失败后下一条消息补传 pending Tool Result；
+- 审批结果在下一条消息中补传 pending Tool Result；
 - 补传允许新 Tool 且不额外调用模型；
 - 归档、Evidence 删除和永久删除联动；
 - AI 创建 Evidence 后 ID、顺序、状态和 collection revision 原子更新；
@@ -917,7 +928,7 @@ experience-question-panel.tsx
 - approve 覆盖目标草稿但保留其他草稿；
 - applied/invalidated 精确更新 Query cache；
 - 等待审批时上一条 SSE 已关闭；
-- 自动续跑失败不显示额外错误；
+- checkpoint 收尾失败不显示额外错误；
 - 切换字段或页面结束会话，再返回创建新会话；
 - 所有文案覆盖中文和英文。
 
@@ -951,6 +962,6 @@ experience-question-panel.tsx
 - 生成期间保存和审批期间外部写入都不能造成旧值覆盖新值；
 - 手动保存与 AI 覆盖共用同一领域写入规则；
 - 局部、字段组和全局保存行为符合本 SPEC；
-- 自动续跑和静默补传符合通用聊天约定；
+- 审批收尾和静默补传符合通用聊天约定；
 - 历史只入库，离开后不能恢复；
 - 后端完整测试、前端测试、编译和静态检查通过。
