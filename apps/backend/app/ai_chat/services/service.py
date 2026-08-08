@@ -440,8 +440,8 @@ class AiChatService:
                 )
                 if not transitioned:
                     raise ProposalStateError(str(proposal_id))
+                claimed_running = True
                 await session.commit()
-            claimed_running = True
 
             resumed_events: list[AiChatEvent] = []
             async for event in self._runner.resume(

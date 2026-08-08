@@ -11,6 +11,7 @@ from typing import NotRequired, get_origin, get_type_hints
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.checkpoint import CheckpointLifecycle
@@ -1967,6 +1968,56 @@ async def test_cancelled_resolution_converges_claimed_run(
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "approved"
+        assert run is not None
+        assert run.status == "cancelled"
+    finally:
+        await harness.checkpoints.close()
+
+
+async def test_cancel_after_running_claim_commit_converges_run(
+    isolated_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """CAS 已提交但 commit 尚未返回时取消，也必须收敛 Run。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "cancelled-claim-commit.db",
+        handler=handler,
+    )
+    try:
+        proposal_id = await _request_proposal(harness, "cancelled-claim-commit")
+        original_commit = AsyncSession.commit
+        cancelled_after_commit = False
+
+        async def commit_then_cancel(session: AsyncSession) -> None:
+            nonlocal cancelled_after_commit
+            await original_commit(session)
+            if not cancelled_after_commit:
+                cancelled_after_commit = True
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(AsyncSession, "commit", commit_then_cancel)
+
+        with pytest.raises(asyncio.CancelledError):
+            _ = [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        assert cancelled_after_commit
+        assert handler.execute_count == 0
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "awaiting_approval"
         assert run is not None
         assert run.status == "cancelled"
     finally:
