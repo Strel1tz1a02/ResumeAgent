@@ -133,6 +133,43 @@ async def test_materialize_converts_provider_identity_conflict_to_protocol_error
             )
 
 
+async def test_materialize_rejects_crossed_index_and_provider_conflicts(
+    isolated_db,
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        await repository.materialize(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-a",
+            tool_name="demo",
+            arguments={"value": "same"},
+        )
+        await repository.materialize(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=1,
+            provider_tool_call_id="provider-b",
+            tool_name="demo",
+            arguments={"value": "same"},
+        )
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
+            await repository.materialize(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=1,
+                provider_tool_call_id="provider-a",
+                tool_name="demo",
+                arguments={"value": "same"},
+            )
+
+
 async def test_repository_transition_persists_approval_before_execution(
     isolated_db,
 ) -> None:

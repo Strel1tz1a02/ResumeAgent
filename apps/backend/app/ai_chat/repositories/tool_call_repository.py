@@ -65,8 +65,14 @@ class ToolCallRepository:
         )
         await self._session.execute(statement)
         row = await self.get_by_run_index(run_id, tool_call_index)
+        provider_row = (
+            await self.get_by_run_provider_id(run_id, provider_tool_call_id)
+            if provider_tool_call_id is not None
+            else None
+        )
         if (
             row is None
+            or (provider_row is not None and provider_row.id != row.id)
             or row.conversation_id != conversation_id
             or row.tool_name != tool_name
             or row.arguments != arguments
@@ -98,6 +104,18 @@ class ToolCallRepository:
             select(AiChatToolCall).where(
                 AiChatToolCall.run_id == run_id,
                 AiChatToolCall.tool_call_index == tool_call_index,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_run_provider_id(
+        self, run_id: int, provider_tool_call_id: str
+    ) -> AiChatToolCall | None:
+        """按 provider 的调用身份查找同一轮记录。"""
+        result = await self._session.execute(
+            select(AiChatToolCall).where(
+                AiChatToolCall.run_id == run_id,
+                AiChatToolCall.provider_tool_call_id == provider_tool_call_id,
             )
         )
         return result.scalar_one_or_none()
