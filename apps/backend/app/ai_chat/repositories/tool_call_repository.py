@@ -1,10 +1,12 @@
 """使用调用方事务的工具调用持久化。"""
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.models import AiChatToolCall, utcnow_iso
 
 
@@ -36,6 +38,40 @@ class ToolCallRepository:
         )
         self._session.add(row)
         await self._session.flush()
+        return row
+
+    async def materialize(
+        self,
+        *,
+        conversation_id: int,
+        run_id: int,
+        tool_call_index: int,
+        provider_tool_call_id: str | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> AiChatToolCall:
+        """按 run/index 固化调用，并拒绝同一索引承载不同操作。"""
+        statement = (
+            sqlite_insert(AiChatToolCall)
+            .values(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=tool_call_index,
+                provider_tool_call_id=provider_tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            .on_conflict_do_nothing()
+        )
+        await self._session.execute(statement)
+        row = await self.get_by_run_index(run_id, tool_call_index)
+        if (
+            row is None
+            or row.conversation_id != conversation_id
+            or row.tool_name != tool_name
+            or row.arguments != arguments
+        ):
+            raise ToolProtocolError("Tool Call index was reused inconsistently")
         return row
 
     async def get(self, tool_call_id: int) -> AiChatToolCall | None:
@@ -80,6 +116,83 @@ class ToolCallRepository:
         row.updated_at = utcnow_iso()
         await self._session.flush()
 
+    async def save_validation(
+        self,
+        row: AiChatToolCall,
+        *,
+        proposal_payload: dict[str, Any],
+        guard_payload: dict[str, Any],
+    ) -> bool:
+        """保存 Handler 生成的可信执行依据，但不决定是否审批。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == row.id,
+                AiChatToolCall.status == "received",
+            )
+            .values(
+                proposal_payload=proposal_payload,
+                guard_payload=guard_payload,
+                status="validated",
+                updated_at=utcnow_iso(),
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def claim_approval_request(self, tool_call_id: int) -> bool:
+        """原子地将已校验调用移入等待审批状态。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "validated",
+            )
+            .values(status="awaiting_approval", updated_at=utcnow_iso())
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def approve(self, tool_call_id: int, client_resolution_id: str) -> bool:
+        """原子地持久化批准决定，执行器只能领取已批准调用。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "awaiting_approval",
+                AiChatToolCall.client_resolution_id.is_(None),
+            )
+            .values(
+                status="approved",
+                decision="approve",
+                client_resolution_id=client_resolution_id,
+                updated_at=utcnow_iso(),
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def claim_rejection(
+        self, tool_call_id: int, client_resolution_id: str
+    ) -> bool:
+        """原子地持久化拒绝决定，并领取结果写入权。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "awaiting_approval",
+                AiChatToolCall.client_resolution_id.is_(None),
+            )
+            .values(
+                status="executing",
+                decision="reject",
+                client_resolution_id=client_resolution_id,
+                updated_at=utcnow_iso(),
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def resolve(
         self,
         row: AiChatToolCall,
@@ -114,6 +227,7 @@ class ToolCallRepository:
                 AiChatToolCall.client_resolution_id.is_(None),
             )
             .values(
+                status="executing",
                 decision=decision,
                 client_resolution_id=client_resolution_id,
                 updated_at=utcnow_iso(),
@@ -122,13 +236,18 @@ class ToolCallRepository:
         await self._session.flush()
         return result.rowcount == 1
 
-    async def claim_execution(self, tool_call_id: int) -> bool:
+    async def claim_execution(
+        self,
+        tool_call_id: int,
+        *,
+        from_status: Literal["validated", "approved"],
+    ) -> bool:
         """在执行低风险 Tool 前原子认领，事务回滚后仍可重试。"""
         result = await self._session.execute(
             update(AiChatToolCall)
             .where(
                 AiChatToolCall.id == tool_call_id,
-                AiChatToolCall.status == "received",
+                AiChatToolCall.status == from_status,
             )
             .values(
                 status="executing",

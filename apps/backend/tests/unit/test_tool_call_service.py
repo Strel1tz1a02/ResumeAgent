@@ -1,5 +1,6 @@
 """Tests for durable AI Chat Tool Call persistence."""
 
+import asyncio
 import sqlite3
 
 import pytest
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 
+from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.models import AiChatToolCall
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.tools.buffer import AssembledToolCall
@@ -35,6 +37,225 @@ class _NeverInvokeHandler:
 
     async def invoke(self, context, arguments):  # type: ignore[no-untyped-def]
         raise AssertionError("validated replay must not regenerate trusted payloads")
+
+
+async def _create_conversation_run(isolated_db) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+    async with isolated_db.session() as session:
+        repositories = RepositoryFactory().create(session)
+        conversation = await repositories.conversations.create(
+            adapter="test",
+            subject={"type": "test", "id": "1"},
+            scope={"field": "test"},
+            language="zh",
+        )
+        run = await repositories.runs.create(
+            conversation_id=conversation.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        await session.commit()
+        return conversation.id, run.id
+
+
+async def _create_received_tool_call(isolated_db) -> int:  # type: ignore[no-untyped-def]
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.create(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-a",
+            tool_name="demo",
+            arguments={"value": "same"},
+        )
+        await session.commit()
+        return row.id
+
+
+async def test_materialize_is_atomic_under_concurrent_replay(isolated_db) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+
+    async def worker(provider_id: str) -> int:
+        async with isolated_db.session() as session:
+            row = await RepositoryFactory().create(session).tool_calls.materialize(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=0,
+                provider_tool_call_id=provider_id,
+                tool_name="demo",
+                arguments={"value": "same"},
+            )
+            await session.commit()
+            return row.id
+
+    first, second = await asyncio.gather(worker("provider-a"), worker("provider-b"))
+
+    assert first == second
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
+            await repository.materialize(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=0,
+                provider_tool_call_id="provider-c",
+                tool_name="demo",
+                arguments={"value": "different"},
+            )
+
+
+async def test_materialize_converts_provider_identity_conflict_to_protocol_error(
+    isolated_db,
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        await repository.materialize(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-a",
+            tool_name="demo",
+            arguments={"value": "same"},
+        )
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
+            await repository.materialize(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=1,
+                provider_tool_call_id="provider-a",
+                tool_name="demo",
+                arguments={"value": "same"},
+            )
+
+
+async def test_repository_transition_persists_approval_before_execution(
+    isolated_db,
+) -> None:
+    tool_call_id = await _create_received_tool_call(isolated_db)
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        row = await repository.get(tool_call_id)
+        assert row is not None
+        assert await repository.save_validation(
+            row,
+            proposal_payload={"proposal": "trusted"},
+            guard_payload={"guard": "trusted"},
+        ) is True
+        assert row.status == "validated"
+        assert await repository.save_validation(
+            row,
+            proposal_payload={"proposal": "replacement"},
+            guard_payload={"guard": "replacement"},
+        ) is False
+        assert row.proposal_payload == {"proposal": "trusted"}
+        assert await repository.claim_approval_request(tool_call_id) is True
+        assert await repository.claim_approval_request(tool_call_id) is False
+        assert await repository.approve(tool_call_id, "approve-1") is True
+        assert await repository.approve(tool_call_id, "approve-1") is False
+        assert await repository.claim_execution(
+            tool_call_id, from_status="approved"
+        ) is True
+        assert await repository.claim_execution(
+            tool_call_id, from_status="approved"
+        ) is False
+        await repository.resolve(
+            row,
+            decision="approve",
+            tool_result={"outcome": "done"},
+            client_resolution_id="approve-1",
+        )
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
+    assert row is not None
+    assert row.status == "resolved"
+    assert row.decision == "approve"
+    assert row.client_resolution_id == "approve-1"
+    assert row.tool_result == {"outcome": "done"}
+    assert row.delivery_status == "pending"
+
+
+async def test_repository_transition_rejects_or_executes_validated_call_once(
+    isolated_db,
+) -> None:
+    rejected_id = await _create_received_tool_call(isolated_db)
+    direct_id = await _create_received_tool_call(isolated_db)
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        for tool_call_id in (rejected_id, direct_id):
+            row = await repository.get(tool_call_id)
+            assert row is not None
+            await repository.save_validation(
+                row,
+                proposal_payload={"proposal": "trusted"},
+                guard_payload={"guard": "trusted"},
+            )
+        assert await repository.claim_approval_request(rejected_id) is True
+        assert await repository.claim_rejection(rejected_id, "reject-1") is True
+        assert await repository.claim_rejection(rejected_id, "reject-1") is False
+        assert await repository.claim_execution(
+            direct_id, from_status="validated"
+        ) is True
+        assert await repository.claim_execution(
+            direct_id, from_status="validated"
+        ) is False
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        rejected = await repository.get(rejected_id)
+        direct = await repository.get(direct_id)
+    assert rejected is not None
+    assert rejected.status == "executing"
+    assert rejected.decision == "reject"
+    assert rejected.client_resolution_id == "reject-1"
+    assert direct is not None
+    assert direct.status == "executing"
+
+
+async def test_legacy_claim_resolution_keeps_result_write_in_same_transaction(
+    isolated_db,
+) -> None:
+    tool_call_id = await _create_received_tool_call(isolated_db)
+
+    async with isolated_db.session() as session:
+        repository = RepositoryFactory().create(session).tool_calls
+        row = await repository.get(tool_call_id)
+        assert row is not None
+        await repository.request_approval(
+            row,
+            proposal_payload={"proposal": "trusted"},
+            guard_payload={"guard": "trusted"},
+        )
+        assert await repository.claim_resolution(
+            tool_call_id,
+            decision="reject",
+            client_resolution_id="legacy-reject-1",
+        ) is True
+        assert row.status == "executing"
+        assert row.decision == "reject"
+        assert row.client_resolution_id == "legacy-reject-1"
+        await repository.resolve(
+            row,
+            decision="reject",
+            tool_result={"outcome": "rejected"},
+            client_resolution_id="legacy-reject-1",
+        )
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
+    assert row is not None
+    assert row.status == "resolved"
+    assert row.tool_result == {"outcome": "rejected"}
 
 
 def test_tool_call_state_migration_backfills_validated(tmp_path) -> None:
@@ -219,19 +440,24 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
             tool_name="demo",
             arguments={},
         )
+        assert await repositories.tool_calls.save_validation(
+            row,
+            proposal_payload={"proposal": "trusted"},
+            guard_payload={"guard": "trusted"},
+        ) is True
         await session.commit()
 
     async with isolated_db.session() as session:
         repository = RepositoryFactory().create(session).tool_calls
-        assert await repository.claim_execution(row.id) is True
+        assert await repository.claim_execution(row.id, from_status="validated") is True
         await session.rollback()
 
     async with isolated_db.session() as session:
         repository = RepositoryFactory().create(session).tool_calls
         persisted = await repository.get(row.id)
         assert persisted is not None
-        assert persisted.status == "received"
-        assert await repository.claim_execution(row.id) is True
+        assert persisted.status == "validated"
+        assert await repository.claim_execution(row.id, from_status="validated") is True
         await repository.resolve(
             persisted,
             decision=None,
