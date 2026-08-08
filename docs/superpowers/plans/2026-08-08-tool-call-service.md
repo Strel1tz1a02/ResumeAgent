@@ -42,6 +42,7 @@
 **Files:**
 - Create: `apps/backend/app/scripts/migrate_ai_chat_tool_call_state.py`
 - Modify: `apps/backend/app/ai_chat/models/models.py:125-185`
+- Modify: `apps/backend/app/ai_chat/repositories/tool_call_repository.py`
 - Modify: `apps/backend/app/db_engine.py:62-96`
 - Create: `apps/backend/tests/unit/test_tool_call_service.py`
 
@@ -224,7 +225,11 @@ def migrate(engine: Engine) -> None:
         )
 ```
 
-- [ ] **Step 5: Register the migration after existing Tool index migration**
+- [ ] **Step 5: Keep the existing low-risk path constraint-safe**
+
+Before the full Repository transition rewrite in Task 2, change the existing `claim_execution()` target from `status="resolved"` to `status="executing"`. Keep its current `received` source status for compatibility. The surrounding execution transaction will still call `resolve()` with a non-null result, while rollback restores `received`.
+
+- [ ] **Step 6: Register the migration after existing Tool index migration**
 
 In `init_models_sync()` import and call:
 
@@ -237,20 +242,20 @@ migrate_ai_chat_tool_call_index(engine)
 migrate_ai_chat_tool_call_state(engine)
 ```
 
-- [ ] **Step 6: Run the migration and database tests**
+- [ ] **Step 7: Run the migration, database, and low-risk compatibility tests**
 
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated tests/unit/test_database.py -q
+& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated tests/unit/test_database.py tests/unit/test_experience_ai_chat.py -k "tool_call_state_migration or database or low_risk" -q
 ```
 
 Expected: all selected tests pass and running the migration twice is a no-op.
 
-- [ ] **Step 7: Commit the state schema**
+- [ ] **Step 8: Commit the state schema**
 
 ```powershell
-git add apps/backend/app/ai_chat/models/models.py apps/backend/app/db_engine.py apps/backend/app/scripts/migrate_ai_chat_tool_call_state.py apps/backend/tests/unit/test_tool_call_service.py
+git add apps/backend/app/ai_chat/models/models.py apps/backend/app/ai_chat/repositories/tool_call_repository.py apps/backend/app/db_engine.py apps/backend/app/scripts/migrate_ai_chat_tool_call_state.py apps/backend/tests/unit/test_tool_call_service.py
 git commit -m "feat: add durable tool call states"
 ```
 
@@ -377,6 +382,8 @@ git commit -m "refactor: make tool call transitions atomic"
 **Files:**
 - Create: `apps/backend/app/ai_chat/services/tool_call_service.py`
 - Modify: `apps/backend/app/ai_chat/services/__init__.py`
+- Modify: `apps/backend/app/ai_chat/tools/handler.py`
+- Create: `apps/backend/app/ai_chat/tools/security.py`
 - Modify: `apps/backend/app/ai_chat/tools/results.py`
 - Modify: `apps/backend/tests/unit/test_tool_call_service.py`
 
@@ -534,7 +541,7 @@ Expected: all selected tests pass.
 - [ ] **Step 8: Commit the validation service**
 
 ```powershell
-git add apps/backend/app/ai_chat/services/tool_call_service.py apps/backend/app/ai_chat/services/__init__.py apps/backend/app/ai_chat/tools/results.py apps/backend/app/ai_chat/tools/__init__.py apps/backend/tests/unit/test_tool_call_service.py
+git add apps/backend/app/ai_chat/services/tool_call_service.py apps/backend/app/ai_chat/services/__init__.py apps/backend/app/ai_chat/tools/handler.py apps/backend/app/ai_chat/tools/security.py apps/backend/app/ai_chat/tools/results.py apps/backend/app/ai_chat/tools/__init__.py apps/backend/tests/unit/test_tool_call_service.py
 git commit -m "feat: add tool call validation service"
 ```
 
@@ -672,7 +679,9 @@ git commit -m "feat: centralize tool approval and execution"
 **Files:**
 - Modify: `apps/backend/app/ai_chat/graph/runtime.py`
 - Modify: `apps/backend/app/ai_chat/graph/runner.py`
+- Modify: `apps/backend/app/ai_chat/graph/state.py`
 - Modify: `apps/backend/app/ai_chat/container.py`
+- Modify: `apps/backend/app/experience/adapters/adapter.py`
 - Modify: `apps/backend/app/experience/tools/content_change.py`
 - Modify: `apps/backend/tests/unit/test_ai_chat_model.py`
 - Modify: `apps/backend/tests/unit/test_experience_ai_chat.py`
@@ -775,7 +784,7 @@ Expected: selected tests pass.
 - [ ] **Step 8: Commit Runtime integration**
 
 ```powershell
-git add apps/backend/app/ai_chat/graph/runtime.py apps/backend/app/ai_chat/graph/runner.py apps/backend/app/ai_chat/container.py apps/backend/app/experience/tools/content_change.py apps/backend/tests/unit/test_ai_chat_model.py apps/backend/tests/unit/test_experience_ai_chat.py
+git add apps/backend/app/ai_chat/graph/runtime.py apps/backend/app/ai_chat/graph/runner.py apps/backend/app/ai_chat/graph/state.py apps/backend/app/ai_chat/container.py apps/backend/app/experience/adapters/adapter.py apps/backend/app/experience/tools/content_change.py apps/backend/tests/unit/test_ai_chat_model.py apps/backend/tests/unit/test_experience_ai_chat.py
 git commit -m "refactor: bind tool service into runtime"
 ```
 
@@ -989,7 +998,7 @@ Confirm the unrelated frontend files remain unchanged by this implementation and
 - [ ] **Step 8: Commit cleanup and documentation**
 
 ```powershell
-git add apps/backend/app/ai_chat apps/backend/app/experience/graph apps/backend/app/experience/tools/content_change.py apps/backend/app/scripts apps/backend/tests docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md docs/superpowers/specs/2026-08-01-experience-adapter-design.zh-CN.md docs/superpowers/specs/2026-08-08-ai-chat-memory-and-context-design.zh-CN.md docs/agent/learning/agent-development-reading-path.zh-CN.md
+git add apps/backend/app/ai_chat apps/backend/app/experience/adapters/adapter.py apps/backend/app/experience/graph apps/backend/app/experience/tools/content_change.py apps/backend/app/scripts apps/backend/tests docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md docs/superpowers/specs/2026-08-01-experience-adapter-design.zh-CN.md docs/superpowers/specs/2026-08-08-ai-chat-memory-and-context-design.zh-CN.md docs/agent/learning/agent-development-reading-path.zh-CN.md
 git commit -m "docs: remove legacy tool lifecycle design"
 ```
 
