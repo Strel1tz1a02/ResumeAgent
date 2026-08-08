@@ -11,6 +11,7 @@ from langgraph.types import interrupt
 from app.ai_chat.errors import ProposalStateError, ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.graph.state import ApprovalInput
+from app.ai_chat.streaming.events import tool_result_event
 from app.ai_chat.streaming.model import TextDelta, ToolCallsCompleted
 from app.ai_chat.tools.buffer import AssembledToolCall
 from app.ai_chat.tools.handler import ToolContext
@@ -33,16 +34,12 @@ def _emit(event: str, data: JsonObject) -> None:
 
 def _emit_tool_result(completed: CompletedToolCall) -> None:
     """只为已提交的 Service 结果生成业务事件。"""
-    outcome = completed.result.get("outcome")
-    event_name = (
-        f"{completed.tool_name}.{outcome}"
-        if isinstance(outcome, str)
-        else f"{completed.tool_name}.completed"
+    event = tool_result_event(
+        tool_name=completed.tool_name,
+        tool_call_id=completed.tool_call_id,
+        result=completed.result,
     )
-    _emit(
-        event_name,
-        {"tool_call_id": completed.tool_call_id, **completed.result},
-    )
+    _emit(event.event, event.data)
 
 
 def _emit_completion(completed: CompletedToolCall) -> None:

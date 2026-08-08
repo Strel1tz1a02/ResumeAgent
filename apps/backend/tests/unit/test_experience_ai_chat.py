@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass, replace
@@ -13,11 +14,15 @@ from sqlalchemy import create_engine
 
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.checkpoint import CheckpointLifecycle
-from app.ai_chat.errors import IdempotencyConflictError, ToolProtocolError
+from app.ai_chat.errors import (
+    IdempotencyConflictError,
+    ProposalStateError,
+    ToolProtocolError,
+)
 from app.ai_chat.graph.runner import GraphRecovery, GraphRunner
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.services import AiChatService, ToolCallService
-from app.ai_chat.streaming.events import AiChatEvent
+from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
 from app.ai_chat.tools.buffer import AssembledToolCall
@@ -108,6 +113,32 @@ class _FailingContentChangeHandler(ContentChangeHandler):
         if self.execute_count <= self._failures:
             raise RuntimeError("transient executor failure")
         return await super().execute(context, proposal_payload, guard_payload)
+
+
+class _BlockingContentChangeHandler(ContentChangeHandler):
+    """让真实 executor 停在可取消边界。"""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.execute_count = 0
+
+    async def execute(self, context, proposal_payload, guard_payload):  # type: ignore[no-untyped-def]
+        self.execute_count += 1
+        self.entered.set()
+        await self.release.wait()
+        return await super().execute(context, proposal_payload, guard_payload)
+
+
+class _ProposalStateFailingHandler(ContentChangeHandler):
+    """模拟 Graph 已启动后的稳定协议错误。"""
+
+    def __init__(self) -> None:
+        self.execute_count = 0
+
+    async def execute(self, context, proposal_payload, guard_payload):  # type: ignore[no-untyped-def]
+        self.execute_count += 1
+        raise ProposalStateError("executor checkpoint state is invalid")
 
 
 @dataclass(frozen=True)
@@ -1764,5 +1795,216 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
         assert row is not None
         assert row.status == "awaiting_approval"
+    finally:
+        await harness.checkpoints.close()
+
+
+async def test_resolved_checkpoint_replays_undelivered_business_event(
+    isolated_db,
+    tmp_path,
+) -> None:
+    """Tool 已提交而 Run 未完成时，从 durable result 补发业务事件。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "resolved-undelivered-event.db",
+        handler=handler,
+    )
+    try:
+        proposal_id = await _request_proposal(harness, "undelivered-event-message")
+        approval = {
+            "tool_call_id": proposal_id,
+            "decision": "approve",
+            "client_resolution_id": "r1",
+        }
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            assert await repositories.runs.transition(
+                row.run_id,
+                from_statuses={"suspended"},
+                to_status="running",
+            )
+            await session.commit()
+
+        undelivered = [
+            event
+            async for event in harness.runner.resume(
+                adapter_name=harness.adapter.adapter_name(),
+                conversation_id=harness.conversation_id,
+                approval=approval,
+            )
+        ]
+        assert [event.event for event in undelivered] == [
+            "proposal.resolved",
+            "content_change.applied",
+        ]
+        assert handler.execute_count == 1
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            assert row.status == "resolved"
+            assert await repositories.runs.transition(
+                row.run_id,
+                from_statuses={"running"},
+                to_status="failed",
+            )
+            await session.commit()
+
+        replayed = [
+            event
+            async for event in harness.service.resolve_proposal(
+                proposal_id,
+                "approve",
+                "r1",
+            )
+        ]
+        assert [event.event for event in replayed] == [
+            "proposal.resolved",
+            "content_change.applied",
+        ]
+        assert replayed[1].data == undelivered[1].data
+        assert replayed[1].data["tool_call_id"] == proposal_id
+        assert replayed[1].data["outcome"] == "applied"
+        assert handler.execute_count == 1
+        async with isolated_db.session() as session:
+            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            assert row is not None
+            run = await harness.repositories.create(session).runs.get(row.run_id)
+        assert run is not None
+        assert run.status == "completed"
+    finally:
+        await harness.checkpoints.close()
+
+
+async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
+    isolated_db,
+    tmp_path,
+) -> None:
+    """suspended checkpoint 身份冲突在 Run 变为 running 前失败。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "suspended-identity-conflict.db",
+        handler=handler,
+    )
+    try:
+        proposal_id = await _request_proposal(harness, "suspended-conflict-message")
+        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
+        config = {
+            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
+        }
+        await graph.aupdate_state(config, {"tool_call_id": proposal_id + 100})
+
+        with pytest.raises(IdempotencyConflictError):
+            _ = [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+        assert handler.execute_count == 0
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "awaiting_approval"
+        assert run is not None
+        assert run.status == "suspended"
+    finally:
+        await harness.checkpoints.close()
+
+
+def test_tool_result_event_uses_persisted_tool_call_identity() -> None:
+    """Tool Result 不能用业务 payload 覆盖持久化 Tool Call ID。"""
+    event = tool_result_event(
+        tool_name="content_change",
+        tool_call_id=7,
+        result={"outcome": "applied", "tool_call_id": 999},
+    )
+    assert event.event == "content_change.applied"
+    assert event.data == {"outcome": "applied", "tool_call_id": 7}
+
+
+async def test_cancelled_resolution_converges_claimed_run(
+    isolated_db,
+    tmp_path,
+) -> None:
+    """Graph 已 claim 后取消时，Run 不能永久停在 running。"""
+    handler = _BlockingContentChangeHandler()
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "cancelled-resolution.db",
+        handler=handler,
+    )
+    try:
+        proposal_id = await _request_proposal(harness, "cancelled-resolution-message")
+
+        async def resolve() -> list[AiChatEvent]:
+            return [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        task = asyncio.create_task(resolve())
+        await handler.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "approved"
+        assert run is not None
+        assert run.status == "cancelled"
+    finally:
+        await harness.checkpoints.close()
+
+
+async def test_postclaim_proposal_state_error_yields_one_run_failed(
+    isolated_db,
+    tmp_path,
+) -> None:
+    """Graph 启动后的协议错误收敛为单一 run.failed。"""
+    handler = _ProposalStateFailingHandler()
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "postclaim-proposal-state.db",
+        handler=handler,
+    )
+    try:
+        proposal_id = await _request_proposal(harness, "postclaim-state-message")
+        events = [
+            event
+            async for event in harness.service.resolve_proposal(
+                proposal_id,
+                "approve",
+                "r1",
+            )
+        ]
+        assert [(event.event, event.data) for event in events] == [
+            ("run.failed", {"code": "proposal_finalize_failed"})
+        ]
+        assert handler.execute_count == 1
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "approved"
+        assert run is not None
+        assert run.status == "failed"
     finally:
         await harness.checkpoints.close()

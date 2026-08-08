@@ -20,7 +20,7 @@ from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.models import AiChatMessage
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.streaming.events import AiChatEvent
+from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
 from app.ai_chat.graph.state import AdapterInput, ApprovalInput
 from app.ai_chat.tools.results import PendingToolResult
 from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
@@ -347,51 +347,77 @@ class AiChatService:
             "decision": decision,
             "client_resolution_id": client_resolution_id,
         }
+        claimed_running = False
         try:
-            if recover_interrupt:
-                recovery = await self._runner.ensure_interrupted(
-                    adapter_name=adapter_name,
-                    conversation_id=conversation_id,
-                    approval=approval,
-                )
-                if not recovery.interrupted:
-                    async with database_module.db.session() as session:
-                        repositories = self._repositories.create(session)
-                        resolved_call = await repositories.tool_calls.get(proposal_id)
-                        if (
-                            resolved_call is None
-                            or resolved_call.status != "resolved"
-                            or resolved_call.decision != decision
-                            or resolved_call.client_resolution_id
-                            != client_resolution_id
-                        ):
-                            raise ProposalStateError(str(proposal_id))
-                        transitioned = await repositories.runs.transition(
-                            run_id,
-                            from_statuses={
-                                "running",
-                                "suspended",
-                                "cancelled",
-                                "failed",
-                            },
-                            to_status="completed",
+            recovery = await self._runner.ensure_interrupted(
+                adapter_name=adapter_name,
+                conversation_id=conversation_id,
+                approval=approval,
+            )
+            if not recovery.interrupted:
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    resolved_call = await repositories.tool_calls.get(proposal_id)
+                    if (
+                        resolved_call is None
+                        or resolved_call.status != "resolved"
+                        or resolved_call.decision != decision
+                        or resolved_call.client_resolution_id
+                        != client_resolution_id
+                    ):
+                        raise ProposalStateError(str(proposal_id))
+                    if resolved_call.tool_result is None:
+                        raise ProposalStateError(
+                            "Resolved Tool Call has no durable result"
                         )
-                        if not transitioned:
-                            current_run = await repositories.runs.get(run_id)
-                            if current_run is None or current_run.status != "completed":
-                                raise ProposalStateError(str(proposal_id))
-                        await session.commit()
-                    emitted_resolution = False
+                    durable_tool_event = tool_result_event(
+                        tool_name=resolved_call.tool_name,
+                        tool_call_id=resolved_call.id,
+                        result=dict(resolved_call.tool_result),
+                    )
+                    resolution_event = AiChatEvent(
+                        "proposal.resolved",
+                        {"proposal_id": proposal_id, "decision": decision},
+                    )
+                    recovered_events: list[AiChatEvent] = []
                     for event in recovery.events:
-                        emitted_resolution |= event.event == "proposal.resolved"
-                        yield event
-                    if not emitted_resolution:
-                        yield AiChatEvent(
-                            "proposal.resolved",
-                            {"proposal_id": proposal_id, "decision": decision},
-                        )
-                    return
+                        if event.event == "proposal.resolved":
+                            if event.data != resolution_event.data:
+                                raise ProposalStateError(
+                                    "Recovered approval event has a different identity"
+                                )
+                            continue
+                        if event.data.get("tool_call_id") == proposal_id:
+                            if event != durable_tool_event:
+                                raise ProposalStateError(
+                                    "Recovered Tool Result differs from durable result"
+                                )
+                            continue
+                        recovered_events.append(event)
+                    transitioned = await repositories.runs.transition(
+                        run_id,
+                        from_statuses={
+                            "running",
+                            "suspended",
+                            "cancelled",
+                            "failed",
+                        },
+                        to_status="completed",
+                    )
+                    if not transitioned:
+                        current_run = await repositories.runs.get(run_id)
+                        if current_run is None or current_run.status != "completed":
+                            raise ProposalStateError(str(proposal_id))
+                    await session.commit()
+                for event in (
+                    resolution_event,
+                    *recovered_events,
+                    durable_tool_event,
+                ):
+                    yield event
+                return
 
+            if recover_interrupt:
                 async with database_module.db.session() as session:
                     repositories = self._repositories.create(session)
                     transitioned = await repositories.runs.transition(
@@ -400,7 +426,9 @@ class AiChatService:
                         to_status="suspended",
                     )
                     if not transitioned:
-                        raise ProposalStateError(str(proposal_id))
+                        current_run = await repositories.runs.get(run_id)
+                        if current_run is None or current_run.status != "suspended":
+                            raise ProposalStateError(str(proposal_id))
                     await session.commit()
 
             async with database_module.db.session() as session:
@@ -413,6 +441,7 @@ class AiChatService:
                 if not transitioned:
                     raise ProposalStateError(str(proposal_id))
                 await session.commit()
+            claimed_running = True
 
             resumed_events: list[AiChatEvent] = []
             async for event in self._runner.resume(
@@ -437,22 +466,59 @@ class AiChatService:
                 await session.commit()
             for event in resumed_events:
                 yield event
-        except (IdempotencyConflictError, ProposalStateError, ToolCallNotFoundError):
+        except asyncio.CancelledError:
+            if claimed_running:
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    await repositories.runs.transition(
+                        run_id,
+                        from_statuses={"running"},
+                        to_status="cancelled",
+                    )
+                    await session.commit()
             raise
+        except IdempotencyConflictError:
+            if claimed_running:
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    await repositories.runs.transition(
+                        run_id,
+                        from_statuses={"running"},
+                        to_status="suspended",
+                    )
+                    await session.commit()
+            raise
+        except (ProposalStateError, ToolCallNotFoundError):
+            if not claimed_running:
+                raise
+            async with database_module.db.session() as session:
+                repositories = self._repositories.create(session)
+                await repositories.runs.transition(
+                    run_id,
+                    from_statuses={"running"},
+                    to_status="failed",
+                    error_code="proposal_finalize_failed",
+                )
+                await session.commit()
+            yield AiChatEvent(
+                "run.failed",
+                {"code": "proposal_finalize_failed"},
+            )
         except Exception:
             logger.exception(
                 "AI Chat proposal finalization failed: proposal=%s",
                 proposal_id,
             )
-            async with database_module.db.session() as session:
-                repositories = self._repositories.create(session)
-                await repositories.runs.transition(
-                    run_id,
-                    from_statuses={"running", "suspended", "cancelled"},
-                    to_status="failed",
-                    error_code="proposal_finalize_failed",
-                )
-                await session.commit()
+            if claimed_running:
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    await repositories.runs.transition(
+                        run_id,
+                        from_statuses={"running"},
+                        to_status="failed",
+                        error_code="proposal_finalize_failed",
+                    )
+                    await session.commit()
             yield AiChatEvent(
                 "run.failed",
                 {"code": "proposal_finalize_failed"},
