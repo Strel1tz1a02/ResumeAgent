@@ -14,10 +14,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.repositories.run_repository import RunRepository
 from app.ai_chat.checkpoint import CheckpointLifecycle
 from app.ai_chat.errors import (
     IdempotencyConflictError,
     ProposalStateError,
+    RunInProgressError,
     ToolProtocolError,
 )
 from app.ai_chat.graph.runner import GraphRecovery, GraphRunner
@@ -1800,9 +1802,11 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
         await harness.checkpoints.close()
 
 
+@pytest.mark.parametrize("run_status", ["running", "failed"])
 async def test_resolved_checkpoint_replays_undelivered_business_event(
     isolated_db,
     tmp_path,
+    run_status,
 ) -> None:
     """Tool 已提交而 Run 未完成时，从 durable result 补发业务事件。"""
     handler = _FailingContentChangeHandler(failures=0)
@@ -1847,11 +1851,12 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
             row = await repositories.tool_calls.get(proposal_id)
             assert row is not None
             assert row.status == "resolved"
-            assert await repositories.runs.transition(
-                row.run_id,
-                from_statuses={"running"},
-                to_status="failed",
-            )
+            if run_status == "failed":
+                assert await repositories.runs.transition(
+                    row.run_id,
+                    from_statuses={"running"},
+                    to_status="failed",
+                )
             await session.commit()
 
         replayed = [
@@ -1974,34 +1979,53 @@ async def test_cancelled_resolution_converges_claimed_run(
         await harness.checkpoints.close()
 
 
-async def test_cancel_after_running_claim_commit_converges_run(
+async def test_second_cancellation_cannot_interrupt_run_cleanup(
     isolated_db,
     tmp_path,
     monkeypatch,
 ) -> None:
-    """CAS 已提交但 commit 尚未返回时取消，也必须收敛 Run。"""
-    handler = _FailingContentChangeHandler(failures=0)
+    """清理事务被第二次取消时仍须先把 owned Run 收敛。"""
+    handler = _BlockingContentChangeHandler()
     harness = await _start_graph_harness(
         isolated_db,
-        tmp_path / "cancelled-claim-commit.db",
+        tmp_path / "second-cancel-cleanup.db",
         handler=handler,
     )
+    task: asyncio.Task[list[AiChatEvent]] | None = None
+    release_cleanup = asyncio.Event()
     try:
-        proposal_id = await _request_proposal(harness, "cancelled-claim-commit")
-        original_commit = AsyncSession.commit
-        cancelled_after_commit = False
+        proposal_id = await _request_proposal(harness, "second-cancel-cleanup")
+        original_transition = RunRepository.transition
+        cleanup_entered = asyncio.Event()
+        block_next_cleanup = True
 
-        async def commit_then_cancel(session: AsyncSession) -> None:
-            nonlocal cancelled_after_commit
-            await original_commit(session)
-            if not cancelled_after_commit:
-                cancelled_after_commit = True
-                raise asyncio.CancelledError
+        async def blocked_transition(
+            repository: RunRepository,
+            run_id: int,
+            *,
+            from_statuses,
+            to_status: str,
+            error_code: str | None = None,
+        ) -> bool:
+            nonlocal block_next_cleanup
+            if (
+                block_next_cleanup
+                and from_statuses == {"running"}
+                and to_status == "cancelled"
+            ):
+                block_next_cleanup = False
+                cleanup_entered.set()
+                await release_cleanup.wait()
+            return await original_transition(
+                repository,
+                run_id,
+                from_statuses=from_statuses,
+                to_status=to_status,
+                error_code=error_code,
+            )
 
-        monkeypatch.setattr(AsyncSession, "commit", commit_then_cancel)
-
-        with pytest.raises(asyncio.CancelledError):
-            _ = [
+        async def resolve() -> list[AiChatEvent]:
+            return [
                 event
                 async for event in harness.service.resolve_proposal(
                     proposal_id,
@@ -2010,7 +2034,268 @@ async def test_cancel_after_running_claim_commit_converges_run(
                 )
             ]
 
-        assert cancelled_after_commit
+        monkeypatch.setattr(RunRepository, "transition", blocked_transition)
+        task = asyncio.create_task(resolve(), name="twice-cancelled-resolution")
+        await handler.entered.wait()
+        task.cancel()
+        await cleanup_entered.wait()
+        task.cancel()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "approved"
+        assert run is not None
+        assert run.status == "cancelled"
+    finally:
+        handler.release.set()
+        release_cleanup.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await harness.checkpoints.close()
+
+
+async def test_active_running_owner_blocks_second_resolution(
+    isolated_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """B 不能把仍在 resume 前运行的 A 归一化后抢占。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "active-running-owner.db",
+        handler=handler,
+    )
+    task_a: asyncio.Task[list[AiChatEvent]] | None = None
+    release_a_resume = asyncio.Event()
+    try:
+        proposal_id = await _request_proposal(harness, "active-running-owner")
+        original_resume = harness.runner.resume
+        a_before_resume = asyncio.Event()
+
+        async def paused_resume(**kwargs):  # type: ignore[no-untyped-def]
+            if asyncio.current_task() is task_a:
+                a_before_resume.set()
+                await release_a_resume.wait()
+            async for event in original_resume(**kwargs):
+                yield event
+
+        async def resolve() -> list[AiChatEvent]:
+            return [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        monkeypatch.setattr(harness.runner, "resume", paused_resume)
+        task_a = asyncio.create_task(resolve(), name="active-resolution-owner-a")
+        await a_before_resume.wait()
+
+        blocked = False
+        second_events: list[AiChatEvent] = []
+        try:
+            second_events = await resolve()
+        except RunInProgressError:
+            blocked = True
+
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert blocked, [event.event for event in second_events]
+        assert handler.execute_count == 0
+        assert row.status == "awaiting_approval"
+        assert run is not None
+        assert run.status == "running"
+    finally:
+        release_a_resume.set()
+        if task_a is not None and not task_a.done():
+            task_a.cancel()
+        if task_a is not None:
+            await asyncio.gather(task_a, return_exceptions=True)
+        await harness.checkpoints.close()
+
+
+async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
+    isolated_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A 回滚后由 B 持久化的 running 不能被 A 的清理误取消。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "cancelled-uncommitted-claim.db",
+        handler=handler,
+    )
+    task_a: asyncio.Task[list[AiChatEvent]] | None = None
+    task_b: asyncio.Task[list[AiChatEvent]] | None = None
+    release_a_commit = asyncio.Event()
+    release_b_resume = asyncio.Event()
+    try:
+        proposal_id = await _request_proposal(harness, "cancelled-claim-a")
+        original_commit = AsyncSession.commit
+        original_close = AsyncSession.close
+        original_transition = RunRepository.transition
+        original_resume = harness.runner.resume
+        a_commit_entered = asyncio.Event()
+        a_session_closed = asyncio.Event()
+        b_before_resume = asyncio.Event()
+        target_session: AsyncSession | None = None
+        block_next_cancel_transition = True
+
+        async def controlled_commit(session: AsyncSession) -> None:
+            nonlocal target_session
+            if target_session is None:
+                target_session = session
+                a_commit_entered.set()
+                await release_a_commit.wait()
+                await session.rollback()
+                raise RuntimeError("simulated claim commit failure")
+            await original_commit(session)
+
+        async def tracked_close(session: AsyncSession) -> None:
+            await original_close(session)
+            if session is target_session:
+                a_session_closed.set()
+
+        async def controlled_transition(
+            repository: RunRepository,
+            run_id: int,
+            *,
+            from_statuses,
+            to_status: str,
+            error_code: str | None = None,
+        ) -> bool:
+            nonlocal block_next_cancel_transition
+            if (
+                block_next_cancel_transition
+                and from_statuses == {"running"}
+                and to_status == "cancelled"
+            ):
+                block_next_cancel_transition = False
+                await b_before_resume.wait()
+            return await original_transition(
+                repository,
+                run_id,
+                from_statuses=from_statuses,
+                to_status=to_status,
+                error_code=error_code,
+            )
+
+        async def paused_resume(**kwargs):  # type: ignore[no-untyped-def]
+            if asyncio.current_task() is task_b:
+                b_before_resume.set()
+                await release_b_resume.wait()
+            async for event in original_resume(**kwargs):
+                yield event
+
+        async def resolve() -> list[AiChatEvent]:
+            return [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        monkeypatch.setattr(AsyncSession, "commit", controlled_commit)
+        monkeypatch.setattr(AsyncSession, "close", tracked_close)
+        monkeypatch.setattr(RunRepository, "transition", controlled_transition)
+        monkeypatch.setattr(harness.runner, "resume", paused_resume)
+
+        task_a = asyncio.create_task(resolve(), name="cancelled-claim-owner-a")
+        await a_commit_entered.wait()
+        task_a.cancel()
+        release_a_commit.set()
+        await a_session_closed.wait()
+
+        task_b = asyncio.create_task(resolve(), name="successful-claim-owner-b")
+        await b_before_resume.wait()
+        with pytest.raises(asyncio.CancelledError):
+            await task_a
+
+        assert handler.execute_count == 0
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        assert row.status == "awaiting_approval"
+        assert run is not None
+        assert run.status == "running"
+    finally:
+        release_a_commit.set()
+        release_b_resume.set()
+        for task in (task_a, task_b):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (task_a, task_b) if task is not None),
+            return_exceptions=True,
+        )
+        await harness.checkpoints.close()
+
+
+async def test_cancelled_committed_claim_converges_its_run(
+    isolated_db,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """外层取消不能中断已开始的 claim commit，提交后由 A 自己收敛。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "cancelled-committed-claim.db",
+        handler=handler,
+    )
+    task: asyncio.Task[list[AiChatEvent]] | None = None
+    release_commit = asyncio.Event()
+    try:
+        proposal_id = await _request_proposal(harness, "cancelled-claim-success")
+        original_commit = AsyncSession.commit
+        commit_entered = asyncio.Event()
+        block_next_commit = True
+
+        async def blocked_commit(session: AsyncSession) -> None:
+            nonlocal block_next_commit
+            if block_next_commit:
+                block_next_commit = False
+                commit_entered.set()
+                await release_commit.wait()
+            await original_commit(session)
+
+        async def resolve() -> list[AiChatEvent]:
+            return [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        monkeypatch.setattr(AsyncSession, "commit", blocked_commit)
+        task = asyncio.create_task(resolve(), name="cancelled-committed-claim")
+        await commit_entered.wait()
+        task.cancel()
+        release_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
         assert handler.execute_count == 0
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
@@ -2021,6 +2306,11 @@ async def test_cancel_after_running_claim_commit_converges_run(
         assert run is not None
         assert run.status == "cancelled"
     finally:
+        release_commit.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
         await harness.checkpoints.close()
 
 

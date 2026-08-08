@@ -28,6 +28,30 @@ from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
 logger = logging.getLogger(__name__)
 
 
+async def _await_shielded_task(
+    task: asyncio.Task[None],
+) -> asyncio.CancelledError | None:
+    """屏蔽外层取消，把独立事务推进到确定的成功或失败。"""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = cancellation or exc
+        except Exception:
+            break
+    if task.cancelled():
+        if cancellation is not None:
+            raise cancellation
+        await task
+    error = task.exception()
+    if error is not None:
+        if cancellation is not None:
+            raise cancellation from None
+        raise error
+    return cancellation
+
+
 class AiChatService:
     """协调通用对话持久化、图执行和失败恢复。"""
 
@@ -340,6 +364,8 @@ class AiChatService:
                 raise ProposalStateError(str(proposal_id))
             if run.status == "completed":
                 raise ProposalStateError(str(proposal_id))
+            if run.status == "running" and call.status != "resolved":
+                raise RunInProgressError(str(run.id))
             recover_interrupt = run.status != "suspended"
 
         approval: ApprovalInput = {
@@ -431,17 +457,26 @@ class AiChatService:
                             raise ProposalStateError(str(proposal_id))
                     await session.commit()
 
-            async with database_module.db.session() as session:
-                repositories = self._repositories.create(session)
-                transitioned = await repositories.runs.transition(
-                    run_id,
-                    from_statuses={"suspended"},
-                    to_status="running",
-                )
-                if not transitioned:
-                    raise ProposalStateError(str(proposal_id))
-                claimed_running = True
-                await session.commit()
+            async def claim_run() -> None:
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    transitioned = await repositories.runs.transition(
+                        run_id,
+                        from_statuses={"suspended"},
+                        to_status="running",
+                    )
+                    if not transitioned:
+                        raise ProposalStateError(str(proposal_id))
+                    await session.commit()
+
+            claim_task = asyncio.create_task(
+                claim_run(),
+                name=f"ai-chat-run-{run_id}-claim",
+            )
+            claim_cancellation = await _await_shielded_task(claim_task)
+            claimed_running = True
+            if claim_cancellation is not None:
+                raise claim_cancellation
 
             resumed_events: list[AiChatEvent] = []
             async for event in self._runner.resume(
@@ -468,14 +503,29 @@ class AiChatService:
                 yield event
         except asyncio.CancelledError:
             if claimed_running:
-                async with database_module.db.session() as session:
-                    repositories = self._repositories.create(session)
-                    await repositories.runs.transition(
+                async def cancel_claimed_run() -> None:
+                    async with database_module.db.session() as session:
+                        repositories = self._repositories.create(session)
+                        await repositories.runs.transition(
+                            run_id,
+                            from_statuses={"running"},
+                            to_status="cancelled",
+                        )
+                        await session.commit()
+
+                cleanup_task = asyncio.create_task(
+                    cancel_claimed_run(),
+                    name=f"ai-chat-run-{run_id}-cancel",
+                )
+                try:
+                    await _await_shielded_task(cleanup_task)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception(
+                        "AI Chat cancelled Run cleanup failed: run=%s",
                         run_id,
-                        from_statuses={"running"},
-                        to_status="cancelled",
                     )
-                    await session.commit()
             raise
         except IdempotencyConflictError:
             if claimed_running:
