@@ -90,6 +90,20 @@ class ToolLifecycle:
                     tool_call_id=tool_call_id,
                     proposal_payload=dict(row.proposal_payload),
                 )
+            if row.status == "validated":
+                if row.proposal_payload is None or row.guard_payload is None:
+                    raise ToolProtocolError("Validated call has incomplete trusted payloads")
+                proposal_payload = dict(row.proposal_payload)
+                await repository.request_approval(
+                    row,
+                    proposal_payload=proposal_payload,
+                    guard_payload=dict(row.guard_payload),
+                )
+                await session.commit()
+                return ApprovalRequired(
+                    tool_call_id=tool_call_id,
+                    proposal_payload=proposal_payload,
+                )
             if row.status != "received":
                 raise ToolProtocolError(f"Unsupported Tool Call status: {row.status}")
 
