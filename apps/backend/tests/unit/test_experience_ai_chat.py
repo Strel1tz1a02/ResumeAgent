@@ -10,17 +10,23 @@ from sqlalchemy import create_engine
 
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.checkpoint import CheckpointLifecycle
+from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.adapters import AdapterRegistry
-from app.ai_chat.services import AiChatService
+from app.ai_chat.services import AiChatService, ToolCallService
 from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
 from app.ai_chat.tools.buffer import AssembledToolCall
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolContext
-from app.ai_chat.tools.results import ApprovalProposal, ToolResult
-from app.ai_chat.tools.lifecycle import ApprovalRequired, ToolCompleted, ToolLifecycle
+from app.ai_chat.tools.results import (
+    CompletedToolCall,
+    PreparedToolCall,
+    ToolResult,
+    ValidatedToolCall,
+)
+from app.ai_chat.tools.lifecycle import ToolCompleted, ToolLifecycle
 from app.ai_chat.types import ScopeRef, SubjectRef
 from app.database import Database
 from app.experience import ExperienceAdapter
@@ -147,7 +153,10 @@ async def test_create_initializes_states_and_group_revision(isolated_db) -> None
             )
 
 
-async def test_content_change_routes_field_proposal_and_apply(isolated_db) -> None:
+async def test_content_change_routes_field_proposal_and_apply(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """统一 Tool 将字段建议路由到 Service，并在审批时二次校验。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
@@ -172,21 +181,31 @@ async def test_content_change_routes_field_proposal_and_apply(isolated_db) -> No
         scope={"field": "background", "evidence_id": None},
         suggested_content="新背景",
     )
-    proposal = await handler.invoke(
-        context, arguments
-    )
-    assert isinstance(proposal, ApprovalProposal)
-    assert proposal.proposal_payload["current_content"] == "旧背景"
     async with isolated_db.session() as session:
-        result = await handler.resolve(
+        proposal = await handler.validation(
+            replace(context, session=session),
+            arguments.model_dump(mode="json"),
+        )
+    assert isinstance(proposal, ValidatedToolCall)
+    assert proposal.proposal_payload["current_content"] == "旧背景"
+    shown: list[dict] = []
+    original_show_result = handler.show_result
+
+    def show_result(payload):  # type: ignore[no-untyped-def]
+        shown.append(dict(payload))
+        return original_show_result(payload)
+
+    monkeypatch.setattr(handler, "show_result", show_result)
+    async with isolated_db.session() as session:
+        result = await handler.execute(
             replace(context, session=session),
             proposal.proposal_payload,
             proposal.guard_payload,
-            "approve",
         )
         await session.commit()
     assert result.payload["outcome"] == "applied"
     assert result.payload["value"] == "新背景"
+    assert shown == [result.payload]
 
 
 async def test_change_validation_is_owned_by_service(isolated_db) -> None:
@@ -206,6 +225,58 @@ async def test_change_validation_is_owned_by_service(isolated_db) -> None:
             expected_revision=state.revision,
         )
     assert result == {"outcome": "invalid_scope"}
+
+
+async def test_handler_validation_rejects_invalid_model_arguments() -> None:
+    """模型参数由目标 Handler 自己解析，未知字段不能进入 Graph guard。"""
+    context = ToolContext(
+        conversation_id=1,
+        run_id=1,
+        subject={"type": "experience", "id": "1"},
+        scope={"field": "background"},
+        adapter_context={
+            "revision_snapshot": {"scope": "field", "revision": 0},
+        },
+    )
+    with pytest.raises(ToolProtocolError):
+        await ContentChangeHandler().validation(
+            context,
+            {
+                "scope": {"field": "background", "evidence_id": None},
+                "suggested_content": "新背景",
+                "unexpected": True,
+            },
+        )
+
+
+async def test_handler_validation_requires_shared_session(isolated_db) -> None:
+    """合法模型参数也不能绕过 ToolCallService 注入的共享事务。"""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="共享事务", background="旧背景")
+        )
+    state = next(item for item in created.field_states if item.key == "background")
+    context = ToolContext(
+        conversation_id=1,
+        run_id=1,
+        subject={"type": "experience", "id": str(created.experience_id)},
+        scope={"field": "background"},
+        adapter_context={
+            "revision_snapshot": {"scope": "field", "revision": state.revision}
+        },
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="tool validation requires a shared transaction",
+    ):
+        await ContentChangeHandler().validation(
+            context,
+            {
+                "scope": {"field": "background", "evidence_id": None},
+                "suggested_content": "新背景",
+            },
+        )
 
 
 async def test_content_change_routes_by_requested_scope(
@@ -242,13 +313,18 @@ async def test_content_change_routes_by_requested_scope(
             "revision_snapshot": {"scope": "field", "revision": 0},
         },
     )
-    result = await ContentChangeHandler().invoke(
-        context,
-        ContentChangeArguments(
-            scope={"field": "evidence", "evidence_id": None},
-            suggested_content={"action": "行动", "result": None, "metrics": None},
-        ),
-    )
+    async with isolated_db.session() as session:
+        result = await ContentChangeHandler().validation(
+            replace(context, session=session),
+            ContentChangeArguments(
+                scope={"field": "evidence", "evidence_id": None},
+                suggested_content={
+                    "action": "行动",
+                    "result": None,
+                    "metrics": None,
+                },
+            ).model_dump(mode="json"),
+        )
     assert isinstance(result, ToolResult)
     assert result.payload == {"outcome": "invalid_scope"}
     assert called == ["evidence_append"]
@@ -282,14 +358,17 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
         },
     )
     handler = ContentChangeHandler()
-    proposal = await handler.invoke(context, arguments)
-    assert isinstance(proposal, ApprovalProposal)
     async with isolated_db.session() as session:
-        result = await handler.resolve(
+        proposal = await handler.validation(
+            replace(context, session=session),
+            arguments.model_dump(mode="json"),
+        )
+    assert isinstance(proposal, ValidatedToolCall)
+    async with isolated_db.session() as session:
+        result = await handler.execute(
             replace(context, session=session),
             proposal.proposal_payload,
             proposal.guard_payload,
-            "approve",
         )
         await session.commit()
     assert result.payload["outcome"] == "applied"
@@ -349,14 +428,17 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
         },
     )
     handler = ContentChangeHandler()
-    proposal = await handler.invoke(context, arguments)
-    assert isinstance(proposal, ApprovalProposal)
     async with isolated_db.session() as session:
-        result = await handler.resolve(
+        proposal = await handler.validation(
+            replace(context, session=session),
+            arguments.model_dump(mode="json"),
+        )
+    assert isinstance(proposal, ValidatedToolCall)
+    async with isolated_db.session() as session:
+        result = await handler.execute(
             replace(context, session=session),
             proposal.proposal_payload,
             proposal.guard_payload,
-            "approve",
         )
         await session.commit()
     assert result.payload["scope"] == {
@@ -420,14 +502,16 @@ async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> No
     }
 
 
-def test_graph_has_only_llm_tool_executor_and_approver() -> None:
+async def test_graph_has_only_llm_tool_executor_and_approver(isolated_db) -> None:
     """经历 Graph 只保留模型、工具执行和审批三个业务节点。"""
     adapter = ExperienceAdapter()
-    runtime = AiChatRuntime(
+    base_runtime = AiChatRuntime(
         _UnusedModel(),  # type: ignore[arg-type]
-        ToolLifecycle(RepositoryFactory()),
-    ).bind_tools(adapter.get_tool_handlers())
+        ToolCallService(isolated_db.session, RepositoryFactory()),
+    )
+    runtime = base_runtime.bind_tools(adapter.get_tool_handlers())
     graph = adapter.build_graph(runtime)
+    assert tuple(base_runtime.tools.model_handlers) == ()
     assert tuple(adapter.get_tool_handlers()) == ("content_change",)
     assert set(graph.nodes) == {"llm", "tool_executor", "approver"}
     assert ("__start__", "llm") in graph.edges
@@ -615,7 +699,9 @@ async def test_tool_call_run_index_is_idempotent_without_provider_id(
 
     handler = ContentChangeHandler()
     handlers = {handler.name: handler}
-    lifecycle = ToolLifecycle(RepositoryFactory())
+    tools = ToolCallService(
+        isolated_db.session, RepositoryFactory()
+    ).bind_handlers(handlers)
     call = AssembledToolCall(
         index=0,
         provider_id=None,
@@ -625,43 +711,40 @@ async def test_tool_call_run_index_is_idempotent_without_provider_id(
             "suggested_content": "新背景",
         },
     )
-    receive_kwargs = {
-        "context": ToolContext(
-            conversation_id=conversation.id,
-            run_id=run.id,
-            subject={"type": "experience", "id": str(created.experience_id)},
-            scope={"field": "background"},
-            adapter_context={
-                "revision_snapshot": {"scope": "field", "revision": 0}
-            },
-        ),
-        "call": call,
-        "handlers": handlers,
-    }
-
-    first = await lifecycle.receive(**receive_kwargs)
-    replay = await lifecycle.receive(**receive_kwargs)
-    provider_replay = await lifecycle.receive(
-        **{**receive_kwargs, "call": replace(call, provider_id="retry-generated-id")}
+    context = ToolContext(
+        conversation_id=conversation.id,
+        run_id=run.id,
+        subject={"type": "experience", "id": str(created.experience_id)},
+        scope={"field": "background"},
+        adapter_context={
+            "revision_snapshot": {"scope": "field", "revision": 0}
+        },
     )
-    assert isinstance(first, ApprovalRequired)
-    assert isinstance(replay, ApprovalRequired)
-    assert isinstance(provider_replay, ApprovalRequired)
+
+    first = await tools.validate_call(context, call)
+    replay = await tools.validate_call(context, call)
+    provider_replay = await tools.validate_call(
+        context, replace(call, provider_id="retry-generated-id")
+    )
+    assert isinstance(first, PreparedToolCall)
+    assert isinstance(replay, PreparedToolCall)
+    assert isinstance(provider_replay, PreparedToolCall)
     assert replay.tool_call_id == first.tool_call_id
     assert provider_replay.tool_call_id == first.tool_call_id
 
-    result = await lifecycle.resolve(
-        tool_call_id=first.tool_call_id,
-        decision="reject",
-        handlers=handlers,
-        subject=receive_kwargs["context"].subject,
-        scope=receive_kwargs["context"].scope,
-        client_resolution_id="resolution-without-provider-id",
+    _ = await tools.request_approval(first.tool_call_id)
+    result = await tools.record_decision(
+        {
+            "tool_call_id": first.tool_call_id,
+            "decision": "reject",
+            "client_resolution_id": "resolution-without-provider-id",
+        }
     )
-    assert result["outcome"] == "rejected"
+    assert isinstance(result, CompletedToolCall)
+    assert result.result["outcome"] == "rejected"
 
-    resolved_replay = await lifecycle.receive(**receive_kwargs)
-    assert isinstance(resolved_replay, ToolCompleted)
+    resolved_replay = await tools.validate_call(context, call)
+    assert isinstance(resolved_replay, CompletedToolCall)
     assert resolved_replay.tool_call_id == first.tool_call_id
     assert resolved_replay.result["outcome"] == "rejected"
 
@@ -919,7 +1002,10 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
     lifecycle = ToolLifecycle(repositories)
     checkpoints = CheckpointLifecycle(tmp_path / "checkpoints.db")
     saver = await checkpoints.start()
-    runtime = AiChatRuntime(_ConversationModel(), lifecycle)  # type: ignore[arg-type]
+    runtime = AiChatRuntime(
+        _ConversationModel(),  # type: ignore[arg-type]
+        ToolCallService(isolated_db.session, repositories),
+    )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, lifecycle, repositories)
     try:

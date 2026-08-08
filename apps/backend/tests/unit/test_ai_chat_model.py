@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.services.tool_call_service import ToolCallService
 from app.ai_chat.streaming.model import (
     AiChatModel,
     ModelCompleted,
     TextDelta,
     ToolCallsCompleted,
 )
+from app.experience import ExperienceAdapter
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeHandler,
@@ -31,6 +35,47 @@ class _ChunkRouter:
             yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
         return chunks()
+
+
+class _RecordingModel:
+    def __init__(self) -> None:
+        self.handlers = None
+
+    async def stream(self, *, handlers, **_kwargs):  # type: ignore[no-untyped-def]
+        self.handlers = handlers
+        yield ModelCompleted("stop")
+
+
+async def test_runtime_binding_is_an_immutable_snapshot(isolated_db) -> None:
+    """绑定后的 Runtime 不受源字典后续修改，也不污染未绑定实例。"""
+    handler = ContentChangeHandler()
+    source = {handler.name: handler}
+    base = AiChatRuntime(
+        _RecordingModel(),  # type: ignore[arg-type]
+        ToolCallService(isolated_db.session, RepositoryFactory()),
+    )
+
+    bound = base.bind_tools(source)
+    source.clear()
+
+    assert tuple(base.tools.model_handlers) == ()
+    assert tuple(bound.tools.model_handlers) == ("content_change",)
+
+
+async def test_runtime_exposes_only_service_handlers_to_model(isolated_db) -> None:
+    """模型的 Tool Schema 输入只来自绑定后的 ToolCallService。"""
+    model = _RecordingModel()
+    tools = ToolCallService(isolated_db.session, RepositoryFactory())
+    runtime = AiChatRuntime(model, tools).bind_tools(
+        ExperienceAdapter().get_tool_handlers()
+    )
+
+    _ = [
+        event
+        async for event in runtime.stream_model(messages=[], tools_enabled=True)
+    ]
+
+    assert model.handlers is runtime.tools.model_handlers
 
 
 async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:

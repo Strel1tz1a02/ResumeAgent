@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app import database as database_module
+from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.tools.handler import ToolContext, ToolHandler
 from app.ai_chat.tools.results import (
-    ApprovalProposal,
-    ToolInvocationResult,
     ToolResult,
+    ToolValidationResult,
+    ValidatedToolCall,
 )
+from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.types import JsonObject
 from app.experience.adapters.tool_context import (
     evidence_generation_revision,
     experience_id,
@@ -71,6 +73,7 @@ class ContentChangeHandler(ToolHandler):
     """解析统一参数，并按目标形态路由到经历领域服务。"""
 
     name = "content_change"
+    security = ToolSecurity.MEDIUM
     description = (
         "当前会话目标已经形成有事实依据、可直接保存的明确内容时，申请修改该内容。"
         "普通经历字段的 scope.field 必须等于会话范围且 evidence_id 为空。"
@@ -81,9 +84,19 @@ class ContentChangeHandler(ToolHandler):
     )
     arguments_schema = ContentChangeArguments
 
-    async def invoke(self, context: ToolContext, arguments: BaseModel) -> ToolInvocationResult:
-        """只负责解析和路由；目标、内容与 revision 均由 Service 校验。"""
-        values = cast(ContentChangeArguments, arguments)
+    async def validation(
+        self,
+        context: ToolContext,
+        arguments: JsonObject,
+    ) -> ToolValidationResult:
+        """校验模型输入，并生成审批展示和可信 revision guard。"""
+        try:
+            values = ContentChangeArguments.model_validate(arguments)
+        except ValidationError as exc:
+            raise ToolProtocolError("Invalid arguments for tool content_change") from exc
+        session = context.session
+        if session is None:
+            raise RuntimeError("tool validation requires a shared transaction")
         conversation_field = scope_field(context)
         start_revision = generation_revision(context)
         scope = values.scope
@@ -92,61 +105,57 @@ class ContentChangeHandler(ToolHandler):
             if isinstance(values.suggested_content, BaseModel)
             else values.suggested_content
         )
-        async with database_module.db.session() as session:
-            service = ExperienceAiMutationService(session)
-            if scope.field == "evidence" and scope.evidence_id is None: # 新增证据
-                prepared = await service.prepare_evidence_append(
-                    experience_id(context),
-                    scope.field,
-                    scope.evidence_id,
-                    suggested,
-                    scope_field=conversation_field,
-                    expected_revision=start_revision,
-                )
-            elif scope.field == "evidence": # 修改证据
-                prepared = await service.prepare_evidence_change(
-                    experience_id(context),
-                    scope.field,
-                    scope.evidence_id,
-                    suggested,
-                    scope_field=conversation_field,
-                    expected_revision=evidence_generation_revision(
-                        context, scope.evidence_id
-                    ),
-                )
-            else: #  修改普通字段
-                prepared = await service.prepare_field_change(
-                    experience_id(context),
-                    scope.field,
-                    scope.evidence_id,
-                    suggested,
-                    scope_field=conversation_field,
-                    expected_revision=start_revision,
-                )
+        service = ExperienceAiMutationService(session)
+        if scope.field == "evidence" and scope.evidence_id is None: # 新增证据
+            prepared = await service.prepare_evidence_append(
+                experience_id(context),
+                scope.field,
+                scope.evidence_id,
+                suggested,
+                scope_field=conversation_field,
+                expected_revision=start_revision,
+            )
+        elif scope.field == "evidence": # 修改证据
+            prepared = await service.prepare_evidence_change(
+                experience_id(context),
+                scope.field,
+                scope.evidence_id,
+                suggested,
+                scope_field=conversation_field,
+                expected_revision=evidence_generation_revision(
+                    context, scope.evidence_id
+                ),
+            )
+        else: #  修改普通字段
+            prepared = await service.prepare_field_change(
+                experience_id(context),
+                scope.field,
+                scope.evidence_id,
+                suggested,
+                scope_field=conversation_field,
+                expected_revision=start_revision,
+            )
         if isinstance(prepared, PreparedExperienceChange): # 如果需要审批
-            return ApprovalProposal(
+            return ValidatedToolCall(
                 proposal_payload=prepared.proposal_payload,
                 guard_payload=prepared.guard_payload,
             )
-        return ToolResult(prepared) # 如果无需审批
+        return self.show_result(prepared)
 
-    async def resolve(
+    async def execute(
         self,
         context: ToolContext,
-        proposal_payload: dict[str, Any],
-        guard_payload: dict[str, Any],
-        decision: Literal["approve", "reject"],
+        proposal_payload: JsonObject,
+        guard_payload: JsonObject,
     ) -> ToolResult:
-        """拒绝直接返回；同意后按已校验目标路由到原子写入服务。"""
-        if decision == "reject":
-            return ToolResult({"outcome": "rejected"})
+        """按已校验目标执行原子写入，并在内部整理结果。"""
         scope = dict(guard_payload["scope"])
         field = str(scope["field"])
         evidence_id = scope.get("evidence_id")
         suggested = proposal_payload.get("suggested_content")
         session = context.session
         if session is None:
-            raise RuntimeError("tool resolution requires a shared transaction")
+            raise RuntimeError("tool execution requires a shared transaction")
         service = ExperienceAiMutationService(session)
         if field == "evidence" and evidence_id is None:
             payload = await service.append_evidence(
@@ -170,4 +179,28 @@ class ContentChangeHandler(ToolHandler):
                 expected_revision=int(guard_payload["revision"]),
                 expected_value=guard_payload.get("normalized_current_content"),
             )
-        return ToolResult(payload)
+        return self.show_result(payload)
+
+    def show_result(self, payload: JsonObject) -> ToolResult:
+        """保留稳定 outcome，并统一封装经历工具结果。"""
+        return ToolResult(dict(payload))
+
+    async def invoke(
+        self,
+        context: ToolContext,
+        arguments: BaseModel,
+    ) -> ToolValidationResult:
+        """临时兼容旧调用方；Task 7 删除。"""
+        return await self.validation(context, arguments.model_dump(mode="json"))
+
+    async def resolve(
+        self,
+        context: ToolContext,
+        proposal_payload: JsonObject,
+        guard_payload: JsonObject,
+        decision: Literal["approve", "reject"],
+    ) -> ToolResult:
+        """临时兼容旧审批收尾；Task 7 删除。"""
+        if decision == "reject":
+            return self.show_result({"outcome": "rejected"})
+        return await self.execute(context, proposal_payload, guard_payload)

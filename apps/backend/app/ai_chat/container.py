@@ -8,7 +8,7 @@ from app.ai_chat.checkpoint import CheckpointLifecycle
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services import AiChatService
+from app.ai_chat.services import AiChatService, ToolCallService
 from app.ai_chat.streaming import AiChatModel
 from app.ai_chat.tools.lifecycle import ToolLifecycle
 from app.config import settings
@@ -45,7 +45,8 @@ async def start_ai_chat() -> None:
         _checkpoints = CheckpointLifecycle(path)
     saver = await _checkpoints.start()
     lifecycle = ToolLifecycle(_repositories)
-    runtime = AiChatRuntime(AiChatModel(), lifecycle)
+    tools = ToolCallService(database_module.db.session, _repositories)
+    runtime = AiChatRuntime(AiChatModel(), tools)
     runner = GraphRunner(_registry, saver, runtime)
     _service = AiChatService(_registry, runner, lifecycle, _repositories)
 
