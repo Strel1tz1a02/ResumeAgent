@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EvidenceItem, ExperienceFieldState, ExperienceItem
+from app.experience.models import EvidenceItem, ExperienceFieldState, ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_field_state_repository import ExperienceFieldStateRepository
 from app.experience.repositories.experience_revision_repository import (

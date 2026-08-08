@@ -7,12 +7,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ExperienceChatTarget(BaseModel):
-    """一个具体经历字段或整个 Evidence 集合会话目标。"""
+class ExperienceChatScope(BaseModel):
+    """一个具体经历字段或整个 Evidence 集合会话范围。"""
 
     model_config = ConfigDict(extra="forbid")
-    key: str = Field(min_length=1, max_length=80)
-    ref_id: int | None = Field(default=None, gt=0)
+    field: str = Field(min_length=1, max_length=80)
 
 
 class ConversationCreateRequest(BaseModel):
@@ -20,14 +19,14 @@ class ConversationCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     experience_id: int = Field(gt=0)
-    target: ExperienceChatTarget
+    scope: ExperienceChatScope
 
 
 class ConversationCreateResponse(BaseModel):
     """创建会话后返回当前字段并发基线。"""
 
     conversation_id: int
-    target: ExperienceChatTarget
+    scope: ExperienceChatScope
     field_status: Literal["complete", "incomplete"]
     revision: int = Field(ge=0)
 

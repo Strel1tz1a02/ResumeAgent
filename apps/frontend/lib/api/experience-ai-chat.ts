@@ -1,14 +1,18 @@
 import { apiPost, apiStream } from './client';
 import type { ExperienceDetail } from './experiences';
 
-export interface ExperienceChatTarget {
-  key: string;
-  ref_id: number | null;
+export interface ExperienceChatScope {
+  field: string;
+}
+
+export interface ExperienceChangeScope {
+  field: string;
+  evidence_id: number | null;
 }
 
 export interface ExperienceConversation {
   conversation_id: number;
-  target: ExperienceChatTarget;
+  scope: ExperienceChatScope;
   field_status: 'complete' | 'incomplete';
   revision: number;
 }
@@ -22,8 +26,7 @@ export interface ExperienceProposal {
   proposal_id: number;
   tool_name: 'content_change';
   proposal: {
-    operation: 'content_change';
-    target: ExperienceChatTarget;
+    scope: ExperienceChangeScope;
     current_content?: unknown;
     suggested_content: unknown;
   };
@@ -39,12 +42,12 @@ async function parseJson<T>(response: Response): Promise<T> {
 
 export async function createExperienceConversation(
   experienceId: number,
-  target: ExperienceChatTarget
+  scope: ExperienceChatScope
 ): Promise<ExperienceConversation> {
   return parseJson(
     await apiPost('/experience-ai-chat/conversations', {
       experience_id: experienceId,
-      target,
+      scope,
     })
   );
 }

@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.database import Database
-from app.models import EvidenceItem, ExperienceEvidence, ExperienceItem
+from app.experience.models import EvidenceItem, ExperienceEvidence, ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories import experience_repository as experience_repository_module
 from app.experience.repositories.experience_repository import ExperienceRepository

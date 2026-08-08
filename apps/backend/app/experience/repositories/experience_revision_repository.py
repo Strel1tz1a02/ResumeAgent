@@ -7,7 +7,7 @@ from typing import Literal
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ExperienceRevision, _utcnow_iso
+from app.experience.models import ExperienceRevision, utcnow_iso
 
 RevisionScope = Literal["unit", "collection"]
 
@@ -80,7 +80,7 @@ class ExperienceRevisionRepository:
             )
             .values(
                 revision=ExperienceRevision.revision + 1,
-                updated_at=_utcnow_iso(),
+                updated_at=utcnow_iso(),
             )
         )
         if result.rowcount != 1:

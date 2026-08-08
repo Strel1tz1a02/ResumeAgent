@@ -38,9 +38,9 @@ def build_model_messages(
     *,
     prompt: str,
     detail: JsonObject,
-    target: JsonObject,
-    target_status: str,
-    target_revision: int,
+    scope: JsonObject,
+    scope_status: str,
+    scope_revision: int,
     history: list[JsonObject],
     pending: list[PendingToolResult],
 ) -> list[JsonObject]:
@@ -55,9 +55,9 @@ def build_model_messages(
                     "experience": detail,
                     # ref_id 是前端/持久化绑定字段，不是模型 Tool 参数。这里只暴露
                     # 会话字段名，避免模型把 ref_id 复制成 evidence_id。
-                    "target": {"key": target.get("key")},
-                    "target_status": target_status,
-                    "target_revision": target_revision,
+                    "scope": {"field": scope.get("field")},
+                    "scope_status": scope_status,
+                    "scope_revision": scope_revision,
                 },
                 ensure_ascii=False,
             )

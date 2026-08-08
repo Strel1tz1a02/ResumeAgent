@@ -81,23 +81,25 @@ async def create_conversation( request: ConversationCreateRequest,) -> Conversat
     """验证字段绑定并创建不可恢复的当前会话。"""
     try:
         service = get_ai_chat_service()
-        target = request.target.model_dump(mode="json")
+        scope = request.scope.model_dump(mode="json")
         conversation_id = await service.create_conversation(
             adapter_name="ExperienceAdapter",
             subject={"type": "experience", "id": str(request.experience_id)},
-            target=target,
+            scope=scope,
             language=get_content_language(),
         )
         async with database_module.db.session() as session:
             snapshot_key = (
-                "evidence_new" if request.target.key == "evidence" else request.target.key
+                "evidence_new"
+                if request.scope.field == "evidence"
+                else request.scope.field
             )
             snapshot = await ExperienceFieldService(session).snapshot(
-                request.experience_id, snapshot_key, request.target.ref_id
+                request.experience_id, snapshot_key, None
             )
         return ConversationCreateResponse(
             conversation_id=conversation_id,
-            target=request.target,
+            scope=request.scope,
             field_status=snapshot.status,
             revision=snapshot.revision,
         )

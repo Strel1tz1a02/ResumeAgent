@@ -6,7 +6,7 @@ from typing import Any
 
 from app.ai_chat.tools.buffer import AssembledToolCall, ToolCallBuffer
 from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.text_fallback import TextToolCallFallback
+from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.types import JsonObject
 from app.llm import _calculate_timeout, get_router
 
@@ -94,11 +94,11 @@ class AiChatModel:
                 for name, handler in handlers.items()
             ]
         buffer = ToolCallBuffer()
-        text_fallback = TextToolCallFallback() if tools_enabled and handlers else None
+        text_fallback = DsmlToolCallFallback() if tools_enabled and handlers else None
         finish_reason: str | None = None
         response = await router.acompletion(**kwargs)
         async for chunk in response:
-            choices = _get(chunk, "choices", []) or []
+            choices = _get(chunk, "choices", []) or [] # 候选回答
             if not choices:
                 continue
             choice = choices[0]

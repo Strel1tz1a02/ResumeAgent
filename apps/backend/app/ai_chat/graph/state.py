@@ -20,7 +20,7 @@ class AdapterInput(TypedDict):
     conversation_id: int
     run_id: int
     subject: JsonObject
-    target: JsonObject
+    scope: JsonObject
     language: str
     run_kind: str
     tools_enabled: bool
@@ -34,6 +34,6 @@ class BaseState(TypedDict):
     conversation_id: int
     run_id: int
     subject: JsonObject
-    target: JsonObject
+    scope: JsonObject
     run_kind: str
     tools_enabled: bool

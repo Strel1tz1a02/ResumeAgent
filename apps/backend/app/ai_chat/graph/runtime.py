@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from app.ai_chat.streaming.model import AiChatModel, ModelStreamEvent
 from app.ai_chat.tools.buffer import AssembledToolCall
-from app.ai_chat.tools.handler import ToolHandler
+from app.ai_chat.tools.handler import ToolContext, ToolHandler
 from app.ai_chat.tools.lifecycle import ToolDispatch, ToolLifecycle
 from app.ai_chat.types import JsonObject
 
@@ -48,20 +48,12 @@ class AiChatRuntime:
     async def receive_tool_call(
         self,
         *,
-        conversation_id: int,
-        run_id: int,
-        subject: JsonObject,
-        target: JsonObject,
+        context: ToolContext,
         call: AssembledToolCall,
-        adapter_context: JsonObject | None = None,
     ) -> ToolDispatch:
         """通过对应处理器持久化并分派已组装的工具调用。"""
         return await self.tool_lifecycle.receive(
-            conversation_id=conversation_id,
-            run_id=run_id,
-            subject=subject,
-            target=target,
+            context=context,
             call=call,
-            handlers=dict(self.tool_handlers),
-            adapter_context=adapter_context or {},
+            handlers=self.tool_handlers,
         )

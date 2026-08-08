@@ -7,7 +7,7 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config_cache import get_content_language
-from app.models import ExperienceItem
+from app.experience.models import ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
 from app.experience.schemas.evidence_items import EvidenceRead

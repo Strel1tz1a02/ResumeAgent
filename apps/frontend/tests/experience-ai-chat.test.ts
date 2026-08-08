@@ -37,7 +37,7 @@ describe('experience AI chat API', () => {
         new Response(
           JSON.stringify({
             conversation_id: 8,
-            target: { key: 'background', ref_id: null },
+            scope: { field: 'background' },
             field_status: 'incomplete',
             revision: 2,
           }),
@@ -47,15 +47,20 @@ describe('experience AI chat API', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      createExperienceConversation(7, { key: 'background', ref_id: null })
-    ).resolves.toMatchObject({ conversation_id: 8, revision: 2 });
+    await expect(createExperienceConversation(7, { field: 'background' })).resolves.toMatchObject({
+      conversation_id: 8,
+      revision: 2,
+    });
     await closeExperienceConversation(8, 'left_field');
 
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       '/api/v1/experience-ai-chat/conversations',
       '/api/v1/experience-ai-chat/conversations/8/close',
     ]);
+    const createOptions = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(createOptions.body).toBe(
+      JSON.stringify({ experience_id: 7, scope: { field: 'background' } })
+    );
   });
 
   it('parses fragmented text and atomic proposal SSE events', async () => {
@@ -65,7 +70,7 @@ describe('experience AI chat API', () => {
         sseResponse([
           ': 代理刷新填充\r\n\r\nevent: assistant.started\r\ndata: {"message_id":1}\r\n\r\nevent: assistant.',
           'delta\ndata: {"text":"你好"}\n\nevent: content_change.requested\n',
-          'data: {"proposal_id":4,"tool_name":"content_change","proposal":{"operation":"content_change","target":{"key":"background","ref_id":null},"suggested_content":"新值"}}\n\n',
+          'data: {"proposal_id":4,"tool_name":"content_change","proposal":{"scope":{"field":"background","evidence_id":null},"suggested_content":"新值"}}\n\n',
         ])
       );
     vi.stubGlobal('fetch', fetchMock);

@@ -164,14 +164,14 @@ export function ExperienceEditor({
       setBaseline(server);
       patchMutation.reset();
     } else {
-      const appliedTarget = chat.lastBusinessEvent?.data.target as
-        { key?: string; ref_id?: number | null } | undefined;
+      const appliedScope = chat.lastBusinessEvent?.data.scope as
+        { field?: string; evidence_id?: number | null } | undefined;
       setDraft((current) => {
         const next = { ...current };
         for (const key of Object.keys(server) as DraftKey[]) {
           if (
             sameField(key, current, baseline) ||
-            (appliedTarget?.ref_id == null && appliedTarget?.key === key)
+            (appliedScope?.evidence_id == null && appliedScope?.field === key)
           ) {
             next[key] = server[key] as never;
           }
@@ -208,9 +208,9 @@ export function ExperienceEditor({
     patchMutation.mutate(payloadFor(draft, keys, experience));
   };
   const saveUnit = (key: DraftKey) => saveKeys(units[key]);
-  const locked = (key: DraftKey) => chat.isTargetLocked({ key, ref_id: null });
+  const locked = (key: DraftKey) => chat.isScopeLocked({ field: key, evidence_id: null });
   const entryProps = (key: DraftKey) => ({
-    target: { key, ref_id: null },
+    scope: { field: key },
     state: stateFor(key),
     dirty: unitDirty(key),
     onSave: () => saveUnit(key),

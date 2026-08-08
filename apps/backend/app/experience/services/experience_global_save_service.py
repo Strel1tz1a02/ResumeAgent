@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EvidenceItem
+from app.experience.models import EvidenceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
 from app.experience.schemas.experiences import ExperienceDetail, ExperienceGlobalSave

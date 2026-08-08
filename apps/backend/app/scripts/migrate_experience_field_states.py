@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import Engine, inspect, text
 
-from app.models import Base, _utcnow_iso
+from app.models import Base
+from app.experience.models import utcnow_iso
 from app.experience.services.experience_fields import (
     EVIDENCE_TARGET_KEYS,
     EXPERIENCE_TARGET_KEYS,
@@ -55,7 +56,7 @@ def migrate(engine: Engine) -> None:
                         "experience_id": experience_id,
                         "target_key": key,
                         "status": field_status(key, experience.get(key), experience),
-                        "now": _utcnow_iso(),
+                        "now": utcnow_iso(),
                     },
                 )
             evidence_ids = experience.get("evidence_ids") or []
@@ -81,7 +82,7 @@ def migrate(engine: Engine) -> None:
                             "target_key": key,
                             "ref_id": int(evidence_id),
                             "status": field_status(key, evidence.get(key), evidence),
-                            "now": _utcnow_iso(),
+                            "now": utcnow_iso(),
                         },
                     )
             connection.execute(
@@ -93,10 +94,10 @@ def migrate(engine: Engine) -> None:
                 {
                     "experience_id": experience_id,
                     "status": "complete" if evidence_ids else "incomplete",
-                    "now": _utcnow_iso(),
+                    "now": utcnow_iso(),
                 },
             )
         connection.execute(
             text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :now)"),
-            {"name": MIGRATION_NAME, "now": _utcnow_iso()},
+            {"name": MIGRATION_NAME, "now": utcnow_iso()},
         )

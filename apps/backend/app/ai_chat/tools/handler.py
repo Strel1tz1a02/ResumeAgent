@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.types import JsonObject
-from app.ai_chat.tools.results import ToolResult, ToolValidation
+from app.ai_chat.tools.results import ToolInvocationResult, ToolResult
 
 
 @dataclass(frozen=True)
@@ -17,10 +17,10 @@ class ToolContext:
 
     conversation_id: int
     run_id: int
-    tool_call_id: int | None
     subject: JsonObject
-    target: JsonObject
+    scope: JsonObject
     adapter_context: JsonObject = field(default_factory=dict)
+    tool_call_id: int | None = None
     session: AsyncSession | None = None
 
 
@@ -32,14 +32,13 @@ class ToolHandler(ABC):
     arguments_schema: type[BaseModel]
 
     @abstractmethod
-    async def invoke(self, context: ToolContext, arguments: BaseModel) -> ToolValidation:
+    async def invoke(self, context: ToolContext, arguments: BaseModel) -> ToolInvocationResult:
         """返回审批提案或立即生效的不透明结果。"""
 
     @abstractmethod
     async def resolve(
         self,
         context: ToolContext,
-        arguments: BaseModel,
         proposal_payload: JsonObject,
         guard_payload: JsonObject,
         decision: Literal["approve", "reject"],

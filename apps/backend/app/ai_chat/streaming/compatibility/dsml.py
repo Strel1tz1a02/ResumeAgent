@@ -32,7 +32,10 @@ _ATTRIBUTE_RE = re.compile(r'(?P<name>[a-zA-Z_][\w-]*)="(?P<value>[^"]*)"')
 
 def _attributes(value: str) -> dict[str, str]:
     """读取 DSML 标签属性。"""
-    return {match.group("name"): match.group("value") for match in _ATTRIBUTE_RE.finditer(value)}
+    return {
+        match.group("name"): match.group("value")
+        for match in _ATTRIBUTE_RE.finditer(value)
+    }
 
 
 def _parameter_value(raw: str, is_string: bool | None) -> Any:
@@ -92,7 +95,7 @@ def _parse_calls(value: str) -> tuple[list[AssembledToolCall], str]:
 
 
 @dataclass
-class TextToolCallFallback:
+class DsmlToolCallFallback:
     """流式隐藏可能的 DSML 前缀，结束时原子恢复 Tool Call。"""
 
     _buffer: str = field(default="", init=False)

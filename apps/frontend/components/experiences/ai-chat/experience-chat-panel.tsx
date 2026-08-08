@@ -22,7 +22,7 @@ export function ExperienceChatPanel() {
           <p className="font-mono text-xs font-bold uppercase tracking-widest text-primary">
             {t('experiences.ai.title')}
           </p>
-          <p className="font-mono text-[10px] uppercase text-ink-soft">{chat.target?.key}</p>
+          <p className="font-mono text-[10px] uppercase text-ink-soft">{chat.scope?.field}</p>
         </div>
         <Button size="sm" variant="outline" onClick={() => void chat.close()}>
           <X className="h-4 w-4" />

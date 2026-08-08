@@ -11,6 +11,8 @@ from langgraph.types import interrupt
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.model import TextDelta, ToolCallsCompleted
 from app.ai_chat.tools.buffer import AssembledToolCall
+from app.ai_chat.tools.handler import ToolContext
+from app.ai_chat.tools.lifecycle import ApprovalRequired, ToolCompleted
 from app.ai_chat.graph.state import ApprovalInput
 from app.ai_chat.types import JsonObject
 from app.experience.graph.state import ExperienceState
@@ -80,18 +82,39 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         """将完整 Tool Call 交给通用 Tool 生命周期。"""
         call = _dict_to_call(dict(state["tool_call"] or {}))
         dispatch = await runtime.receive_tool_call(
-            conversation_id=state["conversation_id"],
-            run_id=state["run_id"],
-            subject=state["subject"],
-            target=state["target"],
+            context=ToolContext(
+                conversation_id=state["conversation_id"],
+                run_id=state["run_id"],
+                subject=state["subject"],
+                scope=state["scope"],
+                adapter_context={
+                    "revision_snapshot": state["revision_snapshot"]
+                },
+            ),
             call=call,
-            adapter_context={"revision_snapshot": state["revision_snapshot"]},
         )
-        if dispatch.event is not None:
-            _emit(dispatch.event.event, dispatch.event.data)
-        return {
-            "proposal_id": dispatch.tool_call_id if dispatch.awaits_approval else None
-        }
+        if isinstance(dispatch, ApprovalRequired):
+            _emit(
+                "proposal.requested",
+                {
+                    "proposal_id": dispatch.tool_call_id,
+                    "tool_name": call.name,
+                    "proposal": dispatch.proposal_payload,
+                },
+            )
+            return {"proposal_id": dispatch.tool_call_id}
+        if isinstance(dispatch, ToolCompleted):
+            outcome = dispatch.result.get("outcome")
+            event_name = (
+                f"{call.name}.{outcome}"
+                if isinstance(outcome, str)
+                else f"{call.name}.completed"
+            )
+            _emit(
+                event_name,
+                {"tool_call_id": dispatch.tool_call_id, **dispatch.result},
+            )
+        return {"proposal_id": None}
 
     def route_after_tool(state: ExperienceState) -> Literal["approval", "done"]:
         """只有需要用户审批的 Tool Call 才进入审批节点。"""

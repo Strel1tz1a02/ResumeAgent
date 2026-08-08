@@ -25,17 +25,10 @@ class ApprovalProposal:
 
 
 @dataclass(frozen=True)
-class ImmediateToolResult:
-    """无需用户审批的不透明 Tool Result。"""
-
-    payload: JsonObject
-
-
-@dataclass(frozen=True)
 class ToolResult:
-    """审批决定后产生的不透明 Tool Result。"""
+    """无需审批或审批决定后产生的不透明 Tool Result。"""
 
     payload: JsonObject
 
 
-ToolValidation = ApprovalProposal | ImmediateToolResult
+ToolInvocationResult = ApprovalProposal | ToolResult

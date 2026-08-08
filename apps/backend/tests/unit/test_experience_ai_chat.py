@@ -14,17 +14,18 @@ from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.services import AiChatService
 from app.ai_chat.streaming.events import AiChatEvent
+from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
 from app.ai_chat.tools.buffer import AssembledToolCall
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolContext
-from app.ai_chat.tools.results import ApprovalProposal
-from app.ai_chat.tools.lifecycle import ToolLifecycle
-from app.ai_chat.types import SubjectRef, TargetRef
+from app.ai_chat.tools.results import ApprovalProposal, ToolResult
+from app.ai_chat.tools.lifecycle import ApprovalRequired, ToolCompleted, ToolLifecycle
+from app.ai_chat.types import ScopeRef, SubjectRef
 from app.database import Database
 from app.experience import ExperienceAdapter
-from app.experience.graph import ExperienceState
-from app.experience.graph.prompts import system_prompt
+from app.experience.graph import ExperienceState, build_experience_graph
+from app.experience.prompts.ai_chat import system_prompt
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeHandler,
@@ -37,6 +38,18 @@ from app.experience.services.experience_service import ExperienceConflictError, 
 from app.scripts.migrate_unified_experience_revision_units import (
     MIGRATION_NAME as UNIFIED_REVISION_MIGRATION,
     migrate as migrate_unified_revision_units,
+)
+from app.scripts.migrate_ai_chat_tool_call_index import (
+    MIGRATION_NAME as AI_CHAT_TOOL_INDEX_MIGRATION,
+    migrate as migrate_ai_chat_tool_call_index,
+)
+from app.scripts.migrate_ai_chat_conversation_scope import (
+    MIGRATION_NAME as AI_CHAT_SCOPE_MIGRATION,
+    migrate as migrate_ai_chat_conversation_scope,
+)
+from app.scripts.migrate_experience_chat_scope_field import (
+    MIGRATION_NAME as EXPERIENCE_CHAT_SCOPE_FIELD_MIGRATION,
+    migrate as migrate_experience_chat_scope_field,
 )
 
 
@@ -61,7 +74,7 @@ class _ConversationModel:
                     provider_id="call-1",
                     name="content_change",
                     arguments={
-                        "target": {"key": "background", "evidence_id": None},
+                        "scope": {"field": "background", "evidence_id": None},
                         "suggested_content": "新背景",
                     },
                 ),
@@ -70,15 +83,37 @@ class _ConversationModel:
         yield ModelCompleted("tool_calls")
 
 
-class _ImmediateContinuationRunner:
-    """模拟未来业务 Graph 在审批恢复后继续生成模型文本。"""
+class _ResultOnlyResumeRunner:
+    """模拟业务 Graph 在审批恢复后只发出工具结果。"""
 
-    async def stream(self, **kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["resume"]["decision"] == "reject"
-        yield AiChatEvent("assistant.delta", {"text": "已根据工具结果继续处理"})
+    async def resume(self, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["approval"]["decision"] == "reject"
+        yield AiChatEvent("content_change.rejected", {"outcome": "rejected"})
 
     async def ensure_interrupted(self, **kwargs):  # type: ignore[no-untyped-def]
         return True
+
+
+class _ImmediateToolRuntime:
+    """让经历 Graph 收到一个无需审批的工具结果。"""
+
+    async def stream_model(self, **kwargs):  # type: ignore[no-untyped-def]
+        yield ToolCallsCompleted(
+            (
+                AssembledToolCall(
+                    index=0,
+                    provider_id="immediate-call",
+                    name="content_change",
+                    arguments={
+                        "scope": {"field": "background", "evidence_id": None},
+                        "suggested_content": "原值",
+                    },
+                ),
+            )
+        )
+
+    async def receive_tool_call(self, **kwargs):  # type: ignore[no-untyped-def]
+        return ToolCompleted(tool_call_id=7, result={"outcome": "no_change"})
 
 
 async def test_create_initializes_states_and_group_revision(isolated_db) -> None:
@@ -124,7 +159,7 @@ async def test_content_change_routes_field_proposal_and_apply(isolated_db) -> No
         run_id=1,
         tool_call_id=1,
         subject={"type": "experience", "id": str(created.experience_id)},
-        target={"key": "background", "ref_id": None},
+        scope={"field": "background"},
         adapter_context={
             "revision_snapshot": {
                 "scope": "field",
@@ -134,17 +169,17 @@ async def test_content_change_routes_field_proposal_and_apply(isolated_db) -> No
     )
     handler = ContentChangeHandler()
     arguments = ContentChangeArguments(
-        target={"key": "background", "evidence_id": None},
+        scope={"field": "background", "evidence_id": None},
         suggested_content="新背景",
     )
     proposal = await handler.invoke(
         context, arguments
     )
     assert isinstance(proposal, ApprovalProposal)
+    assert proposal.proposal_payload["current_content"] == "旧背景"
     async with isolated_db.session() as session:
         result = await handler.resolve(
             replace(context, session=session),
-            arguments,
             proposal.proposal_payload,
             proposal.guard_payload,
             "approve",
@@ -155,7 +190,7 @@ async def test_content_change_routes_field_proposal_and_apply(isolated_db) -> No
 
 
 async def test_change_validation_is_owned_by_service(isolated_db) -> None:
-    """模型 target 与会话绑定不一致时由 Service 返回 invalid_target。"""
+    """模型 scope 与会话绑定不一致时由 Service 返回 invalid_scope。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
             ExperienceCreate(title="Agent", background="旧背景")
@@ -167,11 +202,56 @@ async def test_change_validation_is_owned_by_service(isolated_db) -> None:
             "notes",
             None,
             "越权修改",
-            bound_key="background",
-            bound_ref_id=None,
+            scope_field="background",
             expected_revision=state.revision,
         )
-    assert result == {"outcome": "invalid_target", "operation": "content_change"}
+    assert result == {"outcome": "invalid_scope"}
+
+
+async def test_content_change_routes_by_requested_scope(
+    isolated_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tool 按模型提交的 scope 选服务，业务 Service 再校验会话范围。"""
+    called: list[str] = []
+
+    async def prepare_evidence_append(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        called.append("evidence_append")
+        return {"outcome": "invalid_scope"}
+
+    async def prepare_field_change(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        called.append("field_change")
+        return {"outcome": "invalid_scope"}
+
+    monkeypatch.setattr(
+        ExperienceAiMutationService,
+        "prepare_evidence_append",
+        prepare_evidence_append,
+    )
+    monkeypatch.setattr(
+        ExperienceAiMutationService,
+        "prepare_field_change",
+        prepare_field_change,
+    )
+    context = ToolContext(
+        conversation_id=1,
+        run_id=1,
+        tool_call_id=1,
+        subject={"type": "experience", "id": "1"},
+        scope={"field": "background"},
+        adapter_context={
+            "revision_snapshot": {"scope": "field", "revision": 0},
+        },
+    )
+    result = await ContentChangeHandler().invoke(
+        context,
+        ContentChangeArguments(
+            scope={"field": "evidence", "evidence_id": None},
+            suggested_content={"action": "行动", "result": None, "metrics": None},
+        ),
+    )
+    assert isinstance(result, ToolResult)
+    assert result.payload == {"outcome": "invalid_scope"}
+    assert called == ["evidence_append"]
 
 
 async def test_content_change_routes_evidence_append(isolated_db) -> None:
@@ -184,7 +264,7 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
         run_id=2,
         tool_call_id=2,
         subject={"type": "experience", "id": str(created.experience_id)},
-        target={"key": "evidence", "ref_id": None},
+        scope={"field": "evidence"},
         adapter_context={
             "revision_snapshot": {
                 "scope": "evidence",
@@ -194,7 +274,7 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
         },
     )
     arguments = ContentChangeArguments(
-        target={"key": "evidence", "evidence_id": None},
+        scope={"field": "evidence", "evidence_id": None},
         suggested_content={
             "action": "搭建发布流水线",
             "result": "自动发布",
@@ -207,7 +287,6 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
     async with isolated_db.session() as session:
         result = await handler.resolve(
             replace(context, session=session),
-            arguments,
             proposal.proposal_payload,
             proposal.guard_payload,
             "approve",
@@ -252,7 +331,7 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
         run_id=3,
         tool_call_id=3,
         subject={"type": "experience", "id": str(created.experience_id)},
-        target={"key": "evidence", "ref_id": None},
+        scope={"field": "evidence"},
         adapter_context={
             "revision_snapshot": {
                 "scope": "evidence",
@@ -262,7 +341,7 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
         },
     )
     arguments = ContentChangeArguments(
-        target={"key": "evidence", "evidence_id": first.id},
+        scope={"field": "evidence", "evidence_id": first.id},
         suggested_content={
             "action": "新行动一",
             "result": "新结果一",
@@ -275,13 +354,15 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
     async with isolated_db.session() as session:
         result = await handler.resolve(
             replace(context, session=session),
-            arguments,
             proposal.proposal_payload,
             proposal.guard_payload,
             "approve",
         )
         await session.commit()
-    assert result.payload["target"] == {"key": "evidence", "ref_id": first.id}
+    assert result.payload["scope"] == {
+        "field": "evidence",
+        "evidence_id": first.id,
+    }
     async with isolated_db.session() as session:
         detail = await ExperienceService(session).get(created.experience_id)
     updated_first, unchanged_second = detail.evidence_items
@@ -316,14 +397,14 @@ async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> No
     adapter = ExperienceAdapter()
     binding = await adapter.validate_binding(
         SubjectRef(type="experience", id=str(created.experience_id)),
-        TargetRef(key="evidence", ref_id=None),
+        ScopeRef.model_validate({"field": "evidence"}),
     )
     state = await adapter.parse_input(
         {
             "conversation_id": 10,
             "run_id": 10,
             "subject": binding.subject.model_dump(mode="json"),
-            "target": binding.target.model_dump(mode="json"),
+            "scope": binding.scope.model_dump(mode="json"),
             "language": "zh",
             "run_kind": "user_turn",
             "tools_enabled": True,
@@ -354,10 +435,42 @@ def test_graph_has_only_llm_tool_executor_and_approver() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generic_service_preserves_graph_driven_immediate_continuation(
+async def test_graph_emits_immediate_tool_result() -> None:
+    """无需审批的 Tool Result 在当前轮立即成为业务事件。"""
+    graph = build_experience_graph(_ImmediateToolRuntime()).compile()  # type: ignore[arg-type]
+    state = ExperienceState(
+        conversation_id=1,
+        run_id=1,
+        subject={"type": "experience", "id": "1"},
+        scope={"field": "background"},
+        run_kind="user_turn",
+        tools_enabled=True,
+        revision_snapshot={"scope": "field", "revision": 0},
+        model_messages=[],
+        tool_call=None,
+        proposal_id=None,
+    )
+    parts = [
+        part
+        async for part in graph.astream(
+            state,
+            stream_mode=["custom"],
+            version="v2",
+        )
+    ]
+    assert any(
+        part.get("type") == "custom"
+        and part.get("data", {}).get("event") == "content_change.no_change"
+        and part["data"]["data"]["tool_call_id"] == 7
+        for part in parts
+    )
+
+
+@pytest.mark.asyncio
+async def test_generic_service_forwards_graph_result_without_assistant_continuation(
     isolated_db,
 ) -> None:
-    """其他业务 Graph 输出续答时，通用层仍流式发送、持久化并消费 Tool Result。"""
+    """审批恢复只转发业务结果，不创建虚假的助手续答。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
             ExperienceCreate(title="工具续答验证")
@@ -369,14 +482,14 @@ async def test_generic_service_preserves_graph_driven_immediate_continuation(
     lifecycle = ToolLifecycle(repositories)
     service = AiChatService(
         registry,
-        _ImmediateContinuationRunner(),  # type: ignore[arg-type]
+        _ResultOnlyResumeRunner(),  # type: ignore[arg-type]
         lifecycle,
         repositories,
     )
     conversation_id = await service.create_conversation(
         "ExperienceAdapter",
         {"type": "experience", "id": str(created.experience_id)},
-        {"key": "background", "ref_id": None},
+        {"field": "background"},
     )
     async with isolated_db.session() as session:
         repos = repositories.create(session)
@@ -393,10 +506,11 @@ async def test_generic_service_preserves_graph_driven_immediate_continuation(
         call = await repos.tool_calls.create(
             conversation_id=conversation_id,
             run_id=run.id,
+            tool_call_index=0,
             provider_tool_call_id="future-tool-call",
             tool_name="content_change",
             arguments={
-                "target": {"key": "background", "evidence_id": None},
+                "scope": {"field": "background", "evidence_id": None},
                 "suggested_content": "不会被应用",
             },
         )
@@ -418,9 +532,7 @@ async def test_generic_service_preserves_graph_driven_immediate_continuation(
     ]
     assert [event.event for event in events] == [
         "proposal.resolved",
-        "assistant.started",
-        "assistant.delta",
-        "assistant.completed",
+        "content_change.rejected",
     ]
     async with isolated_db.session() as session:
         repos = repositories.create(session)
@@ -428,10 +540,10 @@ async def test_generic_service_preserves_graph_driven_immediate_continuation(
         finished_run = await repos.runs.get(run.id)
         messages = await repos.messages.list_completed(conversation_id)
         assert resolved is not None
-        assert resolved.delivery_status == "consumed"
+        assert resolved.delivery_status == "pending"
         assert finished_run is not None
         assert finished_run.status == "completed"
-        assert messages[-1].content == "已根据工具结果继续处理"
+        assert messages == []
 
 
 def test_experience_state_and_tool_description_have_separate_roles() -> None:
@@ -440,7 +552,7 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
         conversation_id=1,
         run_id=1,
         subject={"type": "experience", "id": "1"},
-        target={"key": "background", "ref_id": None},
+        scope={"field": "background"},
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": 0},
@@ -452,6 +564,106 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
     assert state["revision_snapshot"]["revision"] == 0
     assert "suggested_content" in handler.description
     assert "content_change" not in system_prompt("zh", "background")
+
+
+def test_dsml_compatibility_recovers_atomic_tool_call() -> None:
+    """提供方泄漏的 DSML 被隔离解析，正文中不展示协议标签。"""
+    fallback = DsmlToolCallFallback()
+    visible = fallback.feed("说明<｜｜DSML｜｜tool_calls>")
+    visible += fallback.feed(
+        '<｜｜DSML｜｜invoke name="content_change">'
+        '<｜｜DSML｜｜parameter name="scope" string="false">'
+        '{"field":"background","evidence_id":null}'
+        '</｜｜DSML｜｜parameter>'
+        '<｜｜DSML｜｜parameter name="suggested_content" string="true">新背景'
+        '</｜｜DSML｜｜parameter>'
+        '</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>结束'
+    )
+    calls, trailing = fallback.finish()
+
+    assert visible + trailing == "说明结束"
+    assert len(calls) == 1
+    assert calls[0].provider_id is None
+    assert calls[0].name == "content_change"
+    assert calls[0].arguments == {
+        "scope": {"field": "background", "evidence_id": None},
+        "suggested_content": "新背景",
+    }
+
+
+async def test_tool_call_run_index_is_idempotent_without_provider_id(
+    isolated_db,
+) -> None:
+    """无 provider ID 的兼容调用也能重放，并且 resolved 优先于旧提案。"""
+    async with isolated_db.session() as session:
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Tool 重放", background="旧背景")
+        )
+        repositories = RepositoryFactory().create(session)
+        conversation = await repositories.conversations.create(
+            adapter="ExperienceAdapter",
+            subject={"type": "experience", "id": str(created.experience_id)},
+            scope={"field": "background"},
+            language="zh",
+        )
+        run = await repositories.runs.create(
+            conversation_id=conversation.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        await session.commit()
+
+    handler = ContentChangeHandler()
+    handlers = {handler.name: handler}
+    lifecycle = ToolLifecycle(RepositoryFactory())
+    call = AssembledToolCall(
+        index=0,
+        provider_id=None,
+        name="content_change",
+        arguments={
+            "scope": {"field": "background", "evidence_id": None},
+            "suggested_content": "新背景",
+        },
+    )
+    receive_kwargs = {
+        "context": ToolContext(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            subject={"type": "experience", "id": str(created.experience_id)},
+            scope={"field": "background"},
+            adapter_context={
+                "revision_snapshot": {"scope": "field", "revision": 0}
+            },
+        ),
+        "call": call,
+        "handlers": handlers,
+    }
+
+    first = await lifecycle.receive(**receive_kwargs)
+    replay = await lifecycle.receive(**receive_kwargs)
+    provider_replay = await lifecycle.receive(
+        **{**receive_kwargs, "call": replace(call, provider_id="retry-generated-id")}
+    )
+    assert isinstance(first, ApprovalRequired)
+    assert isinstance(replay, ApprovalRequired)
+    assert isinstance(provider_replay, ApprovalRequired)
+    assert replay.tool_call_id == first.tool_call_id
+    assert provider_replay.tool_call_id == first.tool_call_id
+
+    result = await lifecycle.resolve(
+        tool_call_id=first.tool_call_id,
+        decision="reject",
+        handlers=handlers,
+        subject=receive_kwargs["context"].subject,
+        scope=receive_kwargs["context"].scope,
+        client_resolution_id="resolution-without-provider-id",
+    )
+    assert result["outcome"] == "rejected"
+
+    resolved_replay = await lifecycle.receive(**receive_kwargs)
+    assert isinstance(resolved_replay, ToolCompleted)
+    assert resolved_replay.tool_call_id == first.tool_call_id
+    assert resolved_replay.result["outcome"] == "rejected"
 
 
 def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path) -> None:
@@ -513,6 +725,9 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
         "2026_08_03_experience_evidence_items",
         "2026_08_04_experience_revisions",
         "2026_08_05_unified_experience_revision_units",
+        "2026_08_07_ai_chat_tool_call_index",
+        "2026_08_08_ai_chat_conversation_scope",
+        "2026_08_08_experience_chat_scope_field",
     }
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
     assert {
@@ -575,6 +790,119 @@ def test_migration_unifies_existing_save_unit_and_evidence_scopes(tmp_path) -> N
     assert migration == UNIFIED_REVISION_MIGRATION
 
 
+def test_migration_backfills_ai_chat_tool_call_index(tmp_path) -> None:
+    """旧 Tool Call 按 Run 内写入顺序获得稳定且唯一的索引。"""
+    path = tmp_path / "legacy-ai-chat-tools.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE ai_chat_tool_calls ("
+            "id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO ai_chat_tool_calls (id, run_id) VALUES (?, ?)",
+            [(10, 7), (12, 8), (11, 7)],
+        )
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        migrate_ai_chat_tool_call_index(engine)
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT id, run_id, tool_call_index "
+                "FROM ai_chat_tool_calls ORDER BY run_id, id"
+            ).all()
+            migration = connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE name = ?",
+                (AI_CHAT_TOOL_INDEX_MIGRATION,),
+            ).scalar_one()
+            indexes = {
+                row[1]: bool(row[2])
+                for row in connection.exec_driver_sql(
+                    "PRAGMA index_list(ai_chat_tool_calls)"
+                ).all()
+            }
+    finally:
+        engine.dispose()
+
+    assert rows == [(10, 7, 0), (11, 7, 1), (12, 8, 0)]
+    assert indexes["ux_ai_chat_tool_run_index"] is True
+    assert migration == AI_CHAT_TOOL_INDEX_MIGRATION
+
+
+def test_migration_renames_ai_chat_conversation_target_to_scope(tmp_path) -> None:
+    """旧会话数据原样迁移到语义统一的 scope 列。"""
+    path = tmp_path / "legacy-ai-chat-conversations.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE ai_chat_conversations ("
+            "id INTEGER PRIMARY KEY, target JSON NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO ai_chat_conversations (id, target) VALUES (?, ?)",
+            (1, '{"key":"background","ref_id":null}'),
+        )
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        migrate_ai_chat_conversation_scope(engine)
+        with engine.connect() as connection:
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(ai_chat_conversations)"
+                ).all()
+            }
+            payload = connection.exec_driver_sql(
+                "SELECT scope FROM ai_chat_conversations WHERE id = 1"
+            ).scalar_one()
+            migration = connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE name = ?",
+                (AI_CHAT_SCOPE_MIGRATION,),
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert "scope" in columns
+    assert "target" not in columns
+    assert payload == '{"key":"background","ref_id":null}'
+    assert migration == AI_CHAT_SCOPE_MIGRATION
+
+
+def test_migration_normalizes_experience_chat_scope_to_field(tmp_path) -> None:
+    """旧经历会话只保留其会话字段，不再保存无效 ref_id。"""
+    path = tmp_path / "legacy-experience-chat-scope.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE ai_chat_conversations ("
+            "id INTEGER PRIMARY KEY, adapter VARCHAR NOT NULL, scope JSON NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO ai_chat_conversations (id, adapter, scope) VALUES (?, ?, ?)",
+            (
+                1,
+                "ExperienceAdapter",
+                '{"key":"evidence","ref_id":null}',
+            ),
+        )
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        migrate_experience_chat_scope_field(engine)
+        with engine.connect() as connection:
+            payload = connection.exec_driver_sql(
+                "SELECT scope FROM ai_chat_conversations WHERE id = 1"
+            ).scalar_one()
+            migration = connection.exec_driver_sql(
+                "SELECT name FROM schema_migrations WHERE name = ?",
+                (EXPERIENCE_CHAT_SCOPE_FIELD_MIGRATION,),
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert payload == '{"field":"evidence"}'
+    assert migration == EXPERIENCE_CHAT_SCOPE_FIELD_MIGRATION
+
+
 async def test_real_graph_interrupt_approve_and_deferred_tool_result(
     isolated_db, tmp_path
 ) -> None:
@@ -597,7 +925,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         conversation_id = await service.create_conversation(
             "ExperienceAdapter",
             {"type": "experience", "id": str(created.experience_id)},
-            {"key": "background", "ref_id": None},
+            {"field": "background"},
         )
         stream = service.stream_message(conversation_id, "请改写背景", "message-1")
         events = []
@@ -630,9 +958,9 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         resolved_before_continuation = await lifecycle.resolve(
             tool_call_id=proposal_id,
             decision="approve",
-            handler=adapter.get_tool_handlers()["content_change"],
+            handlers=adapter.get_tool_handlers(),
             subject={"type": "experience", "id": str(created.experience_id)},
-            target={"key": "background", "ref_id": None},
+            scope={"field": "background"},
             client_resolution_id="resolution-1",
         )
         assert resolved_before_continuation["outcome"] == "applied"

@@ -4,7 +4,7 @@ from app.experience.schemas.ai_chat import (
     ConversationCloseRequest,
     ConversationCreateRequest,
     ConversationCreateResponse,
-    ExperienceChatTarget,
+    ExperienceChatScope,
     MessageRequest,
     ProposalResolutionRequest,
 )
@@ -20,7 +20,7 @@ __all__ = [
     "ConversationCloseRequest",
     "ConversationCreateRequest",
     "ConversationCreateResponse",
-    "ExperienceChatTarget",
+    "ExperienceChatScope",
     "EvidenceCreate",
     "EvidenceCreateRequest",
     "EvidenceRead",

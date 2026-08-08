@@ -33,7 +33,7 @@ class AiChatConversation(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     adapter: Mapped[str] = mapped_column(String(160), index=True)
     subject: Mapped[dict[str, Any]] = mapped_column(JSON)
-    target: Mapped[dict[str, Any]] = mapped_column(JSON)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     language: Mapped[str] = mapped_column(String(8), default="zh")
     end_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -134,6 +134,7 @@ class AiChatToolCall(Base):
     run_id: Mapped[int] = mapped_column(
         ForeignKey("ai_chat_runs.id", ondelete="CASCADE"), index=True
     )
+    tool_call_index: Mapped[int] = mapped_column(Integer)
     provider_tool_call_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tool_name: Mapped[str] = mapped_column(String(160))
     arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -160,6 +161,12 @@ class AiChatToolCall(Base):
         CheckConstraint(
             "delivery_status IS NULL OR delivery_status IN ('pending', 'consumed')",
             name="ck_ai_chat_tool_delivery",
+        ),
+        Index(
+            "ux_ai_chat_tool_run_index",
+            "run_id",
+            "tool_call_index",
+            unique=True,
         ),
         Index(
             "ux_ai_chat_tool_provider_call",

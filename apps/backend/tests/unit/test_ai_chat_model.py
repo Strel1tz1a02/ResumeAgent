@@ -37,8 +37,8 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
     """DeepSeek 把 DSML 泄漏到正文时仍进入标准 Tool 生命周期。"""
     dsml = (
         '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="content_change">'
-        '<｜｜DSML｜｜parameter name="target" string="false">'
-        '{"key":"technologies","ref_id":null}'
+        '<｜｜DSML｜｜parameter name="scope" string="false">'
+        '{"field":"technologies","evidence_id":null}'
         '</｜｜DSML｜｜parameter>'
         '<｜｜DSML｜｜parameter name="suggested_content" string="false">'
         '["Python","FastAPI"]'
@@ -63,17 +63,17 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
     completed = next(event for event in events if isinstance(event, ToolCallsCompleted))
     assert completed.calls[0].name == "content_change"
     assert completed.calls[0].arguments == {
-        "target": {"key": "technologies", "ref_id": None},
+        "scope": {"field": "technologies", "evidence_id": None},
         "suggested_content": ["Python", "FastAPI"],
     }
     assert isinstance(events[-1], ModelCompleted)
 
 
-def test_content_change_schema_is_explicit_and_accepts_legacy_ref_id() -> None:
-    """模型看到明确内容类型，同时兼容已生成的 ref_id 参数名。"""
+def test_content_change_schema_uses_explicit_field_and_evidence_id() -> None:
+    """模型看到明确的字段和 EvidenceItem 标识。"""
     arguments = ContentChangeArguments.model_validate(
         {
-            "target": {"key": "evidence", "ref_id": 7},
+            "scope": {"field": "evidence", "evidence_id": 7},
             "suggested_content": {
                 "action": "优化召回链路",
                 "result": "相关度提升",
@@ -81,7 +81,7 @@ def test_content_change_schema_is_explicit_and_accepts_legacy_ref_id() -> None:
             },
         }
     )
-    assert arguments.target.evidence_id == 7
+    assert arguments.scope.evidence_id == 7
     schema = ContentChangeHandler().schema()
-    assert schema["properties"]["target"]["$ref"]
+    assert schema["properties"]["scope"]["$ref"]
     assert "anyOf" in schema["properties"]["suggested_content"]

@@ -3,13 +3,13 @@
 import { useState, type FocusEvent, type PropsWithChildren } from 'react';
 import Sparkles from 'lucide-react/dist/esm/icons/sparkles';
 import { Button } from '@/components/ui/button';
-import type { ExperienceChatTarget } from '@/lib/api/experience-ai-chat';
+import type { ExperienceChatScope } from '@/lib/api/experience-ai-chat';
 import type { ExperienceFieldState } from '@/lib/api/experiences';
 import { useTranslations } from '@/lib/i18n';
 import { useExperienceAiChat } from './use-experience-ai-chat';
 
 export function FieldAiEntry({
-  target,
+  scope,
   state,
   children,
   onSave,
@@ -18,7 +18,7 @@ export function FieldAiEntry({
   showAiStart = true,
   className = '',
 }: PropsWithChildren<{
-  target: ExperienceChatTarget;
+  scope: ExperienceChatScope;
   state?: ExperienceFieldState;
   onSave?: () => void;
   saveDisabled?: boolean;
@@ -36,7 +36,7 @@ export function FieldAiEntry({
       setConfirming(false);
     }
   };
-  const active = chat.target?.key === target.key && chat.target.ref_id === target.ref_id;
+  const active = chat.scope?.field === scope.field;
   return (
     <div
       className={`relative border-l-4 pl-2 ${state?.status === 'complete' ? 'border-success' : 'border-warning'} ${className}`}
@@ -83,7 +83,7 @@ export function FieldAiEntry({
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setConfirming(false);
-                void chat.start(target);
+                void chat.start(scope);
               }}
             >
               {t('experiences.ai.startConfirmAction')}

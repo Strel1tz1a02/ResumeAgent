@@ -24,7 +24,7 @@ from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.tools.lifecycle import ToolLifecycle
 from app.ai_chat.graph.state import AdapterInput, ApprovalInput
 from app.ai_chat.tools.results import PendingToolResult
-from app.ai_chat.types import JsonObject, SubjectRef, TargetRef
+from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +45,24 @@ class AiChatService:
         self._tool_lifecycle = tool_lifecycle
         self._repositories = repositories
 
-    async def create_conversation( self,adapter_name: str,subject: JsonObject,target: JsonObject,language: str = "zh", ) -> int:
+    async def create_conversation(
+        self,
+        adapter_name: str,
+        subject: JsonObject,
+        scope: JsonObject,
+        language: str = "zh",
+    ) -> int:
         """校验并持久化会话。"""
         adapter = self._registry.get(adapter_name)
-        binding = await adapter.validate_binding(SubjectRef.model_validate(subject), TargetRef.model_validate(target))
+        binding = await adapter.validate_binding(
+            SubjectRef.model_validate(subject),
+            ScopeRef.model_validate(scope),
+        )
         async with database_module.db.session() as session:
             row = await self._repositories.create(session).conversations.create(
                 adapter=adapter_name,
                 subject=binding.subject.model_dump(mode="json"),
-                target=binding.target.model_dump(mode="json"),
+                scope=binding.scope.model_dump(mode="json"),
                 language=language or "zh",
             )
             await session.commit()
@@ -179,7 +188,7 @@ class AiChatService:
                 "conversation_id": conversation.id,
                 "run_id": run_id,
                 "subject": conversation.subject,
-                "target": conversation.target,
+                "scope": conversation.scope,
                 "language": conversation.language,
                 "run_kind": kind,
                 "tools_enabled": tools_enabled,
@@ -196,7 +205,6 @@ class AiChatService:
         adapter_name: str,
         value: AdapterInput,
         assistant_id: int,
-        resume: JsonObject | ApprovalInput | None = None,
         silent_failure: bool = False,
     ) -> AsyncIterator[AiChatEvent]:
         """持久化完整响应，或记录可安全恢复的失败。"""
@@ -204,7 +212,7 @@ class AiChatService:
         suspended = False
         proposal_event: AiChatEvent | None = None
         try:
-            async for event in self._runner.stream(adapter_name=adapter_name, value=value, resume=resume):
+            async for event in self._runner.stream(adapter_name=adapter_name, value=value):
                 if event.event == "assistant.delta":
                     delta = event.data.get("text")
                     if isinstance(delta, str):
@@ -312,40 +320,19 @@ class AiChatService:
             call = await repository.get(proposal_id)
             if call is None:
                 raise ToolCallNotFoundError(str(proposal_id))
-            if call.status == "resolved":
-                if (
-                    call.client_resolution_id != client_resolution_id
-                    or call.decision != decision
-                ):
-                    raise IdempotencyConflictError(client_resolution_id)
-            elif call.status != "awaiting_approval":
-                raise ProposalStateError(str(proposal_id))
-            existing_resolution = await repository.get_by_resolution_id(
-                call.conversation_id, client_resolution_id
-            )
-            if existing_resolution is not None and existing_resolution.id != call.id:
-                raise IdempotencyConflictError(client_resolution_id)
             conversation = await repositories.conversations.get(call.conversation_id)
             run = await repositories.runs.get(call.run_id)
             if conversation is None or run is None:
                 raise ProposalStateError(str(proposal_id))
             adapter = self._registry.get(conversation.adapter)
-            handler = adapter.get_tool_handlers().get(call.tool_name)
-            if handler is None:
-                raise ProposalStateError(call.tool_name)
+            handlers = adapter.get_tool_handlers()
             subject = conversation.subject
-            target = conversation.target
+            scope = conversation.scope
             adapter_name = conversation.adapter
             conversation_id = conversation.id
             run_id = run.id
-            run_kind = run.kind
-            if call.status == "resolved" and run.status == "completed":
-                yield AiChatEvent(
-                    "proposal.resolved",
-                    {"proposal_id": proposal_id, "decision": decision},
-                )
-                return
-            recover_interrupt = run.status != "suspended"
+            already_completed = run.status == "completed"
+            recover_interrupt = run.status not in {"suspended", "completed"}
 
         if recover_interrupt:
             recovered = await self._runner.ensure_interrupted(
@@ -368,9 +355,9 @@ class AiChatService:
         tool_result = await self._tool_lifecycle.resolve(
             tool_call_id=proposal_id,
             decision=decision,
-            handler=handler,
+            handlers=handlers,
             subject=subject,
-            target=target,
+            scope=scope,
             client_resolution_id=client_resolution_id,
         )
 
@@ -380,6 +367,8 @@ class AiChatService:
             "proposal.resolved",
             {"proposal_id": proposal_id, "decision": decision},
         )
+        if already_completed:
+            return
 
         try:
             async with database_module.db.session() as session:
@@ -405,57 +394,13 @@ class AiChatService:
             "tool_result": tool_result,
         }
         try:
-            value = await self._build_input(
-                conversation_id,
-                run_id,
-                run_kind,
-                False,
-            )
-        except Exception:
-            logger.exception(
-                "AI Chat could not prepare proposal finalization: proposal=%s",
-                proposal_id,
-            )
-            async with database_module.db.session() as session:
-                repositories = self._repositories.create(session)
-                await repositories.runs.transition(
-                    run_id,
-                    from_statuses={"running"},
-                    to_status="failed",
-                    error_code="proposal_finalize_prepare_failed",
-                )
-                await session.commit()
-            return
-        continuation_message_id: int | None = None
-        continuation_text = ""
-        try:
-            async for event in self._runner.stream(
+            async for event in self._runner.resume(
                 adapter_name=adapter_name,
-                value=value,
-                resume=approval,
+                conversation_id=conversation_id,
+                approval=approval,
             ):
                 if event.event == "_graph.interrupted":
                     raise ProposalStateError("proposal finalization interrupted again")
-                if event.event == "assistant.delta":
-                    delta = event.data.get("text")
-                    if isinstance(delta, str) and delta:
-                        if continuation_message_id is None:
-                            async with database_module.db.session() as session:
-                                repositories = self._repositories.create(session)
-                                assistant = await repositories.messages.create(
-                                    conversation_id=conversation_id,
-                                    run_id=run_id,
-                                    role="assistant",
-                                    content="",
-                                    status="generating",
-                                )
-                                await session.commit()
-                                continuation_message_id = assistant.id
-                            yield AiChatEvent(
-                                "assistant.started",
-                                {"message_id": continuation_message_id},
-                            )
-                        continuation_text += delta
                 yield event
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
@@ -467,56 +412,21 @@ class AiChatService:
                 if not transitioned:
                     await session.rollback()
                     return
-                if continuation_message_id is not None:
-                    message = await session.get(
-                        AiChatMessage, continuation_message_id
-                    )
-                    if message is not None:
-                        message.content = continuation_text
-                        await repositories.messages.finish(message, "completed")
-                    delivered_calls = []
-                    for item in value["pending_tool_results"]:
-                        delivered = await repositories.tool_calls.get(
-                            int(item["tool_call_id"])
-                        )
-                        if (
-                            delivered is not None
-                            and delivered.delivery_status == "pending"
-                        ):
-                            delivered_calls.append(delivered)
-                    await repositories.tool_calls.mark_consumed(delivered_calls)
                 await session.commit()
-            if continuation_message_id is not None:
-                yield AiChatEvent(
-                    "assistant.completed",
-                    {
-                        "message_id": continuation_message_id,
-                        "content": continuation_text,
-                    },
-                )
         except Exception:
             logger.exception(
                 "AI Chat proposal finalization failed: proposal=%s",
                 proposal_id,
             )
-            if continuation_message_id is not None:
-                await self._finish_interrupted_run(
+            async with database_module.db.session() as session:
+                repositories = self._repositories.create(session)
+                await repositories.runs.transition(
                     run_id,
-                    continuation_message_id,
-                    "failed",
-                    "proposal_finalize_failed",
-                    continuation_text,
+                    from_statuses={"running"},
+                    to_status="failed",
+                    error_code="proposal_finalize_failed",
                 )
-            else:
-                async with database_module.db.session() as session:
-                    repositories = self._repositories.create(session)
-                    await repositories.runs.transition(
-                        run_id,
-                        from_statuses={"running"},
-                        to_status="failed",
-                        error_code="proposal_finalize_failed",
-                    )
-                    await session.commit()
+                await session.commit()
 
     async def close_conversation(self, conversation_id: int, reason: str) -> None:
         """结束空闲会话并保留其历史记录。"""

@@ -61,8 +61,8 @@ def make_sync_engine(path: Path) -> Engine:
 
 def init_models_sync(engine: Engine) -> None:
     """Create all tables (idempotent) using a sync engine connection."""
-    # AI 对话模型位于独立模块，但共享同一个声明式 Base。
-    # 在 create_all 前导入，使对应表加入共享 metadata。
+    # 模块 ORM 共享同一个声明式 Base；create_all 前必须显式注册。
+    import app.experience.models  # noqa: F401
     import app.ai_chat.models  # noqa: F401
 
     from app.scripts.migrate_experience_field_states import migrate
@@ -75,11 +75,23 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_unified_experience_revision_units import (
         migrate as migrate_unified_experience_revision_units,
     )
+    from app.scripts.migrate_ai_chat_tool_call_index import (
+        migrate as migrate_ai_chat_tool_call_index,
+    )
+    from app.scripts.migrate_ai_chat_conversation_scope import (
+        migrate as migrate_ai_chat_conversation_scope,
+    )
+    from app.scripts.migrate_experience_chat_scope_field import (
+        migrate as migrate_experience_chat_scope_field,
+    )
 
     migrate(engine)
     migrate_experience_evidence_items(engine)
     migrate_experience_revisions(engine)
     migrate_unified_experience_revision_units(engine)
+    migrate_ai_chat_tool_call_index(engine)
+    migrate_ai_chat_conversation_scope(engine)
+    migrate_experience_chat_scope_field(engine)
 
     # ``create_all`` does not ALTER existing SQLite tables. Keep this additive
     # migration idempotent so older local databases can load resumes safely.

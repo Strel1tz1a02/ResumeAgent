@@ -19,7 +19,8 @@ import {
   streamExperienceMessage,
   streamExperienceOpening,
   type ExperienceChatEvent,
-  type ExperienceChatTarget,
+  type ExperienceChatScope,
+  type ExperienceChangeScope,
   type ExperienceProposal,
 } from '@/lib/api/experience-ai-chat';
 import { writeExperienceDetail } from '@/lib/queries/experiences/cache';
@@ -29,24 +30,24 @@ export type ChatMessage = { id: string; role: 'user' | 'assistant'; content: str
 
 interface ExperienceAiChatValue {
   phase: ChatPhase;
-  target: ExperienceChatTarget | null;
+  scope: ExperienceChatScope | null;
   messages: ChatMessage[];
   proposal: ExperienceProposal | null;
   input: string;
   error: string | null;
   lastBusinessEvent: ExperienceChatEvent | null;
   setInput: (value: string) => void;
-  start: (target: ExperienceChatTarget) => Promise<void>;
+  start: (scope: ExperienceChatScope) => Promise<void>;
   send: () => Promise<void>;
   resolve: (decision: 'approve' | 'reject') => Promise<void>;
   close: (reason?: string) => Promise<void>;
-  isTargetLocked: (target: ExperienceChatTarget) => boolean;
+  isScopeLocked: (scope: ExperienceChangeScope) => boolean;
 }
 
 const ExperienceAiChatContext = createContext<ExperienceAiChatValue | null>(null);
 
-function sameTarget(left: ExperienceChatTarget | null, right: ExperienceChatTarget): boolean {
-  return Boolean(left && left.key === right.key && left.ref_id === right.ref_id);
+function sameChangeScope(left: ExperienceChangeScope | null, right: ExperienceChangeScope) {
+  return Boolean(left && left.field === right.field && left.evidence_id === right.evidence_id);
 }
 
 function clientId(prefix: string): string {
@@ -63,7 +64,7 @@ export function ExperienceAiChatProvider({
 }: PropsWithChildren<{ experienceId: number }>) {
   const queryClient = useQueryClient();
   const [phase, setPhase] = useState<ChatPhase>('idle');
-  const [target, setTarget] = useState<ExperienceChatTarget | null>(null);
+  const [scope, setScope] = useState<ExperienceChatScope | null>(null);
   const [conversationId, setConversationId] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [proposal, setProposal] = useState<ExperienceProposal | null>(null);
@@ -163,7 +164,7 @@ export function ExperienceAiChatProvider({
     const current = conversationRef.current;
     conversationRef.current = null;
     setConversationId(null);
-    setTarget(null);
+    setScope(null);
     setProposal(null);
     setMessages([]);
     setPhase('idle');
@@ -174,14 +175,14 @@ export function ExperienceAiChatProvider({
   }, []);
 
   const start = useCallback(
-    async (nextTarget: ExperienceChatTarget) => {
+    async (nextScope: ExperienceChatScope) => {
       await close('changed_field');
-      setTarget(nextTarget);
+      setScope(nextScope);
       setMessages([]);
       setError(null);
       setPhase('generating');
       try {
-        const conversation = await createExperienceConversation(experienceId, nextTarget);
+        const conversation = await createExperienceConversation(experienceId, nextScope);
         conversationRef.current = conversation.conversation_id;
         setConversationId(conversation.conversation_id);
         const controller = new AbortController();
@@ -193,7 +194,7 @@ export function ExperienceAiChatProvider({
       } catch (reason) {
         conversationRef.current = null;
         setConversationId(null);
-        setTarget(null);
+        setScope(null);
         setError(reason instanceof Error ? reason.message : 'response_failed');
         setPhase('idle');
       }
@@ -248,7 +249,7 @@ export function ExperienceAiChatProvider({
   const value = useMemo<ExperienceAiChatValue>(
     () => ({
       phase,
-      target,
+      scope,
       messages,
       proposal,
       input,
@@ -259,22 +260,10 @@ export function ExperienceAiChatProvider({
       send,
       resolve,
       close,
-      isTargetLocked: (candidate) =>
-        phase === 'approval' && sameTarget(proposal?.proposal.target ?? target, candidate),
+      isScopeLocked: (candidate) =>
+        phase === 'approval' && sameChangeScope(proposal?.proposal.scope ?? null, candidate),
     }),
-    [
-      close,
-      error,
-      input,
-      lastBusinessEvent,
-      messages,
-      phase,
-      proposal,
-      resolve,
-      send,
-      start,
-      target,
-    ]
+    [close, error, input, lastBusinessEvent, messages, phase, proposal, resolve, send, start, scope]
   );
   return (
     <ExperienceAiChatContext.Provider value={value}>{children}</ExperienceAiChatContext.Provider>

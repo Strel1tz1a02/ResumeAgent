@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config_cache import get_content_language
-from app.models import EvidenceItem, ExperienceItem
+from app.experience.models import EvidenceItem, ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
 from app.experience.schemas.evidence_items import EvidenceCreate
@@ -46,40 +46,38 @@ class ExperienceAiMutationService:
     async def prepare_field_change(
         self,
         experience_id: int,
-        key: str,
-        ref_id: int | None,
+        requested_field: str,
+        evidence_id: int | None,
         suggested_content: Any,
         *,
-        bound_key: str,
-        bound_ref_id: int | None,
+        scope_field: str,
         expected_revision: int,
     ) -> PreparedExperienceChange | dict[str, Any]:
         """校验 ExperienceItem 字段建议并生成审批快照。"""
         if (
-            key != bound_key
-            or ref_id != bound_ref_id
-            or key not in EXPERIENCE_TARGET_KEYS
-            or ref_id is not None
+            requested_field != scope_field
+            or evidence_id is not None
+            or requested_field not in EXPERIENCE_TARGET_KEYS
         ):
-            return self._immediate("invalid_target")
+            return self._immediate("invalid_scope")
         item = await self._experiences.get(experience_id)
         if item is None or item.status == "archived":
             return self._immediate("invalidated")
-        snapshot = await self._fields.snapshot(experience_id, key, None)
+        snapshot = await self._fields.snapshot(experience_id, requested_field, None)
         if snapshot.revision != expected_revision:
             return self._immediate("invalidated")
         try:
-            request = ExperienceUpdate.model_validate({key: suggested_content})
-            proposed = request.model_dump(mode="json", exclude_unset=True)[key]
-            ExperienceService._validate_merged_dates(item, {key: proposed})
+            request = ExperienceUpdate.model_validate({requested_field: suggested_content})
+            proposed = request.model_dump(mode="json", exclude_unset=True)[requested_field]
+            ExperienceService._validate_merged_dates(item, {requested_field: proposed})
         except (ValidationError, ValueError):
             return self._immediate("invalid_value")
-        normalized = normalize_field_value(key, proposed)
+        normalized = normalize_field_value(requested_field, proposed)
         if normalized == snapshot.normalized_value:
             return self._immediate("no_change")
         return self._proposal(
             experience_id,
-            key,
+            requested_field,
             None,
             snapshot.value,
             proposed,
@@ -90,22 +88,20 @@ class ExperienceAiMutationService:
     async def prepare_evidence_change(
         self,
         experience_id: int,
-        key: str,
+        requested_field: str,
         evidence_id: int | None,
         suggested_content: Any,
         *,
-        bound_key: str,
-        bound_ref_id: int | None,
+        scope_field: str,
         expected_revision: int | None,
     ) -> PreparedExperienceChange | dict[str, Any]:
         """校验一个完整 EvidenceItem 的覆盖建议并生成审批快照。"""
         if (
-            bound_key != "evidence"
-            or bound_ref_id is not None
-            or key != "evidence"
+            scope_field != "evidence"
+            or requested_field != "evidence"
             or evidence_id is None
         ):
-            return self._immediate("invalid_target")
+            return self._immediate("invalid_scope")
         item = await self._experiences.get(experience_id)
         evidence = await self._evidence.get_for_experience(experience_id, evidence_id)
         if (
@@ -139,22 +135,20 @@ class ExperienceAiMutationService:
     async def prepare_evidence_append(
         self,
         experience_id: int,
-        key: str,
+        requested_field: str,
         evidence_id: int | None,
         suggested_content: Any,
         *,
-        bound_key: str,
-        bound_ref_id: int | None,
+        scope_field: str,
         expected_revision: int,
     ) -> PreparedExperienceChange | dict[str, Any]:
         """校验新增 Evidence 建议并生成集合 revision 审批快照。"""
         if (
-            bound_key != "evidence"
-            or bound_ref_id is not None
-            or key != "evidence"
+            scope_field != "evidence"
+            or requested_field != "evidence"
             or evidence_id is not None
         ):
-            return self._immediate("invalid_target")
+            return self._immediate("invalid_scope")
         item = await self._experiences.get(experience_id)
         if item is None or item.status == "archived":
             return self._immediate("invalidated")
@@ -180,38 +174,38 @@ class ExperienceAiMutationService:
     async def apply_field(
         self,
         experience_id: int,
-        key: str,
+        field: str,
         proposed_value: Any,
         *,
         expected_revision: int,
         expected_value: Any,
     ) -> dict[str, Any]:
         """校验 guard 后只覆盖一个 ExperienceItem 字段。"""
-        if key not in EXPERIENCE_TARGET_KEYS:
-            return self._immediate("invalid_target")
+        if field not in EXPERIENCE_TARGET_KEYS:
+            return self._immediate("invalid_scope")
         item = await self._experience(experience_id)
-        snapshot = await self._fields.snapshot(experience_id, key, None)
+        snapshot = await self._fields.snapshot(experience_id, field, None)
         if item.status == "archived" or (
             snapshot.revision != expected_revision
             or snapshot.normalized_value != expected_value
         ):
             return await self._invalidated(item, snapshot)
         try:
-            request = ExperienceUpdate.model_validate({key: proposed_value})
+            request = ExperienceUpdate.model_validate({field: proposed_value})
         except ValidationError as error:
             raise ValueError("invalid proposed experience value") from error
-        value = request.model_dump(exclude_unset=True)[key]
-        ExperienceService._validate_merged_dates(item, {key: value})
-        if normalize_field_value(key, value) == snapshot.normalized_value:
+        value = request.model_dump(exclude_unset=True)[field]
+        ExperienceService._validate_merged_dates(item, {field: value})
+        if normalize_field_value(field, value) == snapshot.normalized_value:
             return self._immediate("no_change")
         await self._fields.claim_experience_units(
-            experience_id, {key: expected_revision}, {key}
+            experience_id, {field: expected_revision}, {field}
         )
-        updated = await self._experiences.update_fields(experience_id, {key: value})
-        await self._fields.advance_experience_fields(updated, {key})
+        updated = await self._experiences.update_fields(experience_id, {field: value})
+        await self._fields.advance_experience_fields(updated, {field})
         updated = await self._refresh_completeness(updated)
         detail = await ExperienceService(self._session)._detail(updated)
-        current = await self._fields.snapshot(experience_id, key, None)
+        current = await self._fields.snapshot(experience_id, field, None)
         return self._applied(current, detail)
 
     async def apply_evidence(
@@ -256,8 +250,7 @@ class ExperienceAiMutationService:
         current = await self._fields.snapshot(experience_id, "action", evidence_id)
         return {
             "outcome": "applied",
-            "operation": "content_change",
-            "target": {"key": "evidence", "ref_id": evidence_id},
+            "scope": {"field": "evidence", "evidence_id": evidence_id},
             "value": self._evidence_value(evidence),
             "revision": current.revision,
             "field_status": current.status,
@@ -289,8 +282,7 @@ class ExperienceAiMutationService:
         collection = await self._fields.snapshot(experience_id, "evidence_new", None)
         return {
             "outcome": "applied",
-            "operation": "content_change",
-            "target": {"key": "evidence", "ref_id": evidence.id},
+            "scope": {"field": "evidence", "evidence_id": evidence.id},
             "created": True,
             "evidence_id": evidence.id,
             "evidence_ids": ordered_evidence_ids(updated),
@@ -312,8 +304,7 @@ class ExperienceAiMutationService:
         detail = await ExperienceService(self._session)._detail(item)
         return {
             "outcome": "invalidated",
-            "operation": "content_change",
-            "target": {"key": "evidence", "ref_id": evidence_id},
+            "scope": {"field": "evidence", "evidence_id": evidence_id},
             "current_value": None,
             "experience": detail.model_dump(mode="json"),
         }
@@ -330,8 +321,7 @@ class ExperienceAiMutationService:
         detail = await ExperienceService(self._session)._detail(item)
         return {
             "outcome": "invalidated",
-            "operation": "content_change",
-            "target": {"key": "evidence", "ref_id": evidence_id},
+            "scope": {"field": "evidence", "evidence_id": evidence_id},
             "current_value": current_value,
             "revision": revision,
             "field_status": status,
@@ -358,8 +348,7 @@ class ExperienceAiMutationService:
         detail = await ExperienceService(self._session)._detail(item)
         return {
             "outcome": "invalidated",
-            "operation": "content_change",
-            "target": {"key": snapshot.key, "ref_id": snapshot.ref_id},
+            "scope": {"field": snapshot.key, "evidence_id": snapshot.ref_id},
             "current_value": snapshot.value,
             "revision": snapshot.revision,
             "experience": detail.model_dump(mode="json"),
@@ -369,8 +358,7 @@ class ExperienceAiMutationService:
     def _applied(snapshot: Any, detail: ExperienceDetail) -> dict[str, Any]:
         return {
             "outcome": "applied",
-            "operation": "content_change",
-            "target": {"key": snapshot.key, "ref_id": snapshot.ref_id},
+            "scope": {"field": snapshot.key, "evidence_id": snapshot.ref_id},
             "value": snapshot.value,
             "revision": snapshot.revision,
             "field_status": snapshot.status,
@@ -380,7 +368,7 @@ class ExperienceAiMutationService:
     @staticmethod
     def _immediate(outcome: str) -> dict[str, Any]:
         """返回无需审批的稳定业务结果。"""
-        return {"outcome": outcome, "operation": "content_change"}
+        return {"outcome": outcome}
 
     @staticmethod
     def _evidence_value(item: EvidenceItem) -> dict[str, Any]:
@@ -394,26 +382,24 @@ class ExperienceAiMutationService:
     @staticmethod
     def _proposal(
         experience_id: int,
-        key: str,
-        ref_id: int | None,
+        field: str,
+        evidence_id: int | None,
         current_content: Any,
         suggested_content: Any,
         revision: int,
         normalized_current_content: Any,
     ) -> PreparedExperienceChange:
         """构造统一 content_change 提案和审批 guard。"""
-        target = {"key": key, "ref_id": ref_id}
+        scope = {"field": field, "evidence_id": evidence_id}
         return PreparedExperienceChange(
             proposal_payload={
-                "operation": "content_change",
-                "target": target,
+                "scope": scope,
                 "current_content": current_content,
                 "suggested_content": suggested_content,
             },
             guard_payload={
                 "experience_id": experience_id,
-                "operation": "content_change",
-                "target": target,
+                "scope": scope,
                 "revision": revision,
                 "normalized_current_content": normalized_current_content,
             },

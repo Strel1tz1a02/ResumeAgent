@@ -66,7 +66,7 @@ flowchart LR
 
 - 创建会话；
 - 保存会话绑定的 `adapter`；
-- 保存不透明的 `subject` 和 `target` 引用；
+- 保存不透明的 `subject` 和 `scope` 引用；
 - 判断会话是 `active` 还是 `ended`；
 - 结束会话；
 - 限制同一会话只能有一个当前运行；
@@ -204,7 +204,7 @@ EvidenceItem
 - 应用失败时的业务原因；
 - 返回哪些更新后的业务字段。
 
-通用审批模块不应该直接比较字段 revision。它只把持久化的 `guard_payload` 交给业务 Handler。
+通用审批模块不应该直接比较字段 revision。它只把持久化的 `proposal_payload` 和 `guard_payload` 交给业务 Handler，不回传原始模型 arguments。
 
 ## 2.7 审批收尾和 Tool Result 延迟投递
 
@@ -311,7 +311,7 @@ Adapter 实例可以持有：
 Adapter 实例不能持有：
 
 - 当前用户；
-- 当前 conversation、run、subject 或 target；
+- 当前 conversation、run、subject 或 scope；
 - 请求级数据库 Session；
 - 当前 Graph State；
 - SSE 连接；
@@ -344,14 +344,14 @@ Adapter 是协议转换和流程装配层，不是新的业务 Service。
 
 Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值可 JSON 序列化并直接交给 LangGraph。State 中不得包含 ORM、Pydantic 对象、数据库 Session、异常对象、流连接或回调函数。
 
-## 3.3 解释 subject 和 target
+## 3.3 解释 subject 和 scope
 
 通用聊天保存：
 
 ```json
 {
   "subject": {"type": "experience", "id": "7"},
-  "target": {"key": "evidence.metrics", "ref_id": 12}
+  "scope": {"field": "evidence"}
 }
 ```
 
@@ -359,12 +359,11 @@ Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值�
 
 - `experience` 是否是受支持的 subject；
 - `"7"` 如何转换成 `experience_id`；
-- `evidence.metrics` 对应什么保存单元；
-- `ref_id=12` 是否是 Evidence ID；
+- `evidence` 对应什么保存单元；
 - Evidence 是否属于该经历；
 - 目标是否允许 AI 对话和覆盖。
 
-通用聊天不应该硬编码任何字段白名单。
+`scope` 的内部结构完全由业务 Adapter 定义；通用聊天不应该硬编码字段名、ID 或白名单。
 
 ## 3.4 加载业务上下文
 
@@ -399,7 +398,7 @@ Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值�
 
 - 通过独立 `description` 字段向模型说明工具用途和调用条件；
 - 参数 Schema；
-- 根据 target 形态选择字段修改、Evidence 修改或 Evidence 追加 Service；
+- 根据 scope 形态选择字段修改、Evidence 修改或 Evidence 追加 Service；
 - 将 Service 结果转换为通用 proposal 或 Tool Result。
 
 Evidence 业务只创建一个集合级会话。模型修改已有 EvidenceItem 时在 Tool 参数中提交 `evidence_id` 和完整 `action/result/metrics`，Handler 路由到按 ID 整体覆盖服务；创建时不提交 ID 并追加到末尾。通用聊天层仍不理解这些业务语义。
@@ -432,7 +431,7 @@ Tool 名称、调用条件和参数提交规则不写死在系统 Prompt。通�
 
 | 流程 | 通用聊天负责 | 业务负责 |
 |---|---|---|
-| 创建会话 | 保存会话、状态和引用 | 校验 subject/target 是否有效 |
+| 创建会话 | 保存会话、状态和引用 | 校验 subject/scope 是否有效 |
 | 开始一轮 | 保存消息和 run | 解析输入、加载业务上下文 |
 | 模型调用 | 模型客户端、内部流式事件 | Prompt、Graph、Tools、业务 SSE 转换 |
 | Tool 校验 | 聚合参数、调用 Handler | 类型校验、no-change、guard |
@@ -563,7 +562,8 @@ apps/backend/app/
 │   ├── __init__.py
 │   ├── adapters/
 │   │   ├── __init__.py
-│   │   └── adapter.py                    # ExperienceAdapter
+│   │   ├── adapter.py                    # ExperienceAdapter
+│   │   └── tool_context.py               # 通用 ToolContext 的经历语义解析
 │   ├── routers/
 │   │   ├── __init__.py
 │   │   ├── ai_chat.py                    # 经历专用聊天 API/SSE 转换
@@ -583,7 +583,6 @@ apps/backend/app/
 │   │
 │   ├── tools/
 │   │   ├── __init__.py
-│   │   ├── common.py                     # Tool 上下文解析
 │   │   └── content_change.py             # 统一内容修改路由 Handler
 │   ├── services/
 │   │   ├── experience_service.py         # 经历领域写入与业务规则

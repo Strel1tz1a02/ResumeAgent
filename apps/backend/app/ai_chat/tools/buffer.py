@@ -1,4 +1,4 @@
-"""在校验前组装模型提供方的工具调用参数片段。"""
+"""组装模型的工具调用片段。"""
 
 import json
 from dataclasses import dataclass
@@ -29,19 +29,19 @@ class ToolCallBuffer:
     """按模型提供方索引缓冲交错到达的工具片段。"""
 
     def __init__(self) -> None:
-        """创建按模型提供方索引组织的空片段缓冲区。"""
+        """创建按模型提供方索引组织的空片段缓冲区。""" 
         self._pending: dict[int, _PendingToolCall] = {}
 
     def add(
         self,
         *,
-        index: int,
+        index: int, # 模型提供
         provider_id: str | None,
         name: str | None,
         arguments: str | None,
     ) -> None:
         """追加一个片段，但不向调用方暴露中间状态。"""
-        pending = self._pending.setdefault(index, _PendingToolCall())
+        pending = self._pending.setdefault(index, _PendingToolCall()) # 有就直接拿，没有就创建一个再拿
         if provider_id:
             pending.provider_id = provider_id
         if name:

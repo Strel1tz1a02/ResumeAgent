@@ -11,7 +11,6 @@ from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.graph.state import AdapterInput, ApprovalInput
-from app.ai_chat.types import JsonObject
 
 
 class GraphRunner:
@@ -42,35 +41,45 @@ class GraphRunner:
         *,
         adapter_name: str,
         value: AdapterInput, # 本次执行需要的通用输入
-        resume: JsonObject | ApprovalInput | None = None, # 是否从之前的 interrupt 恢复，不是简历的意思
     ) -> AsyncIterator[AiChatEvent]:
-        """使用稳定的会话线程 ID 运行或恢复业务图。"""
+        """使用稳定的会话线程 ID 启动业务图。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
-        if resume is None: # 首次运行
-            graph_input: Any = await adapter.parse_input(value)
-            json.dumps(graph_input, ensure_ascii=False) # 转换成 JSON 字符串
-        else: # 审批恢复
-            graph_input = Command(resume=resume) # resume 传给 interrupt() 作为其返回值
+        graph_input: Any = await adapter.parse_input(value)
+        json.dumps(graph_input, ensure_ascii=False) # 验证 State 可被 checkpoint 序列化
         config = {
             "configurable": {
                 "thread_id": f"ai-chat:{value['conversation_id']}", # configurable 专门给 Checkpointer 等组件使用，Checkpointer 使用 thread_id 来存取和恢复 checkpoint
             }
         }
-        if resume is not None:
-            await graph.aupdate_state( # interrupt 恢复后，写入最新外部事实
-                config,
-                {
-                    "run_id": value["run_id"],
-                    "run_kind": value["run_kind"],
-                    "tools_enabled": value["tools_enabled"],
-                },
-            )
         async for part in graph.astream(
             graph_input,
             config=config,
-            stream_mode=["messages", "updates", "custom"], # LangGraph 预定义的 stream_mode 名称
+            stream_mode=["updates", "custom"],
             version="v2",# LangGraph 使用 v2 流事件格式：{ "type": "...","data": ...}
+        ):
+            event = self._normalize(part)
+            if event is not None:
+                yield event
+
+    async def resume(
+        self,
+        *,
+        adapter_name: str,
+        conversation_id: int,
+        approval: ApprovalInput,
+    ) -> AsyncIterator[AiChatEvent]:
+        """恢复同一会话的 interrupt，只传入审批结果。"""
+        adapter = self._registry.get(adapter_name)
+        graph = self._compiled(adapter)
+        config = {
+            "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
+        }
+        async for part in graph.astream(
+            Command(resume=approval),
+            config=config,
+            stream_mode=["updates", "custom"],
+            version="v2",
         ):
             event = self._normalize(part)
             if event is not None:
@@ -78,7 +87,7 @@ class GraphRunner:
 
     @staticmethod
     def _normalize(part: Any) -> AiChatEvent | None:
-        """将 v2 消息、自定义事件和中断片段规范化为内部事件。"""
+        """将 v2 自定义事件和中断片段规范化为内部事件。"""
         if isinstance(part, AiChatEvent):
             return part
         if not isinstance(part, dict):
@@ -91,12 +100,6 @@ class GraphRunner:
             if isinstance(data, dict) and isinstance(data.get("event"), str):
                 payload = data.get("data")
                 return AiChatEvent(data["event"], payload if isinstance(payload, dict) else {})
-
-        if event_type == "messages":
-            message = data[0] if isinstance(data, tuple) and data else data
-            content = getattr(message, "content", "")
-            if isinstance(content, str) and content:
-                return AiChatEvent("assistant.delta", {"text": content})
 
         if event_type == "updates" and isinstance(data, dict):
             interrupts = data.get("__interrupt__")

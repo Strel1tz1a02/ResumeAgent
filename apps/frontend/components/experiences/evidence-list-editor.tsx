@@ -44,7 +44,7 @@ const toDraft = (item: ExperienceDetail['evidence_items'][number]): EvidenceDraf
 const sameDraft = (left: EvidenceDraft, right: EvidenceDraft) =>
   left.action === right.action && left.result === right.result && left.metrics === right.metrics;
 
-const evidenceChatTarget = { key: 'evidence', ref_id: null } as const;
+const evidenceChatScope = { field: 'evidence' } as const;
 
 export function EvidenceListEditor({
   experience,
@@ -98,10 +98,10 @@ export function EvidenceListEditor({
     setEditorState((current) => {
       if (fullReset) return { drafts: serverBaseline, baseline: serverBaseline };
       const next: Record<number, EvidenceDraft> = {};
-      const appliedTarget = chat.lastBusinessEvent?.data.target as
+      const appliedScope = chat.lastBusinessEvent?.data.scope as
         | {
-            key?: string;
-            ref_id?: number | null;
+            field?: string;
+            evidence_id?: number | null;
           }
         | undefined;
       for (const item of experience.evidence_items) {
@@ -116,8 +116,8 @@ export function EvidenceListEditor({
         for (const key of ['action', 'result', 'metrics'] as const) {
           if (
             localDraft[key] === previousBaseline[key] ||
-            (appliedTarget?.ref_id === item.id &&
-              (appliedTarget.key === 'evidence' || appliedTarget.key === key))
+            (appliedScope?.evidence_id === item.id &&
+              (appliedScope.field === 'evidence' || appliedScope.field === key))
           ) {
             merged[key] = serverDraft[key];
           }
@@ -130,7 +130,7 @@ export function EvidenceListEditor({
       setNewEvidence({ action: '', result: '', metrics: '' });
     } else if (
       chat.lastBusinessEvent?.data.created === true &&
-      (chat.lastBusinessEvent.data.target as { key?: string } | undefined)?.key === 'evidence'
+      (chat.lastBusinessEvent.data.scope as { field?: string } | undefined)?.field === 'evidence'
     ) {
       setNewEvidence({ action: '', result: '', metrics: '' });
     }
@@ -258,11 +258,11 @@ export function EvidenceListEditor({
   ) => (
     <div className="grid gap-3 md:grid-cols-3">
       {(['action', 'result', 'metrics'] as const).map((key) => {
-        const itemTarget = { key: 'evidence', ref_id: evidenceId };
+        const itemScope = { field: 'evidence', evidence_id: evidenceId };
         return (
           <FieldAiEntry
             key={key}
-            target={evidenceChatTarget}
+            scope={evidenceChatScope}
             showAiStart={false}
             state={(experience.field_states ?? []).find(
               (state) =>
@@ -271,7 +271,7 @@ export function EvidenceListEditor({
             )}
             dirty={dirty}
             onSave={onSave}
-            saveDisabled={submitting || globalSaving || chat.isTargetLocked(itemTarget)}
+            saveDisabled={submitting || globalSaving || chat.isScopeLocked(itemScope)}
           >
             <Label htmlFor={`${id}-${key}`}>{t(`experiences.evidence.${key}`)}</Label>
             <Input
@@ -279,7 +279,7 @@ export function EvidenceListEditor({
               aria-label={`${t(`experiences.evidence.${key}`)} ${id}`}
               value={draft[key]}
               onChange={(event) => change(key, event.target.value)}
-              disabled={archived || submitting || globalSaving || chat.isTargetLocked(itemTarget)}
+              disabled={archived || submitting || globalSaving || chat.isScopeLocked(itemScope)}
             />
           </FieldAiEntry>
         );
@@ -292,7 +292,7 @@ export function EvidenceListEditor({
   );
 
   return (
-    <FieldAiEntry target={evidenceChatTarget} state={collectionState}>
+    <FieldAiEntry scope={evidenceChatScope} state={collectionState}>
       <section className="space-y-4" aria-label={t('experiences.evidence.title')}>
         <h3 className="font-mono text-xs font-bold uppercase tracking-widest text-ink-soft">
           {t('experiences.evidence.title')}

@@ -258,7 +258,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 1. `apps/backend/app/ai_chat/streaming/model.py`；
 2. `apps/backend/app/ai_chat/tools/buffer.py`；
-3. `apps/backend/app/ai_chat/tools/text_fallback.py`；
+3. `apps/backend/app/ai_chat/streaming/compatibility/dsml.py`；
 4. `apps/backend/app/ai_chat/streaming/events.py`；
 5. `apps/backend/app/ai_chat/graph/runtime.py`。
 

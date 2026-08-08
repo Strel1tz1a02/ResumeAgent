@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config_cache import get_content_language
-from app.models import EvidenceItem, ExperienceItem
+from app.experience.models import EvidenceItem, ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import (
     ExperienceRepository,

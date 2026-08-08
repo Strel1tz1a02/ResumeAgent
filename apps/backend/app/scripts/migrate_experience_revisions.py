@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import Engine, inspect, text
 
-from app.models import Base, _utcnow_iso
+from app.models import Base
+from app.experience.models import utcnow_iso
 from app.experience.services.experience_fields import EXPERIENCE_TARGET_KEYS, save_unit_key
 
 MIGRATION_NAME = "2026_08_04_experience_revisions"
@@ -58,7 +59,7 @@ def migrate(engine: Engine) -> None:
                 continue
             targets[target] = max(targets.get(target, 0), revision)
 
-        now = _utcnow_iso()
+        now = utcnow_iso()
         for (experience_id, scope, unit_key, ref_id), revision in targets.items():
             connection.execute(
                 text(

@@ -18,17 +18,14 @@ class SubjectRef(BaseModel):
     id: str = Field(min_length=1, max_length=200)
 
 
-class TargetRef(BaseModel):
-    """由对话运行时持久化的不透明业务目标引用。"""
+class ScopeRef(BaseModel):
+    """由业务 Adapter 定义结构的、不透明会话范围。"""
 
     model_config = ConfigDict(extra="allow")
-
-    key: str = Field(min_length=1, max_length=200)
-    ref_id: int | None = None
 
 
 class ValidatedBinding(BaseModel):
     """经过业务校验和规范化的会话绑定。"""
 
     subject: SubjectRef
-    target: TargetRef
+    scope: ScopeRef

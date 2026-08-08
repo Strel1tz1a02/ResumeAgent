@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langgraph.graph import StateGraph
 
 from app.ai_chat.graph.state import AdapterInput, BaseState
-from app.ai_chat.types import SubjectRef, TargetRef, ValidatedBinding
+from app.ai_chat.types import ScopeRef, SubjectRef, ValidatedBinding
 
 if TYPE_CHECKING:
     from app.ai_chat.graph.runtime import AiChatRuntime
@@ -23,7 +23,7 @@ class BaseAdapter(ABC): # ABC：要求子类必须实现父类要求的方法
         return cls.__name__
 
     @abstractmethod # @abstractmethod：子类必须实现这个方法
-    async def validate_binding( self, subject: SubjectRef, target: TargetRef) -> ValidatedBinding:
+    async def validate_binding(self, subject: SubjectRef, scope: ScopeRef) -> ValidatedBinding:
         """在持久化前校验并规范化业务绑定。"""
 
     @abstractmethod

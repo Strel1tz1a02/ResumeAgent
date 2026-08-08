@@ -20,6 +20,7 @@ class ToolCallRepository:
         *,
         conversation_id: int,
         run_id: int,
+        tool_call_index: int,
         provider_tool_call_id: str | None,
         tool_name: str,
         arguments: dict[str, Any],
@@ -28,6 +29,7 @@ class ToolCallRepository:
         row = AiChatToolCall(
             conversation_id=conversation_id,
             run_id=run_id,
+            tool_call_index=tool_call_index,
             provider_tool_call_id=provider_tool_call_id,
             tool_name=tool_name,
             arguments=arguments,
@@ -52,14 +54,14 @@ class ToolCallRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_provider_id(
-        self, run_id: int, provider_tool_call_id: str
+    async def get_by_run_index(
+        self, run_id: int, tool_call_index: int
     ) -> AiChatToolCall | None:
-        """查找因中断节点重启而重放的工具调用。"""
+        """使用本轮稳定索引查找重放的工具调用。"""
         result = await self._session.execute(
             select(AiChatToolCall).where(
                 AiChatToolCall.run_id == run_id,
-                AiChatToolCall.provider_tool_call_id == provider_tool_call_id,
+                AiChatToolCall.tool_call_index == tool_call_index,
             )
         )
         return result.scalar_one_or_none()

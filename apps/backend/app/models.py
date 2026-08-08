@@ -12,8 +12,6 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
-    CheckConstraint,
-    ForeignKey,
     Index,
     Integer,
     String,
@@ -21,7 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def _utcnow_iso() -> str:
@@ -145,130 +143,4 @@ class ApiKey(Base):
 
     provider: Mapped[str] = mapped_column(String, primary_key=True)
     ciphertext: Mapped[str] = mapped_column(Text)
-    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-
-
-class ExperienceItem(Base):
-    """一条与简历文档解耦的个人经历记录。"""
-
-    __tablename__ = "experience_items"
-
-    experience_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    kind: Mapped[str] = mapped_column(String(32), default="other", index=True)
-    title: Mapped[str] = mapped_column(String(200), default="")
-    organization: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    role: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    location: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    start_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
-    end_date: Mapped[str | None] = mapped_column(String(7), nullable=True)
-    is_current: Mapped[bool] = mapped_column(Boolean, default=False)
-    background: Mapped[str | None] = mapped_column(Text, nullable=True)
-    technologies: Mapped[list[str]] = mapped_column(JSON, default=list)
-    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
-    completeness: Mapped[int] = mapped_column(Integer, default=0)
-    archived_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso, index=True)
-
-    evidence_links: Mapped[list["ExperienceEvidence"]] = relationship(
-        back_populates="experience",
-        cascade="all, delete-orphan",
-        order_by="ExperienceEvidence.position",
-        lazy="selectin",
-        passive_deletes=True,
-    )
-
-class EvidenceItem(Base):
-    """一条由经历引用的有序行动、结果和指标事实。"""
-
-    __tablename__ = "evidence_items"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    action: Mapped[str] = mapped_column(Text)
-    result: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-
-
-class ExperienceEvidence(Base):
-    """保存经历对 EvidenceItem 的唯一归属和展示顺序。"""
-
-    __tablename__ = "experience_evidence_items"
-    __table_args__ = (
-        UniqueConstraint("evidence_id", name="uq_experience_evidence_item_owner"),
-        UniqueConstraint(
-            "experience_id", "position", name="uq_experience_evidence_item_position"
-        ),
-        CheckConstraint("position >= 0", name="ck_experience_evidence_item_position"),
-        Index("ix_experience_evidence_items_experience_id", "experience_id"),
-    )
-
-    experience_id: Mapped[int] = mapped_column(
-        ForeignKey("experience_items.experience_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    evidence_id: Mapped[int] = mapped_column(
-        ForeignKey("evidence_items.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    position: Mapped[int] = mapped_column(Integer, nullable=False)
-
-    experience: Mapped[ExperienceItem] = relationship(back_populates="evidence_links")
-    evidence: Mapped[EvidenceItem] = relationship(lazy="joined")
-
-
-class ExperienceFieldState(Base):
-    """一个经历字段只供前端提醒使用的完善状态。"""
-
-    __tablename__ = "experience_field_states"
-    __table_args__ = (
-        UniqueConstraint(
-            "experience_id", "target_key", "ref_id", name="uq_experience_field_state_target"
-        ),
-        Index("ix_experience_field_states_experience_id", "experience_id"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    experience_id: Mapped[int] = mapped_column(
-        ForeignKey("experience_items.experience_id", ondelete="CASCADE"), nullable=False
-    )
-    target_key: Mapped[str] = mapped_column(String(80), nullable=False)
-    ref_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="incomplete")
-    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-
-
-class ExperienceRevision(Base):
-    """经历数据单元和 Evidence 集合的统一乐观锁。"""
-
-    __tablename__ = "experience_revisions"
-    __table_args__ = (
-        UniqueConstraint(
-            "experience_id",
-            "scope",
-            "unit_key",
-            "ref_id",
-            name="uq_experience_revision_target",
-        ),
-        CheckConstraint(
-            "scope IN ('unit', 'collection')",
-            name="ck_experience_revision_scope",
-        ),
-        CheckConstraint("revision >= 0", name="ck_experience_revision_nonnegative"),
-        Index("ix_experience_revisions_experience_id", "experience_id"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    experience_id: Mapped[int] = mapped_column(
-        ForeignKey("experience_items.experience_id", ondelete="CASCADE"), nullable=False
-    )
-    scope: Mapped[str] = mapped_column(String(16), nullable=False)
-    unit_key: Mapped[str] = mapped_column(String(80), nullable=False)
-    ref_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)

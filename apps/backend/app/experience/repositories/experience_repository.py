@@ -8,7 +8,7 @@ from typing import Any, Literal
 from sqlalchemy import String, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EvidenceItem, ExperienceEvidence, ExperienceItem
+from app.experience.models import EvidenceItem, ExperienceEvidence, ExperienceItem
 
 ExperienceStatusFilter = Literal["active", "draft", "ready", "archived"]
 ExperienceSort = Literal["updated_at_desc", "created_at_desc", "created_at_asc"]

@@ -20,14 +20,14 @@ class ConversationRepository:
         *, # * 后面的参数必须通过“参数名”传入，不能按位置传入
         adapter: str,
         subject: dict[str, Any],
-        target: dict[str, Any],
+        scope: dict[str, Any],
         language: str,
     ) -> AiChatConversation:
         """持久化新的使用中会话，并回填整数 ID。"""
         row = AiChatConversation(
             adapter=adapter,
             subject=subject,
-            target=target,
+            scope=scope,
             language=language,
         )
         self._session.add(row)

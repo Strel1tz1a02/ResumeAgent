@@ -11,10 +11,11 @@ from app.ai_chat.adapters.base import BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.graph.state import AdapterInput
-from app.ai_chat.types import SubjectRef, TargetRef, ValidatedBinding
+from app.ai_chat.types import ScopeRef, SubjectRef, ValidatedBinding
 from app.experience.graph.context import build_model_messages
 from app.experience.graph import ExperienceState, build_experience_graph
-from app.experience.graph.prompts import system_prompt
+from app.experience.prompts.ai_chat import system_prompt
+from app.experience.schemas.ai_chat import ExperienceChatScope
 from app.experience.tools import ContentChangeHandler
 from app.experience.repositories.experience_repository import ExperienceRepository
 from app.experience.services.experience_field_service import ExperienceFieldService
@@ -31,7 +32,7 @@ class ExperienceAdapter(BaseAdapter):
         self._handlers = {handler.name: handler for handler in handlers}
 
     async def validate_binding(
-        self, subject: SubjectRef, target: TargetRef
+        self, subject: SubjectRef, scope: ScopeRef
     ) -> ValidatedBinding:
         """校验能否创建一个绑定到指定业务对象和目标字段的会话"""
         if subject.type != "experience":
@@ -46,61 +47,54 @@ class ExperienceAdapter(BaseAdapter):
                 raise ValueError("experience does not exist")
             if item.status == "archived":
                 raise ValueError("archived experience cannot start a conversation")
-            key = target.key
-            ref_id = target.ref_id
-            if key in EXPERIENCE_TARGET_KEYS:
-                if ref_id is not None:
-                    raise ValueError("experience field cannot bind evidence id")
-            elif key == "evidence":
-                if ref_id is not None:
-                    raise ValueError("evidence conversation must bind the collection")
-            else:
-                raise ValueError("unsupported experience target")
-            snapshot_key = "evidence_new" if key == "evidence" else key
+            experience_scope = ExperienceChatScope.model_validate(
+                scope.model_dump(mode="json")
+            )
+            field = experience_scope.field
+            if field not in EXPERIENCE_TARGET_KEYS and field != "evidence":
+                raise ValueError("unsupported experience scope")
+            snapshot_key = "evidence_new" if field == "evidence" else field
             await ExperienceFieldService(session).snapshot(
-                experience_id, snapshot_key, ref_id
+                experience_id, snapshot_key, None
             )
 
         return ValidatedBinding(
             subject=SubjectRef(type="experience", id=str(experience_id)),
-            target=TargetRef(key=target.key, ref_id=target.ref_id),
+            scope=ScopeRef.model_validate(experience_scope.model_dump(mode="json")),
         )
 
     async def parse_input(self, value: AdapterInput) -> ExperienceState:
         """把统一输入和已保存经历转换成完整经历 Graph State。"""
         experience_id = int(value["subject"]["id"])
-        key = str(value["target"]["key"]) # 目标字段的名称
-        ref_id_value = value["target"].get("ref_id") # Evidence ID / None
-        ref_id = int(ref_id_value) if isinstance(ref_id_value, int) else None
+        field = str(value["scope"]["field"])
         async with database_module.db.session() as session:
             detail = await ExperienceService(session).get(experience_id)
-            snapshot_key = "evidence_new" if key == "evidence" else key
+            snapshot_key = "evidence_new" if field == "evidence" else field
             snapshot = await ExperienceFieldService(session).snapshot(
-                experience_id, snapshot_key, ref_id
+                experience_id, snapshot_key, None
             )
         detail_json = detail.model_dump(mode="json")
         evidence_revisions = {
             str(state.ref_id): state.revision
             for state in detail.field_states
-            if key == "evidence" and state.key == "action" and state.ref_id is not None
+            if field == "evidence" and state.key == "action" and state.ref_id is not None
         }
-        target_value = detail_json["evidence_items"] if key == "evidence" else snapshot.value
         revision_snapshot = (
             {
                 "scope": "evidence",
                 "collection_revision": snapshot.revision,
                 "item_revisions": evidence_revisions,
             }
-            if key == "evidence"
+            if field == "evidence"
             else {"scope": "field", "revision": snapshot.revision}
         )
-        prompt = system_prompt(value["language"], key)
+        prompt = system_prompt(value["language"], field)
         messages = build_model_messages(
             prompt=prompt,
             detail=detail_json,
-            target=dict(value["target"]),
-            target_status=snapshot.status,
-            target_revision=snapshot.revision,
+            scope=dict(value["scope"]),
+            scope_status=snapshot.status,
+            scope_revision=snapshot.revision,
             history=list(value["messages"]),
             pending=list(value["pending_tool_results"]),
         )
@@ -108,7 +102,7 @@ class ExperienceAdapter(BaseAdapter):
             conversation_id=value["conversation_id"],
             run_id=value["run_id"],
             subject=value["subject"],
-            target=value["target"],
+            scope=value["scope"],
             run_kind=value["run_kind"],
             tools_enabled=value["tools_enabled"],
             revision_snapshot=revision_snapshot,

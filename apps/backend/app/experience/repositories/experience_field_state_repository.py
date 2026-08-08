@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ExperienceFieldState, _utcnow_iso
+from app.experience.models import ExperienceFieldState, utcnow_iso
 
 
 class ExperienceFieldStateRepository:
@@ -62,7 +62,7 @@ class ExperienceFieldStateRepository:
         """更新只用于前端提醒的字段完善状态。"""
         if status is not None:
             row.status = status
-        row.updated_at = _utcnow_iso()
+        row.updated_at = utcnow_iso()
         await self._session.flush()
         return row
 

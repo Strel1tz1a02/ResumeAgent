@@ -6,7 +6,8 @@ import json
 
 from sqlalchemy import Engine, inspect, text
 
-from app.models import Base, _utcnow_iso
+from app.models import Base
+from app.experience.models import utcnow_iso
 
 MIGRATION_NAME = "2026_08_03_experience_evidence_items"
 
@@ -82,5 +83,5 @@ def migrate(engine: Engine) -> None:
             )
         connection.execute(
             text("INSERT INTO schema_migrations (name, applied_at) VALUES (:name, :now)"),
-            {"name": MIGRATION_NAME, "now": _utcnow_iso()},
+            {"name": MIGRATION_NAME, "now": utcnow_iso()},
         )

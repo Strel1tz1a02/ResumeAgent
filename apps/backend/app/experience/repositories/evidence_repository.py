@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EvidenceItem, ExperienceEvidence
+from app.experience.models import EvidenceItem, ExperienceEvidence
 
 _EVIDENCE_FIELDS = frozenset({"action", "result", "metrics"})
 

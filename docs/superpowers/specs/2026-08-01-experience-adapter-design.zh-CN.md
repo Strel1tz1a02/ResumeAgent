@@ -106,25 +106,25 @@ ended
 
 `ExperienceAdapter` 首期支持以下目标：
 
-| target.key | ref_id | 值类型 | 保存单元 |
-|---|---:|---|---|
-| `kind` | null | string | `identity` |
-| `title` | null | string | `identity` |
-| `organization` | null | string/null | 单字段 |
-| `role` | null | string/null | 单字段 |
-| `location` | null | string/null | 单字段 |
-| `start_date` | null | YYYY-MM/null | `dates` |
-| `end_date` | null | YYYY-MM/null | `dates` |
-| `is_current` | null | boolean | `dates` |
-| `background` | null | string/null | 单字段 |
-| `technologies` | null | string[] | 单字段 |
-| `tags` | null | string[] | 单字段 |
-| `notes` | null | string/null | 单字段 |
-| `evidence` | null | Evidence object[] | `evidence_collection + evidence:{id}` |
+| scope.field | 值类型 | 保存单元 |
+|---|---|---|
+| `kind` | string | `identity` |
+| `title` | string | `identity` |
+| `organization` | string/null | 单字段 |
+| `role` | string/null | 单字段 |
+| `location` | string/null | 单字段 |
+| `start_date` | YYYY-MM/null | `dates` |
+| `end_date` | YYYY-MM/null | `dates` |
+| `is_current` | boolean | `dates` |
+| `background` | string/null | 单字段 |
+| `technologies` | string[] | 单字段 |
+| `tags` | string[] | 单字段 |
+| `notes` | string/null | 单字段 |
+| `evidence` | Evidence object[] | `evidence_collection + evidence:{id}` |
 
-所有 EvidenceItem 共享同一个 `{key: "evidence", ref_id: null}` 会话。用户从任意 EvidenceItem 的 action、result、metrics 或新增区域启动 AI 时，都进入这个集合会话；在同一会话中可以讨论多个 EvidenceItem。
+所有 EvidenceItem 共享同一个 `{field: "evidence"}` 会话。用户从任意 EvidenceItem 的 action、result、metrics 或新增区域启动 AI 时，都进入这个集合会话；在同一会话中可以讨论多个 EvidenceItem。
 
-AI 修改已有 EvidenceItem 时，Tool `target.evidence_id` 必须显式携带目标 ID，`suggested_content` 必须是该 Item 完整的 `action/result/metrics` 对象。一次 Tool Call 只整体覆盖一个 EvidenceItem，其他 Item 不得连带变化。创建时 `evidence_id=null`，审批通过后在关系表末尾追加归属；API 返回派生的 `evidence_ids`。
+AI 修改已有 EvidenceItem 时，Tool `scope.evidence_id` 必须显式携带目标 ID，`suggested_content` 必须是该 Item 完整的 `action/result/metrics` 对象。一次 Tool Call 只整体覆盖一个 EvidenceItem，其他 Item 不得连带变化。创建时 `evidence_id=null`，审批通过后在关系表末尾追加归属；API 返回派生的 `evidence_ids`。
 
 ### 4.2 文本导入与原文销毁
 
@@ -239,7 +239,7 @@ API 仍按具体字段返回它所属单元的 revision，因此同一保存单�
 新增 `ExperienceFieldService`，成为手动保存和 AI 覆盖共用的唯一字段写入入口。它负责：
 
 ```python
-read_target(experience_id, target) -> FieldSnapshot
+read_scope(experience_id, scope) -> FieldSnapshot
 save_unit(experience_id, unit, values, expected_revision) -> ExperienceDetail
 save_all(experience_id, units, expected_revisions) -> ExperienceDetail
 prepare_field_change(...) -> PreparedExperienceChange | ImmediateResult
@@ -260,7 +260,7 @@ append_evidence(...) -> FieldMutationResult
 - `updated_at` 审计时间更新；
 - 事务提交和回滚。
 
-`ExperienceAdapter` 和 `ContentChangeHandler` 不得直接写 `ExperienceRepository` 或 `EvidenceRepository`，也不得复制字段白名单、所有权、内容格式、no-change、revision 或保存规则。Handler 只解析参数并根据 target 形态路由到上述 Service 方法。
+`ExperienceAdapter` 和 `ContentChangeHandler` 不得直接写 `ExperienceRepository` 或 `EvidenceRepository`，也不得复制字段白名单、所有权、内容格式、no-change、revision 或保存规则。Handler 只解析参数并根据 scope 形态路由到上述 Service 方法。
 
 现有 `ExperienceService.patch()`、`EvidenceService.patch()` 和前端保存接口需要逐步改为调用同一字段服务，从而保证所有写入都会正确推进字段 revision。
 
@@ -277,7 +277,7 @@ class ExperienceAdapter(BaseAdapter):
     async def validate_binding(
         self,
         subject: SubjectRef,
-        target: TargetRef,
+        scope: ScopeRef,
     ) -> ValidatedBinding:
         ...
 
@@ -311,7 +311,7 @@ register_adapter(ExperienceAdapter(...))
 ```json
 {
   "subject": {"type": "experience", "id": "7"},
-  "target": {"key": "background", "ref_id": null}
+  "scope": {"field": "background"}
 }
 ```
 
@@ -320,9 +320,8 @@ register_adapter(ExperienceAdapter(...))
 - subject type 精确为 `experience`；
 - subject ID 能转换为正整数；
 - ExperienceItem 存在且未归档；
-- target key 在支持白名单中；
-- 经历字段不能携带 Evidence ID；
-- `evidence` 会话必须绑定集合且 `ref_id=null`；
+- scope field 在支持白名单中；
+- 会话范围不携带 Evidence ID；
 - 目标字段具有对应的字段状态记录。
 
 校验完成后返回规范化绑定。会话只能在校验成功后落库。
@@ -353,7 +352,7 @@ Evidence 集合会话在每轮生成开始时保存集合 revision，并保存 `
 
 ### 7.4 ToolContext 的最小通用扩展
 
-当前通用 `ToolContext` 只有 subject、target 和运行 ID，无法携带模型开始生成时读取到的业务 revision。为了满足“生成期间保存后建议不进入审批”，本阶段需要为通用协议增加一个完全不透明的字段：
+当前通用 `ToolContext` 只有 subject、scope 和运行 ID，无法携带模型开始生成时读取到的业务 revision。为了满足“生成期间保存后建议不进入审批”，本阶段需要为通用协议增加一个完全不透明的字段：
 
 ```python
 @dataclass(frozen=True)
@@ -391,7 +390,7 @@ Evidence 集合会话允许模型选择新增或修改任意一个 Item，因此
 }
 ```
 
-通用层只检查该对象可序列化并原样交给 Handler，不识别 revision 或字段语义。`ContentChangeHandler` 将生成起点 revision 连同模型参数路由给领域 Service；Service 与数据库最新快照比较，并返回通过校验的 proposal 和 `guard_payload`。审批恢复阶段继续使用已经持久化的 guard，不依赖进程内对象。
+通用层只检查该对象可序列化并原样交给 Handler，不识别 revision 或字段语义。Service 返回统一的 `proposal_payload` 和 `guard_payload`；审批恢复使用已持久化的 payload，不再读取原始模型 arguments。
 
 ## 8. Prompt 与上下文
 
@@ -455,7 +454,7 @@ flowchart TD
 - Tool Lifecycle 在返回审批提案前已经完成持久化，`tool_executor` 只发送标准 `proposal.requested` 并记录 `proposal_id`；
 - `approver` 是唯一调用 `interrupt()` 的节点。审批时对应业务 Handler 的 `resolve()` 已经由通用 Service 调用；恢复后该节点根据 Tool Result 发送前端业务事件并直接结束；
 - 不得在 `approver` 调用 `interrupt()` 之前执行业务写入，避免节点重放造成重复副作用；
-- 无效 Tool 和 no-change 使用 opaque `ImmediateToolResult`，不进入审批，也不触发额外模型调用。
+- 无效 Tool 和 no-change 使用 opaque `ToolResult`，不进入审批，也不触发额外模型调用。
 - Graph 不包含 `load_context` 节点；业务上下文由 Adapter 在执行前构造，字段状态完整性由启动前 migration 保证，Graph 不编排任何 `ensure_field_states()` 节点。
 
 ## 10. 经历业务 Tool
@@ -474,7 +473,7 @@ Tool 的使用时机和参数语义由 `ContentChangeHandler.description` 描述
 
 ```json
 {
-  "target": {"key": "background", "evidence_id": null},
+  "scope": {"field": "background", "evidence_id": null},
   "suggested_content": "AI 建议内容"
 }
 ```
@@ -483,7 +482,7 @@ Tool 的使用时机和参数语义由 `ContentChangeHandler.description` 描述
 
 ```json
 {
-  "target": {"key": "evidence", "evidence_id": 12},
+  "scope": {"field": "evidence", "evidence_id": 12},
   "suggested_content": {
     "action": "完整行动",
     "result": "完整结果",
@@ -499,9 +498,9 @@ Evidence 创建使用相同结构，但 `evidence_id=null`。Tool 参数中的 `
 `ContentChangeHandler` 只负责：
 
 1. 通过 `description` 向模型说明工具用途；
-2. 使用 Pydantic 把模型 JSON 解析为 `target + suggested_content`；
-3. 根据 target 形态路由到 `prepare_field_change()`、`prepare_evidence_change()` 或 `prepare_evidence_append()`；
-4. 把 Service 返回的准备结果转换成通用 `ApprovalProposal` 或 `ImmediateToolResult`；
+2. 使用 Pydantic 把模型 JSON 解析为 `scope + suggested_content`；
+3. 根据 scope 形态路由到 `prepare_field_change()`、`prepare_evidence_change()` 或 `prepare_evidence_append()`；
+4. 把 Service 返回的准备结果转换成通用 `ApprovalProposal` 或 `ToolResult`；
 5. 审批同意后路由到 `apply_field()`、`apply_evidence()` 或 `append_evidence()`。
 
 Handler 不负责字段白名单、会话目标匹配、Evidence 所有权、内容格式、日期关系、no-change、revision 或归档校验。这些规则全部由 Service 实现。
@@ -510,7 +509,7 @@ Handler 不负责字段白名单、会话目标匹配、Evidence 所有权、内
 
 Service 收到路由请求后：
 
-1. 验证普通字段 target 与会话绑定一致；Evidence target 必须属于共享 Evidence 会话；
+1. 验证普通字段 scope 与会话 scope 一致；Evidence scope 必须属于共享 Evidence 会话；
 2. 验证目标字段类型、经历状态和 Evidence 所有权；
 3. 根据目标 Schema 解析和规范化 `suggested_content`；
 4. 创建时比较集合 revision，修改时比较指定 evidence_id 的 Item revision；
@@ -519,17 +518,16 @@ Service 收到路由请求后：
 
 返回规则：
 
-- revision 已变化：返回 `ImmediateToolResult`，不进入审批；
-- 目标或建议非法：返回 `ImmediateToolResult`，不进入审批；
-- 建议内容等于当前内容：返回 `ImmediateToolResult`，不进入审批；
+- revision 已变化：返回 `ToolResult`，不进入审批；
+- 目标或建议非法：返回 `ToolResult`，不进入审批；
+- 建议内容等于当前内容：返回 `ToolResult`，不进入审批；
 - 有效新建议：返回 `ApprovalProposal`。
 
 统一 proposal payload：
 
 ```json
 {
-  "operation": "content_change",
-  "target": {"key": "background", "ref_id": null},
+  "scope": {"field": "background", "evidence_id": null},
   "current_content": "数据库当前内容",
   "suggested_content": "AI 建议内容"
 }
@@ -540,8 +538,7 @@ Service 收到路由请求后：
 ```json
 {
   "experience_id": 7,
-  "operation": "content_change",
-  "target": {"key": "background", "ref_id": null},
+  "scope": {"field": "background", "evidence_id": null},
   "revision": 3,
   "normalized_current_content": "数据库当前内容"
 }
@@ -550,6 +547,8 @@ Service 收到路由请求后：
 proposal 必须先由通用 Tool 生命周期完整落库，再通过一条原子事件发送给前端。
 
 ### 10.4 resolve
+
+`resolve()` 只接收 `context`、`proposal_payload`、`guard_payload` 和审批决定，不再接收原始模型 arguments。
 
 `reject`：
 
@@ -560,21 +559,21 @@ proposal 必须先由通用 Tool 生命周期完整落库，再通过一条原�
 
 `approve`：
 
-- Handler 根据 target 形态调用 `apply_field()`、按 ID 整体覆盖的 `apply_evidence()` 或 `append_evidence()`；
+- Handler 根据 scope 形态调用 `apply_field()`、按 ID 整体覆盖的 `apply_evidence()` 或 `append_evidence()`；
 - 在同一个业务事务中再次校验字段 revision 和规范化当前值；
 - 校验成功才覆盖目标字段或目标 EvidenceItem；
 - 推进目标保存单元或 Evidence collection 的 revision；
 - 重新计算字段状态、completeness 和经历 lifecycle；
 - 返回最新目标值、revision、字段状态和 `ExperienceDetail`。
 
-Evidence 创建成功的 Tool Result 还必须返回数据库生成的 `evidence_id` 和更新后的 `evidence_ids` 顺序；已有 Evidence 只整体修改 target ID 指向的单一 Item，其他 Item 保持原值。
+Evidence 创建成功的 Tool Result 还必须返回数据库生成的 `evidence_id` 和更新后的 `evidence_ids` 顺序；已有 Evidence 只整体修改 scope ID 指向的单一 Item，其他 Item 保持原值。
 
 成功 Tool Result 示例：
 
 ```json
 {
   "outcome": "applied",
-  "target": {"key": "background", "ref_id": null},
+  "scope": {"field": "background", "evidence_id": null},
   "value": "已保存的新值",
   "revision": 4,
   "field_status": "complete",
@@ -587,7 +586,7 @@ Evidence 创建成功的 Tool Result 还必须返回数据库生成的 `evidence
 ```json
 {
   "outcome": "invalidated",
-  "target": {"key": "background", "ref_id": null},
+  "scope": {"field": "background", "evidence_id": null},
   "current_value": "最新数据库值",
   "revision": 4,
   "experience": {}
@@ -678,7 +677,7 @@ POST /conversations/{conversation_id}/close
 POST /conversations
 {
   "experience_id": 7,
-  "target": {"key": "background", "ref_id": null}
+  "scope": {"field": "background"}
 }
 ```
 
@@ -688,12 +687,12 @@ Router 转换为：
 AiChatService.create_conversation(
     adapter="ExperienceAdapter",
     subject={"type": "experience", "id": "7"},
-    target={"key": "background", "ref_id": None},
+    scope={"field": "background"},
     language=get_content_language(),
 )
 ```
 
-返回 conversation ID、规范化 target、字段状态和当前 revision。创建后由前端单独调用 opening 流，避免普通 JSON 响应和 SSE 生命周期耦合。
+返回 conversation ID、规范化 scope、字段状态和当前 revision。创建后由前端单独调用 opening 流，避免普通 JSON 响应和 SSE 生命周期耦合。
 
 ### 13.2 流接口
 
@@ -789,7 +788,8 @@ apps/backend/app/
 │   ├── __init__.py
 │   ├── adapters/
 │   │   ├── __init__.py
-│   │   └── adapter.py                     # ExperienceAdapter
+│   │   ├── adapter.py                     # ExperienceAdapter
+│   │   └── tool_context.py                # 通用 ToolContext 的经历语义解析
 │   ├── routers/
 │   │   ├── __init__.py
 │   │   ├── ai_chat.py                     # 经历专用聊天 API/SSE 转换
@@ -807,7 +807,6 @@ apps/backend/app/
 │   │   └── prompts.py                     # 中英文经历字段对话 Prompt
 │   ├── tools/
 │   │   ├── __init__.py
-│   │   ├── common.py
 │   │   └── content_change.py
 │   ├── services/
 │   │   ├── experience_service.py
@@ -881,7 +880,7 @@ experience-question-panel.tsx
 
 ### 18.1 后端单元测试
 
-- target/save-unit 映射；
+- scope/save-unit 映射；
 - 字段值规范化和状态计算；
 - revision 只在真实变更时增长；
 - 字段组所有成员 revision 同步增长；
@@ -889,7 +888,7 @@ experience-question-panel.tsx
 - `parse_input()` 只读取已保存内容且完全可序列化；
 - Prompt 中不可信数据边界和中英文输出；
 - `content_change` 统一参数 Schema；
-- Handler 根据 target 形态路由到正确 Service；
+- Handler 根据 scope 形态路由到正确 Service；
 - Service 校验目标绑定、Evidence 所有权和建议内容；
 - Evidence 共享集合会话，修改必须指定 ID 且整体覆盖单一 Item；
 - Evidence 创建不指定 ID 且只追加到末尾；
