@@ -2314,6 +2314,93 @@ async def test_cancelled_committed_claim_converges_its_run(
         await harness.checkpoints.close()
 
 
+@pytest.mark.parametrize("cancel_outer", [False, True])
+async def test_durable_claim_survives_session_close_failure(
+    isolated_db,
+    tmp_path,
+    monkeypatch,
+    cancel_outer,
+) -> None:
+    """commit 已持久化后，session close 失败不能丢失 claim ownership。"""
+    handler = _FailingContentChangeHandler(failures=0)
+    harness = await _start_graph_harness(
+        isolated_db,
+        tmp_path / "claim-close-failure.db",
+        handler=handler,
+    )
+    task: asyncio.Task[list[AiChatEvent]] | None = None
+    release_close = asyncio.Event()
+    try:
+        proposal_id = await _request_proposal(harness, "claim-close-failure")
+        original_commit = AsyncSession.commit
+        original_close = AsyncSession.close
+        close_entered = asyncio.Event()
+        claim_session: AsyncSession | None = None
+
+        async def tracked_commit(session: AsyncSession) -> None:
+            nonlocal claim_session
+            if claim_session is None:
+                claim_session = session
+            await original_commit(session)
+
+        async def close_then_fail(session: AsyncSession) -> None:
+            await original_close(session)
+            if session is claim_session:
+                close_entered.set()
+                await release_close.wait()
+                raise RuntimeError("simulated claim session close failure")
+
+        async def resolve() -> list[AiChatEvent]:
+            return [
+                event
+                async for event in harness.service.resolve_proposal(
+                    proposal_id,
+                    "approve",
+                    "r1",
+                )
+            ]
+
+        monkeypatch.setattr(AsyncSession, "commit", tracked_commit)
+        monkeypatch.setattr(AsyncSession, "close", close_then_fail)
+        task = asyncio.create_task(resolve(), name="claim-close-failure")
+        await close_entered.wait()
+        if cancel_outer:
+            task.cancel()
+        release_close.set()
+
+        events: list[AiChatEvent] = []
+        if cancel_outer:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            events = await task
+
+        async with isolated_db.session() as session:
+            repositories = harness.repositories.create(session)
+            row = await repositories.tool_calls.get(proposal_id)
+            assert row is not None
+            run = await repositories.runs.get(row.run_id)
+        if cancel_outer:
+            assert events == []
+            assert run is not None
+            assert run.status == "cancelled"
+        else:
+            assert [(event.event, event.data) for event in events] == [
+                ("run.failed", {"code": "proposal_finalize_failed"})
+            ]
+            assert run is not None
+            assert run.status == "failed"
+        assert handler.execute_count == 0
+        assert row.status == "awaiting_approval"
+    finally:
+        release_close.set()
+        if task is not None and not task.done():
+            task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await harness.checkpoints.close()
+
+
 async def test_postclaim_proposal_state_error_yields_one_run_failed(
     isolated_db,
     tmp_path,

@@ -457,7 +457,10 @@ class AiChatService:
                             raise ProposalStateError(str(proposal_id))
                     await session.commit()
 
+            claim_committed = False
+
             async def claim_run() -> None:
+                nonlocal claim_committed
                 async with database_module.db.session() as session:
                     repositories = self._repositories.create(session)
                     transitioned = await repositories.runs.transition(
@@ -468,13 +471,16 @@ class AiChatService:
                     if not transitioned:
                         raise ProposalStateError(str(proposal_id))
                     await session.commit()
+                    claim_committed = True
 
             claim_task = asyncio.create_task(
                 claim_run(),
                 name=f"ai-chat-run-{run_id}-claim",
             )
-            claim_cancellation = await _await_shielded_task(claim_task)
-            claimed_running = True
+            try:
+                claim_cancellation = await _await_shielded_task(claim_task)
+            finally:
+                claimed_running = claim_committed
             if claim_cancellation is not None:
                 raise claim_cancellation
 
