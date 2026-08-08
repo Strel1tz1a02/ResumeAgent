@@ -726,6 +726,7 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
         "2026_08_04_experience_revisions",
         "2026_08_05_unified_experience_revision_units",
         "2026_08_07_ai_chat_tool_call_index",
+        "2026_08_08_ai_chat_tool_call_state",
         "2026_08_08_ai_chat_conversation_scope",
         "2026_08_08_experience_chat_scope_field",
     }

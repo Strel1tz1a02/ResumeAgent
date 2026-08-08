@@ -151,8 +151,13 @@ class AiChatToolCall(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('received', 'awaiting_approval', 'resolved')",
+            "status IN ('received', 'validated', 'awaiting_approval', "
+            "'approved', 'executing', 'resolved')",
             name="ck_ai_chat_tool_status",
+        ),
+        CheckConstraint(
+            "status != 'resolved' OR tool_result IS NOT NULL",
+            name="ck_ai_chat_tool_result",
         ),
         CheckConstraint(
             "decision IS NULL OR decision IN ('approve', 'reject')",

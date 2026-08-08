@@ -122,6 +122,22 @@ class ToolCallRepository:
         await self._session.flush()
         return result.rowcount == 1
 
+    async def claim_execution(self, tool_call_id: int) -> bool:
+        """在执行低风险 Tool 前原子认领，事务回滚后仍可重试。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "received",
+            )
+            .values(
+                status="executing",
+                updated_at=utcnow_iso(),
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def pending_results(self, conversation_id: int) -> list[AiChatToolCall]:
         """返回尚未被成功模型响应消费的工具结果。"""
         result = await self._session.execute(
