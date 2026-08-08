@@ -452,9 +452,9 @@ flowchart TD
 实现映射说明：
 
 - `llm` 只负责模型流式调用、`assistant.delta` 事件和完整 Tool Call 组装；普通文本由通用 `AiChatService` 持久化；
-- `validator` 只调用 `ToolCallService.validate_call()`；Service 按 `(run_id, tool_call_index)` 幂等持久化调用并调用 Handler 的 `validation()`，Checkpoint 仅保存 Tool Call ID；
+- `validator` 只调用 `ToolCallService.validate_call()`；Service 按 `(run_id, tool_call_index)` 幂等持久化调用并调用 Handler 的 `validation()`；Checkpoint 不保存 trusted payload 或 ORM 对象，只保存 Tool Call ID，以及 `tool_call`、`tool_phase`、`tool_security`、`proposal_id`、`approval` 等 JSON control fields；
 - `guard` 读取 `validate_call()` 返回的 `security` 风险声明，统一决定直接执行或进入人工审批；Handler 不决定是否审批；
-- `approver` 是唯一调用 `interrupt()` 的节点，只接收 `decision + client_resolution_id`，并调用 `ToolCallService.record_decision()`；拒绝形成稳定结果，同意先提交 `approved` 再进入 `executor`；
+- `approver` 是唯一调用 `interrupt()` 的节点，接收完整 `{tool_call_id, decision, client_resolution_id}`，并调用 `ToolCallService.record_decision()`；拒绝形成稳定结果，同意先提交 `approved` 再进入 `executor`；
 - `executor` 只调用 `ToolCallService.execute_call()`；Service 在同一事务内原子认领调用、从数据库加载可信 payload、调用 Handler 的 `execute()` 并保存 Tool Result；
 - Graph 的生产 Tool 调用只允许经过 `runtime.tools` 的 `validate_call()`、`request_approval()`、`record_decision()` 和 `execute_call()` 四个入口，不直接访问 Handler 或 Repository；
 - 不得在 `approver` 调用 `interrupt()` 之前执行业务写入，避免节点重放造成重复副作用；
@@ -640,7 +640,7 @@ AI 生成期间目标字段仍允许手动编辑和保存。Graph 在开始一�
 审批完成后由通用 `AiChatService` 恢复相同 checkpoint：
 
 1. 原 suspended run 通过 CAS 认领为 running；
-2. `Command(resume=decision + client_resolution_id)` 恢复 Graph；
+2. `Command(resume={tool_call_id, decision, client_resolution_id})` 恢复 Graph；
 3. approver 调用 `ToolCallService.record_decision()`，先持久化 approve 或 reject；
 4. reject 直接形成 Tool Result；approve 进入 executor，由 `execute_call()` 在同一事务内完成 Handler 写入和 Tool Result；
 5. Graph 发出审批和经历业务结果事件并直接结束，不调用模型，Run 收敛为 completed；

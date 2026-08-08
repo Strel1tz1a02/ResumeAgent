@@ -154,11 +154,14 @@ flowchart LR
 → Graph validator 调用 ToolCallService.validate_call
 → Repository 固化调用，Handler.validation 生成可信 payload
 → Graph guard 根据 validate_call 返回的 security 决定执行或审批
-→ ToolCallService.request_approval 保存审批意图
-→ Graph approver 暂停并接收用户决定
-→ ToolCallService.record_decision 先提交 approved 或拒绝结果
-→ Graph executor 调用 ToolCallService.execute_call
-→ Handler.execute 与 Tool Result 在同一事务提交
+├─ LOW → Graph executor → ToolCallService.execute_call
+│        → Handler.execute 与 Tool Result 在同一事务提交 → END
+└─ MEDIUM / HIGH → ToolCallService.request_approval 保存审批意图
+   → Graph approver 暂停并接收用户决定
+   → ToolCallService.record_decision 持久化决定
+   ├─ approve → Graph executor → ToolCallService.execute_call
+   │           → Handler.execute 与 Tool Result 在同一事务提交 → END
+   └─ reject → END
 ```
 
 业务负责语义：
