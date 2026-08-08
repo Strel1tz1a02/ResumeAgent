@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
 
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.repositories import RepositoryFactory
@@ -13,6 +15,15 @@ from app.ai_chat.streaming.model import (
     TextDelta,
     ToolCallsCompleted,
 )
+from app.ai_chat.tools.buffer import AssembledToolCall
+from app.ai_chat.tools.handler import ToolContext
+from app.ai_chat.tools.results import (
+    ApprovalRequest,
+    ApprovedToolCall,
+    CompletedToolCall,
+    PreparedToolCall,
+)
+from app.ai_chat.tools.security import ToolSecurity
 from app.experience import ExperienceAdapter
 from app.experience.tools.content_change import (
     ContentChangeArguments,
@@ -46,6 +57,68 @@ class _RecordingModel:
         yield ModelCompleted("stop")
 
 
+@dataclass(frozen=True)
+class _LegacyApprovalRequired:
+    tool_call_id: int
+    proposal_payload: dict
+
+
+@dataclass(frozen=True)
+class _LegacyToolCompleted:
+    tool_call_id: int
+    result: dict
+
+
+class _RuntimeTools:
+    def __init__(
+        self,
+        validation_states,
+        *,
+        approval_state=None,
+        execution_result=None,
+    ) -> None:  # type: ignore[no-untyped-def]
+        self.validation_states = list(validation_states)
+        self.approval_state = approval_state
+        self.execution_result = execution_result
+        self.request_count = 0
+        self.execute_count = 0
+
+    async def validate_call(self, _context, _call):  # type: ignore[no-untyped-def]
+        return self.validation_states.pop(0)
+
+    async def request_approval(self, _tool_call_id):  # type: ignore[no-untyped-def]
+        self.request_count += 1
+        return self.approval_state
+
+    async def execute_call(self, _context, _tool_call_id):  # type: ignore[no-untyped-def]
+        self.execute_count += 1
+        return self.execution_result
+
+
+def _install_legacy_dispatch_types(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    module = ModuleType("app.ai_chat.tools.lifecycle")
+    module.ApprovalRequired = _LegacyApprovalRequired  # type: ignore[attr-defined]
+    module.ToolCompleted = _LegacyToolCompleted  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.ai_chat.tools.lifecycle", module)
+
+
+def _runtime_call() -> tuple[ToolContext, AssembledToolCall]:
+    return (
+        ToolContext(
+            conversation_id=1,
+            run_id=2,
+            subject={"type": "experience", "id": "3"},
+            scope={"field": "background"},
+        ),
+        AssembledToolCall(
+            index=0,
+            provider_id="provider-call",
+            name="content_change",
+            arguments={},
+        ),
+    )
+
+
 async def test_runtime_binding_is_an_immutable_snapshot(isolated_db) -> None:
     """绑定后的 Runtime 不受源字典后续修改，也不污染未绑定实例。"""
     handler = ContentChangeHandler()
@@ -76,6 +149,85 @@ async def test_runtime_exposes_only_service_handlers_to_model(isolated_db) -> No
     ]
 
     assert model.handlers is runtime.tools.model_handlers
+
+
+async def test_runtime_replays_awaiting_approval_without_side_effects(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """已等待审批的持久状态只映射旧 dispatch，不重复申请或执行。"""
+    _install_legacy_dispatch_types(monkeypatch)
+    tools = _RuntimeTools(
+        [ApprovalRequest(7, "content_change", {"suggested_content": "新背景"})]
+    )
+    runtime = AiChatRuntime(_RecordingModel(), tools)  # type: ignore[arg-type]
+    context, call = _runtime_call()
+
+    result = await runtime.receive_tool_call(context=context, call=call)
+
+    assert result == _LegacyApprovalRequired(7, {"suggested_content": "新背景"})
+    assert tools.request_count == 0
+    assert tools.execute_count == 0
+
+
+async def test_runtime_executes_approved_once_then_replays_resolved(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    """持久 approved 必须收敛为结果，后续 resolved 重放不能再次执行。"""
+    _install_legacy_dispatch_types(monkeypatch)
+    completed = CompletedToolCall(
+        7,
+        "content_change",
+        {"outcome": "applied"},
+        "approve",
+        False,
+    )
+    tools = _RuntimeTools(
+        [
+            ApprovedToolCall(7, "content_change", "resolution-1"),
+            CompletedToolCall(
+                7,
+                "content_change",
+                {"outcome": "applied"},
+                "approve",
+                True,
+            ),
+        ],
+        execution_result=completed,
+    )
+    runtime = AiChatRuntime(_RecordingModel(), tools)  # type: ignore[arg-type]
+    context, call = _runtime_call()
+
+    first = await runtime.receive_tool_call(context=context, call=call)
+    replay = await runtime.receive_tool_call(context=context, call=call)
+
+    assert first == _LegacyToolCompleted(7, {"outcome": "applied"})
+    assert replay == first
+    assert tools.request_count == 0
+    assert tools.execute_count == 1
+
+
+async def test_runtime_executes_approval_race_winner(monkeypatch) -> None:
+    """request_approval 被并发推进到 approved 时仍继续执行并返回旧结果。"""
+    _install_legacy_dispatch_types(monkeypatch)
+    tools = _RuntimeTools(
+        [PreparedToolCall(7, "content_change", ToolSecurity.MEDIUM)],
+        approval_state=ApprovedToolCall(7, "content_change", "resolution-1"),
+        execution_result=CompletedToolCall(
+            7,
+            "content_change",
+            {"outcome": "applied"},
+            "approve",
+            False,
+        ),
+    )
+    runtime = AiChatRuntime(_RecordingModel(), tools)  # type: ignore[arg-type]
+    context, call = _runtime_call()
+
+    result = await runtime.receive_tool_call(context=context, call=call)
+
+    assert result == _LegacyToolCompleted(7, {"outcome": "applied"})
+    assert tools.request_count == 1
+    assert tools.execute_count == 1
 
 
 async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:

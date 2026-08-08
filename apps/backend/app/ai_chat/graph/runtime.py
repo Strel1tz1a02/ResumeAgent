@@ -73,11 +73,11 @@ class AiChatRuntime:
                 tool_call_id=state.tool_call_id,
                 proposal_payload=state.proposal_payload,
             )
+        if isinstance(state, ApprovedToolCall):
+            state = await self.tools.execute_call(context, state.tool_call_id)
         if isinstance(state, CompletedToolCall):
             return ToolCompleted(
                 tool_call_id=state.tool_call_id,
                 result=state.result,
             )
-        if isinstance(state, ApprovedToolCall):
-            raise ToolProtocolError("Old Graph cannot dispatch an approved Tool Call")
         raise ToolProtocolError("Tool Call did not reach a dispatchable state")
