@@ -14,7 +14,9 @@ from app.ai_chat.tools.handler import ToolContext
 
 try:
     from app.ai_chat.tools.lifecycle import ApprovalRequired, ToolLifecycle
-except ImportError:  # The active graph refactor intentionally removes it.
+except ModuleNotFoundError as exc:
+    if exc.name != "app.ai_chat.tools.lifecycle":
+        raise
     ApprovalRequired = None  # type: ignore[misc,assignment]
     ToolLifecycle = None  # type: ignore[misc,assignment]
 from app.database import Database
