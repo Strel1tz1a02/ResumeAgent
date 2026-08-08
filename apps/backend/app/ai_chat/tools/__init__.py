@@ -1,28 +1,36 @@
-"""工具协议和生命周期辅助类型。"""
+"""工具协议、风险和结果类型。"""
 
 from app.ai_chat.tools.handler import ToolContext, ToolHandler
-from app.ai_chat.tools.lifecycle import (
-    ApprovalRequired,
-    ToolCompleted,
-    ToolDispatch,
-    ToolLifecycle,
-)
 from app.ai_chat.tools.results import (
     ApprovalProposal,
+    ApprovalRequest,
+    ApprovedToolCall,
+    CompletedToolCall,
     PendingToolResult,
+    PreparedToolCall,
+    ToolCallState,
     ToolInvocationResult,
     ToolResult,
+    ToolValidationResult,
+    ValidatedToolCall,
 )
+from app.ai_chat.tools.security import GuardDecision, ToolSecurity, guard_tool
 
 __all__ = [
     "ApprovalProposal",
-    "ApprovalRequired",
+    "ApprovalRequest",
+    "ApprovedToolCall",
+    "CompletedToolCall",
+    "GuardDecision",
     "PendingToolResult",
-    "ToolCompleted",
+    "PreparedToolCall",
+    "ToolCallState",
     "ToolContext",
     "ToolHandler",
     "ToolInvocationResult",
     "ToolResult",
-    "ToolDispatch",
-    "ToolLifecycle",
+    "ToolSecurity",
+    "ToolValidationResult",
+    "ValidatedToolCall",
+    "guard_tool",
 ]

@@ -229,6 +229,33 @@ class ToolCallRepository:
         row.updated_at = row.resolved_at
         await self._session.flush()
 
+    async def resolve_received(
+        self,
+        tool_call_id: int,
+        *,
+        tool_result: dict[str, Any],
+    ) -> bool:
+        """Atomically persist a validation-time terminal result exactly once."""
+        now = utcnow_iso()
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "received",
+            )
+            .values(
+                status="resolved",
+                decision=None,
+                tool_result=tool_result,
+                delivery_status="pending",
+                client_resolution_id=None,
+                resolved_at=now,
+                updated_at=now,
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def claim_resolution(
         self,
         tool_call_id: int,
