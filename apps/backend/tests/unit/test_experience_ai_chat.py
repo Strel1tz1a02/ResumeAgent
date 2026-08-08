@@ -825,11 +825,12 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
                 "suggested_content": "不会被应用",
             },
         )
-        await repos.tool_calls.request_approval(
+        assert await repos.tool_calls.save_validation(
             call,
             proposal_payload={"suggested_content": "不会被应用"},
             guard_payload={},
         )
+        assert await repos.tool_calls.claim_approval_request(call.id)
         await session.commit()
         proposal_id = call.id
 

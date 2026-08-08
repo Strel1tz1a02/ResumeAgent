@@ -184,23 +184,3 @@ class ContentChangeHandler(ToolHandler):
     def show_result(self, payload: JsonObject) -> ToolResult:
         """保留稳定 outcome，并统一封装经历工具结果。"""
         return ToolResult(dict(payload))
-
-    async def invoke(
-        self,
-        context: ToolContext,
-        arguments: BaseModel,
-    ) -> ToolValidationResult:
-        """临时兼容旧调用方；Task 7 删除。"""
-        return await self.validation(context, arguments.model_dump(mode="json"))
-
-    async def resolve(
-        self,
-        context: ToolContext,
-        proposal_payload: JsonObject,
-        guard_payload: JsonObject,
-        decision: Literal["approve", "reject"],
-    ) -> ToolResult:
-        """临时兼容旧审批收尾；Task 7 删除。"""
-        if decision == "reject":
-            return self.show_result({"outcome": "rejected"})
-        return await self.execute(context, proposal_payload, guard_payload)

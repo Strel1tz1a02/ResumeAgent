@@ -1,6 +1,6 @@
 """Protocol implemented by Tool business handlers."""
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,38 +33,26 @@ class ToolHandler(ABC):
     arguments_schema: type[BaseModel]
     security: ToolSecurity
 
+    @abstractmethod
     async def validation(
         self,
         context: ToolContext,
         arguments: JsonObject,
     ) -> ToolValidationResult:
-        """Use the old ``invoke`` protocol only while staged callers remain."""
-        legacy_invoke = getattr(self, "invoke", None)
-        if legacy_invoke is None:
-            raise NotImplementedError("Tool Handler must implement validation")
-        values = self.arguments_schema.model_validate(arguments)
-        return await legacy_invoke(context, values)
+        """Validate model arguments and prepare trusted execution payloads."""
 
+    @abstractmethod
     async def execute(
         self,
         context: ToolContext,
         proposal_payload: JsonObject,
         guard_payload: JsonObject,
     ) -> ToolResult:
-        """Use the old approved-only ``resolve`` protocol during migration."""
-        legacy_resolve = getattr(self, "resolve", None)
-        if legacy_resolve is None:
-            raise NotImplementedError("Tool Handler must implement execute")
-        return await legacy_resolve(
-            context,
-            proposal_payload,
-            guard_payload,
-            "approve",
-        )
+        """Execute one prepared operation inside the injected transaction."""
 
+    @abstractmethod
     def show_result(self, payload: JsonObject) -> ToolResult:
-        """Normalize a legacy or current Handler result."""
-        return ToolResult(dict(payload))
+        """Normalize a stable business result returned by this Handler."""
 
     def schema(self) -> dict[str, Any]:
         """Return provider-independent Tool JSON schema."""

@@ -120,20 +120,6 @@ class ToolCallRepository:
         )
         return result.scalar_one_or_none()
 
-    async def request_approval(
-        self,
-        row: AiChatToolCall,
-        *,
-        proposal_payload: dict[str, Any],
-        guard_payload: dict[str, Any],
-    ) -> None:
-        """将工具调用标记为等待用户决定。"""
-        row.proposal_payload = proposal_payload
-        row.guard_payload = guard_payload
-        row.status = "awaiting_approval"
-        row.updated_at = utcnow_iso()
-        await self._session.flush()
-
     async def save_validation(
         self,
         row: AiChatToolCall,
@@ -251,31 +237,6 @@ class ToolCallRepository:
                 client_resolution_id=None,
                 resolved_at=now,
                 updated_at=now,
-            )
-        )
-        await self._session.flush()
-        return result.rowcount == 1
-
-    async def claim_resolution(
-        self,
-        tool_call_id: int,
-        *,
-        decision: str,
-        client_resolution_id: str,
-    ) -> bool:
-        """原子认领待审批 Tool Call，防止跨进程重复执行业务副作用。"""
-        result = await self._session.execute(
-            update(AiChatToolCall)
-            .where(
-                AiChatToolCall.id == tool_call_id,
-                AiChatToolCall.status == "awaiting_approval",
-                AiChatToolCall.client_resolution_id.is_(None),
-            )
-            .values(
-                status="executing",
-                decision=decision,
-                client_resolution_id=client_resolution_id,
-                updated_at=utcnow_iso(),
             )
         )
         await self._session.flush()

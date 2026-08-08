@@ -360,10 +360,10 @@ class ToolContext:
     ...
     adapter_context: JsonObject
 
-async def AiChatRuntime.receive_tool_call(
-    ...,
-    adapter_context: JsonObject,
-) -> ToolDispatch:
+async def ContentChangeHandler.validation(
+    context: ToolContext,
+    arguments: JsonObject,
+) -> ToolValidationResult:
     ...
 ```
 
@@ -438,21 +438,25 @@ flowchart TD
     A["START"] --> B["LLM"]
     B --> C{"存在 Tool Call？"}
     C -->|"否"| Z["END"]
-    C -->|"是"| D["tool_executor"]
-    D --> E{"需要用户审批？"}
-    E -->|"否"| Z
-    E -->|"是"| F["approver"]
+    C -->|"是"| D["validator"]
+    D -->|"终态结果"| Z
+    D -->|"校验通过"| E["guard"]
+    E -->|"LOW"| H["executor"]
+    E -->|"MEDIUM / HIGH"| F["approver"]
     F -->|"interrupt"| G["等待用户审批"]
-    G -->|"approve / reject"| F
-    F --> Z
+    G -->|"approve"| H
+    G -->|"reject"| Z
+    H --> Z
 ```
 
 实现映射说明：
 
 - `llm` 只负责模型流式调用、`assistant.delta` 事件和完整 Tool Call 组装；普通文本由通用 `AiChatService` 持久化；
-- `tool_executor` 通过 `runtime.receive_tool_call()` 把 `content_change` 交给通用 Tool Lifecycle；具体字段、Evidence 修改或 Evidence 追加由 Handler 路由到 Service，Graph 不识别这些业务分支；
-- Tool Lifecycle 在返回审批提案前已经完成持久化，`tool_executor` 只发送标准 `proposal.requested` 并记录 `proposal_id`；
-- `approver` 是唯一调用 `interrupt()` 的节点。审批时对应业务 Handler 的 `resolve()` 已经由通用 Service 调用；恢复后该节点根据 Tool Result 发送前端业务事件并直接结束；
+- `validator` 只调用 `ToolCallService.validate_call()`；Service 按 `(run_id, tool_call_index)` 幂等持久化调用并调用 Handler 的 `validation()`，Checkpoint 仅保存 Tool Call ID；
+- `guard` 读取 `validate_call()` 返回的 `security` 风险声明，统一决定直接执行或进入人工审批；Handler 不决定是否审批；
+- `approver` 是唯一调用 `interrupt()` 的节点，只接收 `decision + client_resolution_id`，并调用 `ToolCallService.record_decision()`；拒绝形成稳定结果，同意先提交 `approved` 再进入 `executor`；
+- `executor` 只调用 `ToolCallService.execute_call()`；Service 在同一事务内原子认领调用、从数据库加载可信 payload、调用 Handler 的 `execute()` 并保存 Tool Result；
+- Graph 的生产 Tool 调用只允许经过 `runtime.tools` 的 `validate_call()`、`request_approval()`、`record_decision()` 和 `execute_call()` 四个入口，不直接访问 Handler 或 Repository；
 - 不得在 `approver` 调用 `interrupt()` 之前执行业务写入，避免节点重放造成重复副作用；
 - 无效 Tool 和 no-change 使用 opaque `ToolResult`，不进入审批，也不触发额外模型调用。
 - Graph 不包含 `load_context` 节点；业务上下文由 Adapter 在执行前构造，字段状态完整性由启动前 migration 保证，Graph 不编排任何 `ensure_field_states()` 节点。
@@ -500,8 +504,9 @@ Evidence 创建使用相同结构，但 `evidence_id=null`。Tool 参数中的 `
 1. 通过 `description` 向模型说明工具用途；
 2. 使用 Pydantic 把模型 JSON 解析为 `scope + suggested_content`；
 3. 根据 scope 形态路由到 `prepare_field_change()`、`prepare_evidence_change()` 或 `prepare_evidence_append()`；
-4. 把 Service 返回的准备结果转换成通用 `ApprovalProposal` 或 `ToolResult`；
-5. 审批同意后路由到 `apply_field()`、`apply_evidence()` 或 `append_evidence()`。
+4. 通过 `validation()` 把 Service 准备结果转换成 `ValidatedToolCall` 或终态 `ToolResult`；
+5. 通过 `security` 描述风险，但不决定是否审批；
+6. 通过 `execute()` 路由到 `apply_field()`、`apply_evidence()` 或 `append_evidence()`，并在内部调用 `show_result()`。
 
 Handler 不负责字段白名单、会话目标匹配、Evidence 所有权、内容格式、日期关系、no-change、revision 或归档校验。这些规则全部由 Service 实现。
 
@@ -521,7 +526,7 @@ Service 收到路由请求后：
 - revision 已变化：返回 `ToolResult`，不进入审批；
 - 目标或建议非法：返回 `ToolResult`，不进入审批；
 - 建议内容等于当前内容：返回 `ToolResult`，不进入审批；
-- 有效新建议：返回 `ApprovalProposal`。
+- 有效新建议：返回 `ValidatedToolCall`，是否审批由 Graph guard 决定。
 
 统一 proposal payload：
 
@@ -544,14 +549,15 @@ Service 收到路由请求后：
 }
 ```
 
-proposal 必须先由通用 Tool 生命周期完整落库，再通过一条原子事件发送给前端。
+proposal 必须先由 `ToolCallService.request_approval()` 完整落库，再通过一条原子事件发送给前端。
 
-### 10.4 resolve
+### 10.4 execute
 
-`resolve()` 只接收 `context`、`proposal_payload`、`guard_payload` 和审批决定，不再接收原始模型 arguments。
+`execute()` 只接收 `context`、`proposal_payload` 和 `guard_payload`，不接收原始模型 arguments 或审批决定。
 
 `reject`：
 
+- 由 `ToolCallService.record_decision()` 直接形成稳定结果，不调用 Handler 的 `execute()`；
 - 不写任何经历或 Evidence 业务数据；
 - 返回 `{"outcome":"rejected"}`；
 - 本次建议永久视为已拒绝；
@@ -559,7 +565,8 @@ proposal 必须先由通用 Tool 生命周期完整落库，再通过一条原�
 
 `approve`：
 
-- Handler 根据 scope 形态调用 `apply_field()`、按 ID 整体覆盖的 `apply_evidence()` 或 `append_evidence()`；
+- `approved` 先持久化，Graph executor 再调用 `ToolCallService.execute_call()`；
+- Handler 的 `execute()` 根据 scope 形态调用 `apply_field()`、按 ID 整体覆盖的 `apply_evidence()` 或 `append_evidence()`；
 - 在同一个业务事务中再次校验字段 revision 和规范化当前值；
 - 校验成功才覆盖目标字段或目标 EvidenceItem；
 - 推进目标保存单元或 Evidence collection 的 revision；
@@ -606,7 +613,7 @@ AI 生成期间目标字段仍允许手动编辑和保存。Graph 在开始一�
 
 即使保存请求与 proposal 请求发生极短竞态，也由数据库事务顺序决定结果。若 proposal 先落库而保存随后完成，审批时的第二次 guard 校验仍会阻止旧建议覆盖新值。
 
-审批认领也必须使用数据库 CAS：只有 `awaiting_approval` 且尚无 `client_resolution_id` 的 Tool Call 能写入决定。同一事务内依次完成认领、业务 revision CAS、字段覆盖和 Tool Result 持久化；任一步失败都会整体回滚，不能依赖进程内锁。
+审批决定必须使用数据库 CAS：只有 `awaiting_approval` 且尚无 `client_resolution_id` 的 Tool Call 能写入决定。`approve` 先独立提交为 `approved`；随后 executor 在一个事务内完成执行认领、业务 revision CAS、字段覆盖和 Tool Result 持久化。`reject` 直接持久化稳定结果，不进入 Handler。任一步竞争都由数据库状态收敛，不能依赖进程内锁。
 
 ### 11.2 未保存草稿
 
@@ -632,11 +639,12 @@ AI 生成期间目标字段仍允许手动编辑和保存。Graph 在开始一�
 
 审批完成后由通用 `AiChatService` 恢复相同 checkpoint：
 
-1. Handler 在同一数据库事务中完成 approve/reject、业务写入和 Tool Result；
-2. 原 suspended run 通过 CAS 恢复为 running；
-3. `Command(resume=...)` 恢复 Graph；
-4. Graph 发出经历业务结果事件并直接结束，不调用模型；
-5. Tool Result 保持 `pending`，等待下一条用户消息随模型上下文投递。
+1. 原 suspended run 通过 CAS 认领为 running；
+2. `Command(resume=decision + client_resolution_id)` 恢复 Graph；
+3. approver 调用 `ToolCallService.record_decision()`，先持久化 approve 或 reject；
+4. reject 直接形成 Tool Result；approve 进入 executor，由 `execute_call()` 在同一事务内完成 Handler 写入和 Tool Result；
+5. Graph 发出审批和经历业务结果事件并直接结束，不调用模型，Run 收敛为 completed；
+6. Tool Result 保持 `pending`，等待下一条用户消息随模型上下文投递。
 
 Run 只允许通过带来源状态条件的数据库 CAS 转换。`running -> suspended|completed|failed|cancelled`、`suspended -> running|completed|failed|cancelled` 的竞争只能有一个胜者，断流或关闭会话不能再被迟到的结果覆盖。若 Tool Result 已提交而 Graph 尚未完成收尾，使用相同审批幂等键重试时应从 suspended/cancelled 原 Run 恢复，并且不得再次执行字段覆盖。
 

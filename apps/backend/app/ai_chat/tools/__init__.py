@@ -2,14 +2,12 @@
 
 from app.ai_chat.tools.handler import ToolContext, ToolHandler
 from app.ai_chat.tools.results import (
-    ApprovalProposal,
     ApprovalRequest,
     ApprovedToolCall,
     CompletedToolCall,
     PendingToolResult,
     PreparedToolCall,
     ToolCallState,
-    ToolInvocationResult,
     ToolResult,
     ToolValidationResult,
     ValidatedToolCall,
@@ -17,7 +15,6 @@ from app.ai_chat.tools.results import (
 from app.ai_chat.tools.security import GuardDecision, ToolSecurity, guard_tool
 
 __all__ = [
-    "ApprovalProposal",
     "ApprovalRequest",
     "ApprovedToolCall",
     "CompletedToolCall",
@@ -27,7 +24,6 @@ __all__ = [
     "ToolCallState",
     "ToolContext",
     "ToolHandler",
-    "ToolInvocationResult",
     "ToolResult",
     "ToolSecurity",
     "ToolValidationResult",

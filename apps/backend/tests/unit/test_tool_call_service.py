@@ -2,7 +2,10 @@
 
 import asyncio
 import sqlite3
+import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -20,14 +23,11 @@ from app.ai_chat.services.tool_call_service import ToolCallService
 from app.ai_chat.tools.buffer import AssembledToolCall
 from app.ai_chat.tools.handler import ToolContext, ToolHandler
 from app.ai_chat.tools.results import (
-    ApprovalProposal,
     ApprovalRequest,
     ApprovedToolCall,
     CompletedToolCall,
     PreparedToolCall,
     ToolResult,
-    ToolInvocationResult,
-    ToolValidationResult,
     ValidatedToolCall,
 )
 from app.ai_chat.tools.security import ToolSecurity
@@ -76,25 +76,6 @@ class _DemoHandler(ToolHandler):
 class _NeverValidateHandler(_DemoHandler):
     async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
         raise AssertionError("validated replay must not regenerate trusted payloads")
-
-
-class _LegacyHandler(ToolHandler):
-    """Old invoke/resolve handlers remain import-safe during staged migration."""
-
-    name = "legacy"
-    description = "legacy"
-    arguments_schema = _DemoArguments
-    security = ToolSecurity.MEDIUM
-
-    async def invoke(self, context, arguments):  # type: ignore[no-untyped-def]
-        values = self.arguments_schema.model_validate(arguments)
-        return ApprovalProposal(
-            proposal_payload={"value": values.value},
-            guard_payload={"trusted": values.value},
-        )
-
-    async def resolve(self, context, proposal_payload, guard_payload, decision):  # type: ignore[no-untyped-def]
-        return ToolResult({"outcome": decision})
 
 
 class _ConcurrentDemoHandler(_DemoHandler):
@@ -333,18 +314,111 @@ async def test_bind_handlers_returns_an_isolated_immutable_service(isolated_db) 
         bound.model_handlers["other"] = handler  # type: ignore[index]
 
 
-async def test_legacy_handler_protocol_remains_instantiable_during_migration(
-    isolated_db,
-) -> None:
-    handler = _LegacyHandler()
+def test_tool_handler_requires_each_business_method() -> None:
+    """Tool Handler 缺少任一业务方法时都不能注册实例。"""
 
-    validation = await handler.validation(
-        _tool_context(1, 1), {"value": "input"}
+    class CompleteHandler(ToolHandler):
+        name = "complete"
+        description = "complete"
+        arguments_schema = _DemoArguments
+        security = ToolSecurity.LOW
+
+        async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
+            return self.show_result({"outcome": "validated"})
+
+        async def execute(  # type: ignore[no-untyped-def]
+            self, context, proposal_payload, guard_payload
+        ):
+            return self.show_result({"outcome": "executed"})
+
+        def show_result(self, payload):  # type: ignore[no-untyped-def]
+            return ToolResult(dict(payload))
+
+    required = {"validation", "execute", "show_result"}
+    assert ToolHandler.__abstractmethods__ == required
+    for missing in required:
+        methods = {
+            name: CompleteHandler.__dict__[name]
+            for name in required - {missing}
+        }
+        incomplete = type(
+            f"Missing{missing.title()}Handler",
+            (ToolHandler,),
+            {
+                "name": f"missing_{missing}",
+                "description": "incomplete",
+                "arguments_schema": _DemoArguments,
+                "security": ToolSecurity.LOW,
+                **methods,
+            },
+        )
+        with pytest.raises(TypeError, match="abstract"):
+            incomplete()
+
+
+def test_fresh_process_exposes_only_the_unified_tool_contract() -> None:
+    """Fresh import 不得因 pytest 顺序继续暴露旧 Tool 协议。"""
+    backend_root = Path(__file__).resolve().parents[2]
+    script = """
+import importlib
+from pathlib import Path
+
+try:
+    importlib.import_module("app.ai_chat.tools.lifecycle")
+except ModuleNotFoundError as exc:
+    assert exc.name == "app.ai_chat.tools.lifecycle"
+else:
+    raise AssertionError("legacy lifecycle module is still importable")
+
+import app.ai_chat.tools as tools
+import app.ai_chat.tools.results as results
+from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.repositories import RepositoryFactory, ToolCallRepository
+from app.ai_chat.services import ToolCallService
+from app.ai_chat.streaming.model import AiChatModel
+from app.ai_chat.tools.handler import ToolHandler
+from app.database import db
+from app.experience import ExperienceAdapter
+from app.experience.graph import build_experience_graph
+from app.experience.tools.content_change import ContentChangeHandler
+
+for alias in ("ApprovalProposal", "ToolInvocationResult"):
+    assert not hasattr(results, alias), alias
+    assert not hasattr(tools, alias), alias
+assert ToolHandler.__abstractmethods__ == {"validation", "execute", "show_result"}
+assert not hasattr(ToolHandler, "invoke")
+assert not hasattr(ToolHandler, "resolve")
+assert not hasattr(ContentChangeHandler, "invoke")
+assert not hasattr(ContentChangeHandler, "resolve")
+assert not hasattr(ToolCallRepository, "request_approval")
+assert not hasattr(ToolCallRepository, "claim_resolution")
+assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools"}
+assert not hasattr(AiChatRuntime, "receive_tool_call")
+
+service = ToolCallService(db.session, RepositoryFactory()).bind_handlers(
+    ExperienceAdapter().get_tool_handlers()
+)
+graph = build_experience_graph(AiChatRuntime(AiChatModel(), service))
+assert set(graph.nodes) == {"llm", "validator", "guard", "approver", "executor"}
+graph.compile()
+
+app_root = Path.cwd() / "app"
+for call in ("handler.validation", "handler.execute"):
+    matches = [
+        path.relative_to(Path.cwd()).as_posix()
+        for path in app_root.rglob("*.py")
+        if call in path.read_text(encoding="utf-8")
+    ]
+    assert matches == ["app/ai_chat/services/tool_call_service.py"], (call, matches)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=backend_root,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-
-    assert isinstance(validation, ValidatedToolCall)
-    assert validation.proposal_payload == {"value": "input"}
-    assert ToolInvocationResult is ToolValidationResult
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 async def test_validate_call_rejects_unknown_handler_before_materializing(
@@ -1290,43 +1364,6 @@ async def test_repository_transition_rejects_or_executes_validated_call_once(
     assert rejected.client_resolution_id == "reject-1"
     assert direct is not None
     assert direct.status == "executing"
-
-
-async def test_legacy_claim_resolution_keeps_result_write_in_same_transaction(
-    isolated_db,
-) -> None:
-    tool_call_id = await _create_received_tool_call(isolated_db)
-
-    async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
-        row = await repository.get(tool_call_id)
-        assert row is not None
-        await repository.request_approval(
-            row,
-            proposal_payload={"proposal": "trusted"},
-            guard_payload={"guard": "trusted"},
-        )
-        assert await repository.claim_resolution(
-            tool_call_id,
-            decision="reject",
-            client_resolution_id="legacy-reject-1",
-        ) is True
-        assert row.status == "executing"
-        assert row.decision == "reject"
-        assert row.client_resolution_id == "legacy-reject-1"
-        await repository.resolve(
-            row,
-            decision="reject",
-            tool_result={"outcome": "rejected"},
-            client_resolution_id="legacy-reject-1",
-        )
-        await session.commit()
-
-    async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
-    assert row is not None
-    assert row.status == "resolved"
-    assert row.tool_result == {"outcome": "rejected"}
 
 
 def test_tool_call_state_migration_backfills_validated(tmp_path) -> None:

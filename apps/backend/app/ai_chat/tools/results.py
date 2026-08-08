@@ -34,11 +34,6 @@ class ToolResult:
 
 ToolValidationResult = ValidatedToolCall | ToolResult
 
-# Temporary aliases keep staged callers import-safe until Task 5/7 removes the
-# legacy invoke/resolve protocol.
-ApprovalProposal = ValidatedToolCall
-ToolInvocationResult = ToolValidationResult
-
 
 @dataclass(frozen=True)
 class PreparedToolCall:

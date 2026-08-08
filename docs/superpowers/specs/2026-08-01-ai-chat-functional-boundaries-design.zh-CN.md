@@ -144,22 +144,21 @@ flowchart LR
 
 所以不能把一张固定聊天 Graph 放在通用模块里要求所有业务使用。
 
-## 2.5 Tool Call 通用生命周期
+## 2.5 Tool Call 统一执行路径
 
 通用聊天负责机制：
 
 ```text
 接收 Tool Call
 → 聚合完整参数
-→ 找到对应 Handler
-→ 调用业务校验
-→ 保存 Tool 记录
-→ 发送原子提案
-→ 暂停 Graph
-→ 接收用户审批
-→ 调用业务应用逻辑
-→ 保存 Tool Result
-→ 恢复 Graph
+→ Graph validator 调用 ToolCallService.validate_call
+→ Repository 固化调用，Handler.validation 生成可信 payload
+→ Graph guard 根据 validate_call 返回的 security 决定执行或审批
+→ ToolCallService.request_approval 保存审批意图
+→ Graph approver 暂停并接收用户决定
+→ ToolCallService.record_decision 先提交 approved 或拒绝结果
+→ Graph executor 调用 ToolCallService.execute_call
+→ Handler.execute 与 Tool Result 在同一事务提交
 ```
 
 业务负责语义：
@@ -167,7 +166,7 @@ flowchart LR
 - Tool 参数代表什么；
 - 参数是否合法；
 - 是否与当前值相同；
-- 是否需要用户审批；
+- Tool 的风险等级；
 - 审批后具体修改什么；
 - 如何检查业务并发；
 - Tool Result 中返回哪些业务结果。
@@ -226,7 +225,7 @@ EvidenceItem
 
 业务只需要保证：
 
-- Tool 的 `apply()` 是幂等或受到业务 guard 保护；
+- Tool 的 `execute()` 使用 Service 注入的事务，并受到可信 guard 保护；
 - 重复出现相同建议时能够通过当前值判断为 no-change；
 - 不因为模型重试重复修改业务数据。
 
@@ -399,7 +398,8 @@ Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值�
 - 通过独立 `description` 字段向模型说明工具用途和调用条件；
 - 参数 Schema；
 - 根据 scope 形态选择字段修改、Evidence 修改或 Evidence 追加 Service；
-- 将 Service 结果转换为通用 proposal 或 Tool Result。
+- 将 Service 结果转换为 `ValidatedToolCall` 或终态 `ToolResult`；
+- 通过 `security` 声明风险，并实现 `execute()` 与 `show_result()`。
 
 Evidence 业务只创建一个集合级会话。模型修改已有 EvidenceItem 时在 Tool 参数中提交 `evidence_id` 和完整 `action/result/metrics`，Handler 路由到按 ID 整体覆盖服务；创建时不提交 ID 并追加到末尾。通用聊天层仍不理解这些业务语义。
 
@@ -434,9 +434,9 @@ Tool 名称、调用条件和参数提交规则不写死在系统 Prompt。通�
 | 创建会话 | 保存会话、状态和引用 | 校验 subject/scope 是否有效 |
 | 开始一轮 | 保存消息和 run | 解析输入、加载业务上下文 |
 | 模型调用 | 模型客户端、内部流式事件 | Prompt、Graph、Tools、业务 SSE 转换 |
-| Tool 校验 | 聚合参数、调用 Handler | 类型校验、no-change、guard |
-| 形成提案 | 持久化、原子事件、interrupt | proposal 展示数据 |
-| 用户审批 | 幂等、状态流转、resume | 应用业务修改或判断失效 |
+| Tool 校验 | Graph 调用 `ToolCallService.validate_call()`；Service 固化调用并分派 Handler | Handler 类型校验、no-change 和可信 guard |
+| 形成提案 | Graph guard 统一风险分流；`ToolCallService.request_approval()` 持久化审批意图 | Handler 声明 `security` 并提供 proposal 展示数据 |
+| 用户审批 | `ToolCallService.record_decision()` 幂等提交决定，Graph resume | approve 后由 Handler `execute()` 应用业务修改；reject 不进入 Handler |
 | 审批收尾 | 恢复 checkpoint、持久化可选续答、投递 Tool Result | 决定直接结束或继续调用模型 |
 | 页面回写 | 透传 business payload | 精确更新业务表单 |
 | 删除清理 | 提供按 subject 清理接口 | 决定何时调用清理 |
@@ -533,14 +533,15 @@ apps/backend/app/
 │   │
 │   ├── services/
 │   │   ├── __init__.py
-│   │   └── service.py                    # AiChatService；通用流程入口
+│   │   ├── service.py                    # AiChatService；通用流程入口
+│   │   └── tool_call_service.py          # Handler 绑定、固化、审批记录和原子执行
 │   │
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── handler.py                    # ToolHandler 抽象协议
-│   │   ├── lifecycle.py                  # Tool Call 通用生命周期
 │   │   ├── buffer.py                     # Tool 参数分片聚合
-│   │   └── results.py                    # Tool 提案、结果和延迟投递类型
+│   │   ├── results.py                    # 校验、审批、执行和延迟投递类型
+│   │   └── security.py                   # Tool 风险声明和 guard 路由
 │   │
 │   ├── repositories/
 │   │   ├── __init__.py

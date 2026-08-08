@@ -321,11 +321,12 @@ START
 
 1. `apps/backend/app/experience/tools/content_change.py`；
 2. `apps/backend/app/ai_chat/tools/handler.py`；
-3. `apps/backend/app/ai_chat/tools/lifecycle.py`；
-4. `builder.py` 中 `validate_tool_call`、`route_tool`、`persist_proposal`；
-5. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
+3. `apps/backend/app/ai_chat/services/tool_call_service.py`；
+4. `apps/backend/app/ai_chat/repositories/tool_call_repository.py`；
+5. `builder.py` 中 `validator`、`guard`、`approver`、`executor`；
+6. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
 
-核心问题：Handler 的 `invoke()` 和 `resolve()` 为什么分开？`proposal_payload` 与 `guard_payload` 为什么不能合并成一个前端对象？
+核心问题：Handler 的 `validation()`、`execute()` 和 `show_result()` 为什么分开？`ToolCallService` 为什么必须统一固化、审批记录和执行事务？`proposal_payload` 与 `guard_payload` 为什么不能合并成一个前端对象？
 
 产出：Tool Call 生命周期图 + `content_change` 参数卡。
 
@@ -333,7 +334,7 @@ START
 
 按顺序阅读：
 
-1. `builder.py` 中 `await_approval` 和 `finalize_tool_result`；
+1. `builder.py` 中 `approver` 和 `executor`；
 2. `apps/backend/app/ai_chat/graph/runner.py`；
 3. `apps/backend/app/ai_chat/checkpoint/factory.py`；
 4. `AiChatService.resolve_proposal()`；
@@ -431,21 +432,25 @@ streamExperienceMessage
 ```text
 模型输出 content_change
 → ToolCallBuffer 聚合参数
-→ graph.validate_tool_call
-→ AiChatRuntime.receive_tool_call
-→ ToolLifecycle.receive
-→ ContentChangeHandler.invoke
+→ graph.validator
+→ ToolCallService.validate_call
+→ ContentChangeHandler.validation
 → ExperienceAiMutationService.prepare_*
-→ 持久化 awaiting_approval ToolCall
-→ graph.await_approval / interrupt
+→ 持久化 ValidatedToolCall
+→ graph.guard 根据 ToolCallService 返回的 security 分流
+→ ToolCallService.request_approval
+→ graph.approver / interrupt
 → run=suspended
 → 前端展示 proposal
 → resolveExperienceProposal
 → AiChatService.resolve_proposal
-→ ContentChangeHandler.resolve
+→ Command(resume=decision + client_resolution_id)
+→ ToolCallService.record_decision 先提交 approved
+→ graph.executor
+→ ToolCallService.execute_call 原子认领执行
+→ ContentChangeHandler.execute
 → ExperienceAiMutationService.apply_*
-→ Command(resume=approval)
-→ finalize_tool_result
+→ Handler.show_result
 → run=completed，Tool Result 保持 pending
 ```
 
