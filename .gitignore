@@ -139,3 +139,6 @@ config.json
 
 # Superpowers brainstorming visual-companion scratch (local only)
 /.superpowers/
+
+# Local Git worktrees used for isolated agent tasks
+/.worktrees/
