@@ -7,11 +7,11 @@ from app.ai_chat.types import JsonObject
 
 
 class ApprovalInput(TypedDict):
-    """传入恢复后业务图的审批决定和工具结果。"""
+    """传入恢复后业务图的审批决定与幂等标识。"""
 
     tool_call_id: int
     decision: Literal["approve", "reject"]
-    tool_result: JsonObject
+    client_resolution_id: str
 
 
 class AdapterInput(TypedDict):

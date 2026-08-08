@@ -21,7 +21,6 @@ from app.ai_chat.models import AiChatMessage
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.streaming.events import AiChatEvent
-from app.ai_chat.tools.lifecycle import ToolLifecycle
 from app.ai_chat.graph.state import AdapterInput, ApprovalInput
 from app.ai_chat.tools.results import PendingToolResult
 from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
@@ -36,13 +35,11 @@ class AiChatService:
         self,
         registry: AdapterRegistry,
         runner: GraphRunner,
-        tool_lifecycle: ToolLifecycle,
         repositories: RepositoryFactory,
     ) -> None:
         """组装无状态协作者；审批互斥由数据库 CAS 保证。"""
         self._registry = registry
         self._runner = runner
-        self._tool_lifecycle = tool_lifecycle
         self._repositories = repositories
 
     async def create_conversation(
@@ -313,64 +310,99 @@ class AiChatService:
         decision: Literal["approve", "reject"],
         client_resolution_id: str,
     ) -> AsyncIterator[AiChatEvent]:
-        """完成审批后恢复同一检查点收尾，不额外调用模型。"""
+        """只恢复审批决定；实际执行由 Graph executor 完成。"""
         async with database_module.db.session() as session:
             repositories = self._repositories.create(session)
-            repository = repositories.tool_calls
-            call = await repository.get(proposal_id)
+            call = await repositories.tool_calls.get(proposal_id)
             if call is None:
                 raise ToolCallNotFoundError(str(proposal_id))
             conversation = await repositories.conversations.get(call.conversation_id)
             run = await repositories.runs.get(call.run_id)
             if conversation is None or run is None:
                 raise ProposalStateError(str(proposal_id))
-            adapter = self._registry.get(conversation.adapter)
-            handlers = adapter.get_tool_handlers()
-            subject = conversation.subject
-            scope = conversation.scope
+            self._registry.get(conversation.adapter)
             adapter_name = conversation.adapter
             conversation_id = conversation.id
             run_id = run.id
-            already_completed = run.status == "completed"
-            recover_interrupt = run.status not in {"suspended", "completed"}
-
-        if recover_interrupt:
-            recovered = await self._runner.ensure_interrupted(
-                adapter_name=adapter_name,
-                conversation_id=conversation_id,
-            )
-            if not recovered:
+            if call.status in {"approved", "resolved"}:
+                if (
+                    call.decision != decision
+                    or call.client_resolution_id != client_resolution_id
+                ):
+                    raise IdempotencyConflictError(client_resolution_id)
+                if call.status == "resolved" and run.status == "completed":
+                    yield AiChatEvent(
+                        "proposal.resolved",
+                        {"proposal_id": proposal_id, "decision": decision},
+                    )
+                    return
+            elif call.status != "awaiting_approval":
                 raise ProposalStateError(str(proposal_id))
-            async with database_module.db.session() as session:
-                repositories = self._repositories.create(session)
-                transitioned = await repositories.runs.transition(
-                    run_id,
-                    from_statuses={"running", "cancelled"},
-                    to_status="suspended",
-                )
-                if not transitioned:
-                    raise ProposalStateError(str(proposal_id))
-                await session.commit()
+            if run.status == "completed":
+                raise ProposalStateError(str(proposal_id))
+            recover_interrupt = run.status != "suspended"
 
-        tool_result = await self._tool_lifecycle.resolve(
-            tool_call_id=proposal_id,
-            decision=decision,
-            handlers=handlers,
-            subject=subject,
-            scope=scope,
-            client_resolution_id=client_resolution_id,
-        )
-
-        # 审批和业务写入已经在一个事务中完成。先解除前端审批态；Tool Result
-        # 保持 pending，等下一条用户消息真正调用模型时再随上下文补传。
-        yield AiChatEvent(
-            "proposal.resolved",
-            {"proposal_id": proposal_id, "decision": decision},
-        )
-        if already_completed:
-            return
-
+        approval: ApprovalInput = {
+            "tool_call_id": proposal_id,
+            "decision": decision,
+            "client_resolution_id": client_resolution_id,
+        }
         try:
+            if recover_interrupt:
+                recovery = await self._runner.ensure_interrupted(
+                    adapter_name=adapter_name,
+                    conversation_id=conversation_id,
+                    approval=approval,
+                )
+                if not recovery.interrupted:
+                    async with database_module.db.session() as session:
+                        repositories = self._repositories.create(session)
+                        resolved_call = await repositories.tool_calls.get(proposal_id)
+                        if (
+                            resolved_call is None
+                            or resolved_call.status != "resolved"
+                            or resolved_call.decision != decision
+                            or resolved_call.client_resolution_id
+                            != client_resolution_id
+                        ):
+                            raise ProposalStateError(str(proposal_id))
+                        transitioned = await repositories.runs.transition(
+                            run_id,
+                            from_statuses={
+                                "running",
+                                "suspended",
+                                "cancelled",
+                                "failed",
+                            },
+                            to_status="completed",
+                        )
+                        if not transitioned:
+                            current_run = await repositories.runs.get(run_id)
+                            if current_run is None or current_run.status != "completed":
+                                raise ProposalStateError(str(proposal_id))
+                        await session.commit()
+                    emitted_resolution = False
+                    for event in recovery.events:
+                        emitted_resolution |= event.event == "proposal.resolved"
+                        yield event
+                    if not emitted_resolution:
+                        yield AiChatEvent(
+                            "proposal.resolved",
+                            {"proposal_id": proposal_id, "decision": decision},
+                        )
+                    return
+
+                async with database_module.db.session() as session:
+                    repositories = self._repositories.create(session)
+                    transitioned = await repositories.runs.transition(
+                        run_id,
+                        from_statuses={"running", "cancelled", "failed"},
+                        to_status="suspended",
+                    )
+                    if not transitioned:
+                        raise ProposalStateError(str(proposal_id))
+                    await session.commit()
+
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
                 transitioned = await repositories.runs.transition(
@@ -379,21 +411,10 @@ class AiChatService:
                     to_status="running",
                 )
                 if not transitioned:
-                    await session.rollback()
-                    return
+                    raise ProposalStateError(str(proposal_id))
                 await session.commit()
-        except Exception:
-            logger.exception(
-                "AI Chat could not start proposal finalization: proposal=%s",
-                proposal_id,
-            )
-            return
-        approval: ApprovalInput = {
-            "tool_call_id": proposal_id,
-            "decision": decision,
-            "tool_result": tool_result,
-        }
-        try:
+
+            resumed_events: list[AiChatEvent] = []
             async for event in self._runner.resume(
                 adapter_name=adapter_name,
                 conversation_id=conversation_id,
@@ -401,7 +422,9 @@ class AiChatService:
             ):
                 if event.event == "_graph.interrupted":
                     raise ProposalStateError("proposal finalization interrupted again")
-                yield event
+                resumed_events.append(event)
+            if not resumed_events:
+                raise ProposalStateError("proposal finalization produced no events")
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
                 transitioned = await repositories.runs.transition(
@@ -410,9 +433,12 @@ class AiChatService:
                     to_status="completed",
                 )
                 if not transitioned:
-                    await session.rollback()
-                    return
+                    raise ProposalStateError(str(proposal_id))
                 await session.commit()
+            for event in resumed_events:
+                yield event
+        except (IdempotencyConflictError, ProposalStateError, ToolCallNotFoundError):
+            raise
         except Exception:
             logger.exception(
                 "AI Chat proposal finalization failed: proposal=%s",
@@ -422,11 +448,15 @@ class AiChatService:
                 repositories = self._repositories.create(session)
                 await repositories.runs.transition(
                     run_id,
-                    from_statuses={"running"},
+                    from_statuses={"running", "suspended", "cancelled"},
                     to_status="failed",
                     error_code="proposal_finalize_failed",
                 )
                 await session.commit()
+            yield AiChatEvent(
+                "run.failed",
+                {"code": "proposal_finalize_failed"},
+            )
 
     async def close_conversation(self, conversation_id: int, reason: str) -> None:
         """结束空闲会话并保留其历史记录。"""

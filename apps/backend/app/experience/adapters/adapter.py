@@ -108,7 +108,12 @@ class ExperienceAdapter(BaseAdapter):
             revision_snapshot=revision_snapshot,
             model_messages=messages,
             tool_call=None,
+            tool_call_id=None,
+            tool_phase=None,
+            tool_security=None,
+            tool_finished=False,
             proposal_id=None,
+            approval=None,
         )
 
     def build_graph(self, runtime: AiChatRuntime) -> StateGraph:

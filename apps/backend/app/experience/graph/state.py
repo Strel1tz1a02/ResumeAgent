@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal, NotRequired
+
 from app.ai_chat.graph.state import (
     BaseState,
 )
@@ -18,3 +20,10 @@ class ExperienceState(BaseState):
     model_messages: list[JsonObject]
     tool_call: JsonObject | None
     proposal_id: int | None
+    tool_call_id: NotRequired[int | None]
+    tool_phase: NotRequired[
+        Literal["validated", "awaiting_approval", "approved", "resolved"] | None
+    ]
+    tool_security: NotRequired[Literal["low", "medium", "high"] | None]
+    tool_finished: NotRequired[bool]
+    approval: NotRequired[JsonObject | None]
