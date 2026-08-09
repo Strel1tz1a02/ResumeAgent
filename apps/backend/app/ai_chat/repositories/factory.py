@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.repositories.conversation_repository import ConversationRepository
 from app.ai_chat.repositories.message_repository import MessageRepository
+from app.ai_chat.repositories.memory_repository import MemoryRepository
 from app.ai_chat.repositories.run_repository import RunRepository
 from app.ai_chat.repositories.tool_call_repository import ToolCallRepository
 
@@ -18,6 +19,7 @@ class AiChatRepositories:
     messages: MessageRepository
     runs: RunRepository
     tool_calls: ToolCallRepository
+    memory: MemoryRepository | None = None
 
 
 class RepositoryFactory:
@@ -28,6 +30,7 @@ class RepositoryFactory:
         return AiChatRepositories(
             conversations=ConversationRepository(session),
             messages=MessageRepository(session),
+            memory=MemoryRepository(session),
             runs=RunRepository(session),
             tool_calls=ToolCallRepository(session),
         )

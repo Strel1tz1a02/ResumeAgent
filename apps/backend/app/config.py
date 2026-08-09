@@ -219,6 +219,18 @@ class Settings(BaseSettings):
     llm_api_base: str | None = None  # For Ollama or custom endpoints
     log_llm: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "WARNING"
 
+    # AI Chat 使用最终 Messages + Tools 做输入硬预算；这些配置同时提供
+    # 未收录于 LiteLLM registry 的本地模型所需的保守边界。
+    ai_chat_input_cap: int = 32768
+    ai_chat_output_reserve: int = 4096
+    ai_chat_safety_margin: int = 512
+    ai_chat_memory_token_cap: int = 2048
+    ai_chat_memory_other_token_cap: int = 1024
+    ai_chat_memory_other_field_token_cap: int = 256
+    ai_chat_memory_other_max_keys: int = 24
+    ai_chat_summary_input_cap: int = 16384
+    ai_chat_summary_output_reserve: int = 1024
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def set_default_provider(cls, v: Any) -> str:

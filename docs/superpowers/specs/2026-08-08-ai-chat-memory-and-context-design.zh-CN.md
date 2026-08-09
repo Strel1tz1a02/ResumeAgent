@@ -1,6 +1,6 @@
 # AI Chat 有界会话记忆与上下文设计
 
-**状态：** Accepted
+**状态：** Implemented
 
 **日期：** 2026-08-08
 
@@ -676,3 +676,14 @@ memory.compaction.completed
 - 裁剪、投影或改写主模型收到的 Experience 业务数据、Pending Tool Result 与 Tool Schema。
 
 这套最小闭环已经可以解决当前的上下文无界增长问题。
+
+---
+
+## 15. 实现索引
+
+- `app/ai_chat/model_request.py`：冻结真实模型请求并计算 `Messages + Tools` Token；
+- `app/ai_chat/context.py`：按完整 Run 裁剪、同步追赶、晋升与最终硬校验；
+- `app/ai_chat/memory/`：Operations、RunBundle、摘要器、Snapshot Chain 与后台预压缩；
+- `app/ai_chat/repositories/memory_repository.py`：Active Pointer、租约、CAS 与 Rebase；
+- `app/ai_chat/services/service.py`：无 Message 的 Run reservation、SSE 与失败收敛；
+- Experience AI Chat 前端：压缩状态、上下文占用率与 `context_full` 提示。

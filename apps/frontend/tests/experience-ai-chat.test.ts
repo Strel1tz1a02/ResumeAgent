@@ -112,6 +112,30 @@ describe('experience AI chat API', () => {
     );
   });
 
+  it('preserves memory compaction and context usage SSE events', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        sseResponse([
+          'event: memory.compaction.started\ndata: {}\n\n',
+          'event: memory.compaction.progress\ndata: {"completed_runs":1,"target_runs":2}\n\n',
+          'event: memory.compaction.completed\ndata: {}\n\n',
+          'event: context.usage\ndata: {"used_tokens":80,"budget_tokens":100,"percent":80}\n\n',
+        ])
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const events = await collect(
+      streamExperienceMessage(8, '继续', 'message-memory', new AbortController().signal)
+    );
+    expect(events.map((event) => event.event)).toEqual([
+      'memory.compaction.started',
+      'memory.compaction.progress',
+      'memory.compaction.completed',
+      'context.usage',
+    ]);
+    expect(events.at(-1)?.data.percent).toBe(80);
+  });
+
   it('extracts an authoritative experience only from business result events', () => {
     const experience = { experience_id: 7, title: 'Updated' };
 

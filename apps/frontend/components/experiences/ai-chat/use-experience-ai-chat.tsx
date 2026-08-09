@@ -35,6 +35,8 @@ interface ExperienceAiChatValue {
   proposal: ExperienceProposal | null;
   input: string;
   error: string | null;
+  isCompacting: boolean;
+  contextPercent: number | null;
   lastBusinessEvent: ExperienceChatEvent | null;
   setInput: (value: string) => void;
   start: (scope: ExperienceChatScope) => Promise<void>;
@@ -70,12 +72,28 @@ export function ExperienceAiChatProvider({
   const [proposal, setProposal] = useState<ExperienceProposal | null>(null);
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [contextPercent, setContextPercent] = useState<number | null>(null);
   const [lastBusinessEvent, setLastBusinessEvent] = useState<ExperienceChatEvent | null>(null);
   const streamRef = useRef<AbortController | null>(null);
   const conversationRef = useRef<number | null>(null);
 
   const applyEvent = useCallback(
     (event: ExperienceChatEvent) => {
+      if (event.event === 'memory.compaction.started') {
+        setIsCompacting(true);
+        return;
+      }
+      if (event.event === 'memory.compaction.completed') {
+        setIsCompacting(false);
+        return;
+      }
+      if (event.event === 'memory.compaction.progress') return;
+      if (event.event === 'context.usage') {
+        const percent = event.data.percent;
+        setContextPercent(typeof percent === 'number' ? percent : null);
+        return;
+      }
       if (event.event === 'assistant.started') {
         setMessages((current) => [
           ...current,
@@ -122,7 +140,10 @@ export function ExperienceAiChatProvider({
         return;
       }
       if (event.event === 'chat.error') {
-        setError('response_failed');
+        const code = event.data.code;
+        setError(typeof code === 'string' ? code : 'response_failed');
+        if (code === 'memory_compaction_failed') setContextPercent(null);
+        setIsCompacting(false);
         setPhase('ready');
       }
     },
@@ -169,6 +190,8 @@ export function ExperienceAiChatProvider({
     setMessages([]);
     setPhase('idle');
     setError(null);
+    setIsCompacting(false);
+    setContextPercent(null);
     if (current !== null) {
       await closeExperienceConversation(current, reason).catch(() => undefined);
     }
@@ -180,6 +203,8 @@ export function ExperienceAiChatProvider({
       setScope(nextScope);
       setMessages([]);
       setError(null);
+      setIsCompacting(false);
+      setContextPercent(null);
       setPhase('generating');
       try {
         const conversation = await createExperienceConversation(experienceId, nextScope);
@@ -254,6 +279,8 @@ export function ExperienceAiChatProvider({
       proposal,
       input,
       error,
+      isCompacting,
+      contextPercent,
       lastBusinessEvent,
       setInput,
       start,
@@ -263,7 +290,21 @@ export function ExperienceAiChatProvider({
       isScopeLocked: (candidate) =>
         phase === 'approval' && sameChangeScope(proposal?.proposal.scope ?? null, candidate),
     }),
-    [close, error, input, lastBusinessEvent, messages, phase, proposal, resolve, send, start, scope]
+    [
+      close,
+      contextPercent,
+      error,
+      input,
+      isCompacting,
+      lastBusinessEvent,
+      messages,
+      phase,
+      proposal,
+      resolve,
+      send,
+      start,
+      scope,
+    ]
   );
   return (
     <ExperienceAiChatContext.Provider value={value}>{children}</ExperienceAiChatContext.Provider>

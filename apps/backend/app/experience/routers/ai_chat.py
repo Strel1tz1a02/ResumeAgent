@@ -42,7 +42,14 @@ def _business_event(event: AiChatEvent) -> AiChatEvent | None:
         if isinstance(tool_name, str):
             return AiChatEvent(f"{tool_name}.requested", event.data)
     if event.event == "run.failed":
-        return AiChatEvent("chat.error", {"code": "response_failed"})
+        code = event.data.get("code")
+        if code not in {"context_full", "memory_compaction_failed"}:
+            code = "response_failed"
+        payload = {"code": code}
+        reason = event.data.get("reason")
+        if isinstance(reason, str):
+            payload["reason"] = reason
+        return AiChatEvent("chat.error", payload)
     return event
 
 

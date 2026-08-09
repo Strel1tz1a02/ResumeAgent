@@ -237,7 +237,14 @@
       "approve": "允许覆盖",
       "reject": "拒绝",
       "unsavedHint": "未保存的内容 AI 无法感知",
-      "message": "输入消息"
+      "message": "输入消息",
+      "compacting": "正在压缩对话记忆…",
+      "contextUsage": "上下文 {percent}%",
+      "errors": {
+        "response_failed": "AI 暂时无法回复。你仍可继续手动编辑。",
+        "context_full": "上下文已满。请缩短输入或新建对话；已保存的经历不会丢失。",
+        "memory_compaction_failed": "对话记忆压缩失败，请重试。"
+      }
     }
   },
   "builder": {

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services.tool_call_service import ToolCallService
@@ -19,6 +21,7 @@ from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeHandler,
 )
+from app.ai_chat.errors import ContextFullError
 
 
 class _ChunkRouter:
@@ -36,6 +39,11 @@ class _ChunkRouter:
             yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
         return chunks()
+
+
+class _OverflowRouter:
+    async def acompletion(self, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("maximum context length exceeded")
 
 
 class _RecordingModel:
@@ -113,6 +121,23 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
         "suggested_content": ["Python", "FastAPI"],
     }
     assert isinstance(events[-1], ModelCompleted)
+
+
+async def test_provider_context_overflow_maps_to_stable_error(monkeypatch) -> None:
+    config = SimpleNamespace(provider="deepseek", reasoning_effort=None)
+    monkeypatch.setattr(
+        "app.ai_chat.streaming.model.get_router",
+        lambda: (_OverflowRouter(), config),
+    )
+    with pytest.raises(ContextFullError, match="provider_context_overflow"):
+        _ = [
+            event
+            async for event in AiChatModel().stream(
+                messages=[{"role": "user", "content": "too long"}],
+                handlers={},
+                tools_enabled=False,
+            )
+        ]
 
 
 def test_content_change_schema_uses_explicit_field_and_evidence_id() -> None:

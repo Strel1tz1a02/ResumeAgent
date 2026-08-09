@@ -65,3 +65,27 @@ class GraphExecutionError(AiChatError):
     """业务图无法完成运行时抛出。"""
 
     code = "graph_execution_error"
+
+
+class ContextFullError(AiChatError):
+    """固定输入、Memory 或单个 Run 无法装入预算。"""
+
+    code = "context_full"
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        used_tokens: int | None = None,
+        budget_tokens: int | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.used_tokens = used_tokens
+        self.budget_tokens = budget_tokens
+
+
+class MemoryCompactionError(AiChatError):
+    """请求依赖的同步压缩没有成功完成。"""
+
+    code = "memory_compaction_failed"

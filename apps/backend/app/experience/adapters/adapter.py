@@ -11,6 +11,7 @@ from app.ai_chat.adapters.base import BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.graph.state import AdapterInput
+from app.ai_chat.model_request import build_model_request_spec
 from app.ai_chat.types import ScopeRef, SubjectRef, ValidatedBinding
 from app.experience.graph.context import build_model_messages
 from app.experience.graph import ExperienceState, build_experience_graph
@@ -105,6 +106,13 @@ class ExperienceAdapter(BaseAdapter):
             scope=value["scope"],
             run_kind=value["run_kind"],
             tools_enabled=value["tools_enabled"],
+            model_request=value.get("model_request")
+            or build_model_request_spec(
+                self._handlers,
+                tools_enabled=(
+                    value["tools_enabled"] and value["run_kind"] != "opening"
+                ),
+            ).model_dump(mode="json"),
             revision_snapshot=revision_snapshot,
             model_messages=messages,
             tool_call=None,

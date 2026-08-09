@@ -23,12 +23,20 @@ export function ExperienceChatPanel() {
             {t('experiences.ai.title')}
           </p>
           <p className="font-mono text-[10px] uppercase text-ink-soft">{chat.scope?.field}</p>
+          {chat.contextPercent !== null && (
+            <p className="font-mono text-[10px] uppercase text-ink-soft">
+              {t('experiences.ai.contextUsage', { percent: chat.contextPercent })}
+            </p>
+          )}
         </div>
         <Button size="sm" variant="outline" onClick={() => void chat.close()}>
           <X className="h-4 w-4" />
         </Button>
       </div>
       <div className="max-h-64 space-y-3 overflow-y-auto py-3">
+        {chat.isCompacting && (
+          <p className="font-mono text-xs text-ink-soft">{t('experiences.ai.compacting')}</p>
+        )}
         {chat.messages.map((message) => (
           <div
             key={message.id}
@@ -88,7 +96,9 @@ export function ExperienceChatPanel() {
           <Send className="h-4 w-4" />
         </Button>
       </div>
-      {chat.error && <p className="mt-2 text-xs text-destructive">{t('experiences.ai.error')}</p>}
+      {chat.error && (
+        <p className="mt-2 text-xs text-destructive">{t(`experiences.ai.errors.${chat.error}`)}</p>
+      )}
     </aside>
   );
 }

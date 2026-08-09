@@ -26,6 +26,7 @@ class AdapterInput(TypedDict):
     tools_enabled: bool
     messages: list[JsonObject]
     pending_tool_results: list[PendingToolResult]
+    model_request: JsonObject
 
 
 class BaseState(TypedDict):
@@ -37,3 +38,4 @@ class BaseState(TypedDict):
     scope: JsonObject
     run_kind: str
     tools_enabled: bool
+    model_request: JsonObject

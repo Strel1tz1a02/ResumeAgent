@@ -131,6 +131,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         calls: tuple[AssembledToolCall, ...] = ()
         async for event in runtime.stream_model(
             messages=state["model_messages"],
+            request_spec=state.get("model_request"),
             tools_enabled=(
                 state["tools_enabled"] and state["run_kind"] != "opening"
             ),
