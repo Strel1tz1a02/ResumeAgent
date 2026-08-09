@@ -15,20 +15,20 @@ from app import database as database_module
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.graph.state import AdapterInput
 from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
+from app.ai_chat.memory.models import AiChatConversationMemorySnapshot
 from app.ai_chat.memory.operations import MemoryDocument, apply_operations
 from app.ai_chat.memory.repository import MemoryRepository
 from app.ai_chat.memory.run_bundles import RunBundle, RunBundleBuilder
+from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.memory.summarizer import MemorySummarizer
 from app.ai_chat.memory.token_budget import (
     MemoryTokenBudget,
     build_memory_token_budget,
     count_request_tokens,
 )
-from app.ai_chat.models import AiChatConversationMemorySnapshot, AiChatMessage, AiChatRun
+from app.ai_chat.models import AiChatMessage, AiChatRun
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.tools.results import PendingToolResult
 from app.ai_chat.types import JsonObject
-from app.config import settings
 
 Progress = Callable[[int, int], Awaitable[None]]
 logger = logging.getLogger(__name__)
@@ -46,20 +46,20 @@ def memory_token_count(document: MemoryDocument) -> int:
 
 def validate_memory_budget(document: MemoryDocument) -> int:
     """强制整体与 Other 的分层上限，避免 Other 退化成 Transcript。"""
-    if len(document.other) > settings.ai_chat_memory_other_max_keys:
+    if len(document.other) > memory_settings.ai_chat_memory_other_max_keys:
         raise MemoryContextFullError("memory_other_keys_full")
     spec = build_memory_token_budget({}, tools_enabled=False)
     other_total = 0
     for key, value in document.other.items():
         payload = json.dumps({key: value}, ensure_ascii=False)
         tokens = count_request_tokens(spec, [{"role": "user", "content": payload}])
-        if tokens > settings.ai_chat_memory_other_field_token_cap:
+        if tokens > memory_settings.ai_chat_memory_other_field_token_cap:
             raise MemoryContextFullError("memory_other_field_full")
         other_total += tokens
-    if other_total > settings.ai_chat_memory_other_token_cap:
+    if other_total > memory_settings.ai_chat_memory_other_token_cap:
         raise MemoryContextFullError("memory_other_full")
     total = memory_token_count(document)
-    if total > settings.ai_chat_memory_token_cap:
+    if total > memory_settings.ai_chat_memory_token_cap:
         raise MemoryContextFullError("memory_full")
     return total
 
@@ -379,7 +379,7 @@ class MemoryContextService:
                 for row in current_result.scalars().all()
             ]
             pending_rows = await repositories.tool_calls.pending_results(conversation_id)
-            pending: list[PendingToolResult] = [
+            pending: list[JsonObject] = [
                 {
                     "tool_call_id": row.id,
                     "provider_tool_call_id": row.provider_tool_call_id,

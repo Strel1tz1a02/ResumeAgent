@@ -8,9 +8,9 @@ from typing import Any
 import litellm
 from pydantic import BaseModel, ConfigDict
 
+from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.types import JsonObject
-from app.config import settings
 from app.llm import get_llm_config, get_model_name, get_safe_max_tokens
 
 
@@ -57,14 +57,14 @@ def build_memory_token_budget(
     model_input, model_output = _model_limits(model)
     max_tokens = get_safe_max_tokens(
         model,
-        requested_output or settings.ai_chat_output_reserve,
+        requested_output or memory_settings.ai_chat_output_reserve,
     )
     if model_output is not None:
         max_tokens = min(max_tokens, model_output)
-    input_candidates = [configured_input_cap or settings.ai_chat_input_cap]
+    input_candidates = [configured_input_cap or memory_settings.ai_chat_input_cap]
     if model_input is not None:
         input_candidates.append(model_input)
-    input_budget = min(input_candidates) - settings.ai_chat_safety_margin
+    input_budget = min(input_candidates) - memory_settings.ai_chat_safety_margin
     if input_budget <= 0:
         raise ValueError("AI Chat input budget is not positive")
     tools: list[JsonObject] = []

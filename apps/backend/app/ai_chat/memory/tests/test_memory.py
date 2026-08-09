@@ -9,17 +9,17 @@ from sqlalchemy import func, select
 
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
+from app.ai_chat.memory.models import (
+    AiChatConversationMemory,
+    AiChatConversationMemorySnapshot,
+)
 from app.ai_chat.memory.operations import MemoryDocument, MemoryOperation, apply_operations
 from app.ai_chat.memory.repository import MemoryRepository
 from app.ai_chat.memory.run_bundles import RunBundleBuilder
 from app.ai_chat.memory.service import MemoryContextService, _SnapshotService
+from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.memory.token_budget import MemoryTokenBudget, count_request_tokens
-from app.ai_chat.models import (
-    AiChatConversationMemory,
-    AiChatConversationMemorySnapshot,
-)
 from app.ai_chat.repositories import RepositoryFactory
-from app.config import settings
 
 
 def test_operations_enforce_core_and_other_boundaries() -> None:
@@ -314,9 +314,9 @@ async def test_public_service_returns_only_active_recent_and_current_messages(
     monkeypatch.setattr(
         "app.ai_chat.memory.token_budget.litellm.token_counter", fixed_counter
     )
-    monkeypatch.setattr(settings, "ai_chat_input_cap", 140)
-    monkeypatch.setattr(settings, "ai_chat_safety_margin", 0)
-    monkeypatch.setattr(settings, "ai_chat_memory_token_cap", 20)
+    monkeypatch.setattr(memory_settings, "ai_chat_input_cap", 140)
+    monkeypatch.setattr(memory_settings, "ai_chat_safety_margin", 0)
+    monkeypatch.setattr(memory_settings, "ai_chat_memory_token_cap", 20)
     monkeypatch.setattr(
         "app.ai_chat.memory.service.validate_memory_budget", lambda _document: 10
     )
@@ -380,8 +380,8 @@ async def test_fixed_context_overflow_is_exposed_to_future_caller(
     registry = AdapterRegistry()
     registry.register(_TestAdapter())  # type: ignore[arg-type]
     service = MemoryContextService(registry, RepositoryFactory())
-    monkeypatch.setattr(settings, "ai_chat_input_cap", 100)
-    monkeypatch.setattr(settings, "ai_chat_safety_margin", 0)
+    monkeypatch.setattr(memory_settings, "ai_chat_input_cap", 100)
+    monkeypatch.setattr(memory_settings, "ai_chat_safety_margin", 0)
     monkeypatch.setattr(
         "app.ai_chat.memory.token_budget.litellm.token_counter",
         lambda **_kwargs: 101,

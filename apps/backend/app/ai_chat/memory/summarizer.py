@@ -9,11 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
 from app.ai_chat.memory.operations import MemoryDocument, MemoryOperation
 from app.ai_chat.memory.run_bundles import RunBundle
+from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.memory.token_budget import (
     build_memory_token_budget,
     count_request_tokens,
 )
-from app.config import settings
 from app.llm import complete_json
 
 
@@ -64,8 +64,8 @@ class MemorySummarizer:
         spec = build_memory_token_budget(
             {},
             tools_enabled=False,
-            requested_output=settings.ai_chat_summary_output_reserve,
-            configured_input_cap=settings.ai_chat_summary_input_cap,
+            requested_output=memory_settings.ai_chat_summary_output_reserve,
+            configured_input_cap=memory_settings.ai_chat_summary_input_cap,
         )
         tokens = count_request_tokens(spec, [{"role": "user", "content": prompt}])
         if tokens > spec.input_budget:

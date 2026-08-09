@@ -2,8 +2,6 @@
 
 from app.ai_chat.models.models import (
     AiChatConversation,
-    AiChatConversationMemory,
-    AiChatConversationMemorySnapshot,
     AiChatMessage,
     AiChatRun,
     AiChatToolCall,
@@ -12,8 +10,6 @@ from app.ai_chat.models.models import (
 
 __all__ = [
     "AiChatConversation",
-    "AiChatConversationMemory",
-    "AiChatConversationMemorySnapshot",
     "AiChatMessage",
     "AiChatRun",
     "AiChatToolCall",

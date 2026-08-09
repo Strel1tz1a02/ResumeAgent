@@ -7,13 +7,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.memory.operations import EMPTY_CORE, MemoryDocument, MemoryOperation
-from app.ai_chat.memory.run_bundles import RunBundle
-from app.ai_chat.models import (
+from app.ai_chat.memory.models import (
     AiChatConversationMemory,
     AiChatConversationMemorySnapshot,
-    utcnow_iso,
 )
+from app.ai_chat.memory.operations import EMPTY_CORE, MemoryDocument, MemoryOperation
+from app.ai_chat.memory.run_bundles import RunBundle
+from app.ai_chat.models import utcnow_iso
 
 
 class MemoryRepository:
