@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { AutoResizeTextarea } from './auto-resize-textarea';
 import { FieldAiEntry } from './ai-chat/field-ai-entry';
 import { useExperienceAiChat } from './ai-chat/use-experience-ai-chat';
 import type { ExperienceDetail, ExperienceGlobalSave } from '@/lib/api/experiences';
@@ -256,7 +256,7 @@ export function EvidenceListEditor({
     dirty: boolean,
     onSave?: () => void
   ) => (
-    <div className="grid gap-3 md:grid-cols-3">
+    <div className="space-y-4">
       {(['action', 'result', 'metrics'] as const).map((key) => {
         const itemScope = { field: 'evidence', evidence_id: evidenceId };
         return (
@@ -274,12 +274,13 @@ export function EvidenceListEditor({
             saveDisabled={submitting || globalSaving || chat.isScopeLocked(itemScope)}
           >
             <Label htmlFor={`${id}-${key}`}>{t(`experiences.evidence.${key}`)}</Label>
-            <Input
+            <AutoResizeTextarea
               id={`${id}-${key}`}
               aria-label={`${t(`experiences.evidence.${key}`)} ${id}`}
               value={draft[key]}
               onChange={(event) => change(key, event.target.value)}
               disabled={archived || submitting || globalSaving || chat.isScopeLocked(itemScope)}
+              minRows={key === 'action' ? 4 : key === 'result' ? 3 : 2}
             />
           </FieldAiEntry>
         );

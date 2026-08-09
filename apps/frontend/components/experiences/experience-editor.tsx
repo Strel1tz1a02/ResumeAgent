@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
+import { AutoResizeTextarea } from './auto-resize-textarea';
 import { FieldAiEntry } from './ai-chat/field-ai-entry';
 import { useExperienceAiChat } from './ai-chat/use-experience-ai-chat';
 import type {
@@ -340,13 +340,13 @@ export function ExperienceEditor({
       {(['background', 'notes'] as const).map((field) => (
         <FieldAiEntry key={field} {...entryProps(field)}>
           <Label htmlFor={`experience-${field}`}>{t(`experiences.editor.${field}`)}</Label>
-          <Textarea
+          <AutoResizeTextarea
             id={`experience-${field}`}
             value={draft[field]}
             onChange={(event) => change(field, event.target.value)}
             onKeyDown={stopTextareaEnter}
             disabled={archived || saving || globalSaving || locked(field)}
-            rows={3}
+            minRows={field === 'background' ? 6 : 4}
           />
         </FieldAiEntry>
       ))}

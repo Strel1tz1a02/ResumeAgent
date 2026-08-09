@@ -216,6 +216,7 @@ describe('ExperienceLibraryPage', () => {
   it('asks for compact confirmation before opening a field AI conversation', async () => {
     render(<ExperienceLibraryPage />);
     const background = await screen.findByRole('textbox', { name: 'Background' });
+    expect(background.tagName).toBe('TEXTAREA');
 
     fireEvent.focus(background);
     fireEvent.click(screen.getByRole('button', { name: 'Start AI chat' }));
@@ -225,8 +226,7 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
     await waitFor(() =>
       expect(chatApi.createExperienceConversation).toHaveBeenCalledWith(1, {
-        key: 'background',
-        ref_id: null,
+        field: 'background',
       })
     );
   });
@@ -281,8 +281,7 @@ describe('ExperienceLibraryPage', () => {
 
     await waitFor(() =>
       expect(chatApi.createExperienceConversation).toHaveBeenCalledWith(1, {
-        key: 'evidence',
-        ref_id: null,
+        field: 'evidence',
       })
     );
   });
@@ -622,7 +621,10 @@ describe('ExperienceLibraryPage', () => {
     api.createEvidence.mockResolvedValue(withEvidence);
     render(<ExperienceLibraryPage />);
 
-    await screen.findByLabelText('Action new');
+    const action = await screen.findByLabelText('Action new');
+    expect(action.tagName).toBe('TEXTAREA');
+    expect(screen.getByLabelText('Result new').tagName).toBe('TEXTAREA');
+    expect(screen.getByLabelText('Metrics new').tagName).toBe('TEXTAREA');
     fireEvent.change(screen.getByLabelText('Action new'), {
       target: { value: 'Automated imports' },
     });
