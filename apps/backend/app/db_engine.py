@@ -1,9 +1,8 @@
-"""SQLite engine/session plumbing for the SQLAlchemy data layer.
+"""SQLAlchemy 数据层的 SQLite 引擎与会话组装。
 
-Every ``Database`` instance owns its own engines (one async for the document
-tables, one sync for the encrypted ``api_keys`` table read on the synchronous
-LLM hot path) built from these factories. Keeping construction here lets tests
-spin up fully isolated engines against a temp-file database.
+每个 ``Database`` 实例都通过这些工厂创建并持有自己的引擎：文档表使用异步
+引擎，同步 LLM 热路径读取加密 ``api_keys`` 表时使用同步引擎。集中组装逻辑后，
+测试可以基于临时数据库文件创建完全隔离的引擎。
 """
 
 from pathlib import Path
@@ -19,12 +18,11 @@ __all__ = ["Base", "make_async_engine", "make_sync_engine", "init_models_sync"]
 
 
 def _apply_sqlite_pragmas(dbapi_connection: Any, _connection_record: Any) -> None:
-    """Set per-connection SQLite PRAGMAs.
+    """为每个 SQLite 连接设置 PRAGMA。
 
-    WAL improves concurrent read/write between the async (doc tables) and sync
-    (api_keys) engines pointed at the same file; ``busy_timeout`` rides out the
-    brief lock contention that creates; ``foreign_keys`` enforces relational
-    integrity (off by default in SQLite).
+    异步文档表引擎和同步 ``api_keys`` 引擎指向同一文件，WAL 用于改善并发读写；
+    ``busy_timeout`` 用于等待短暂的锁竞争；``foreign_keys`` 用于启用 SQLite
+    默认关闭的外键完整性检查。
     """
     cursor = dbapi_connection.cursor()
     try:
@@ -36,23 +34,23 @@ def _apply_sqlite_pragmas(dbapi_connection: Any, _connection_record: Any) -> Non
 
 
 def _url(path: Path, *, driver: str) -> str:
-    """Build a SQLite URL. Absolute paths yield the required four slashes."""
+    """构造 SQLite URL；绝对路径会生成规范要求的四个斜杠。"""
     return f"sqlite+{driver}:///{path}" if driver else f"sqlite:///{path}"
 
 
 def make_async_engine(path: Path) -> AsyncEngine:
-    """Create the async engine (``aiosqlite``) for the document tables."""
+    """为文档表创建基于 ``aiosqlite`` 的异步引擎。"""
     engine = create_async_engine(_url(path, driver="aiosqlite"), future=True)
     event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
     return engine
 
 
 def make_sync_engine(path: Path) -> Engine:
-    """Create the sync engine used for the encrypted api_keys table.
+    """为加密的 ``api_keys`` 表创建同步引擎。
 
-    Key reads happen synchronously (``get_llm_config`` → ``load_config_file`` →
-    ``resolve_api_key``), so a sync engine avoids threading async through
-    ``llm.py``. It points at the same file as the async engine.
+    密钥读取链路（``get_llm_config`` → ``load_config_file`` →
+    ``resolve_api_key``）是同步的，因此使用同步引擎可以避免让 ``llm.py``
+    额外传递异步调用；它与异步引擎指向同一个数据库文件。
     """
     engine = create_engine(_url(path, driver=""), future=True)
     event.listen(engine, "connect", _apply_sqlite_pragmas)
@@ -60,7 +58,7 @@ def make_sync_engine(path: Path) -> Engine:
 
 
 def init_models_sync(engine: Engine) -> None:
-    """Create all tables (idempotent) using a sync engine connection."""
+    """使用同步引擎连接幂等创建全部数据表。"""
     # 模块 ORM 共享同一个声明式 Base；create_all 前必须显式注册。
     import app.experience.models  # noqa: F401
     import app.ai_chat.models  # noqa: F401
@@ -97,8 +95,8 @@ def init_models_sync(engine: Engine) -> None:
     migrate_ai_chat_conversation_scope(engine)
     migrate_experience_chat_scope_field(engine)
 
-    # ``create_all`` does not ALTER existing SQLite tables. Keep this additive
-    # migration idempotent so older local databases can load resumes safely.
+    # ``create_all`` 不会修改既有 SQLite 表，因此增量迁移必须保持幂等，
+    # 使旧版数据库仍能安全加载简历。
     with engine.begin() as conn:
         columns = conn.exec_driver_sql("PRAGMA table_info(resumes)").mappings().all()
         if columns and "interview_prep" not in {column["name"] for column in columns}:

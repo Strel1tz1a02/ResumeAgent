@@ -1,4 +1,4 @@
-"""Protocol implemented by Tool business handlers."""
+"""Tool 业务 Handler 必须实现的协议。"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -14,7 +14,7 @@ from app.ai_chat.types import JsonObject
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Trusted identity and transaction bindings supplied to a Handler."""
+    """Service 提供给 Handler 的可信身份与事务绑定。"""
 
     conversation_id: int
     run_id: int
@@ -26,7 +26,7 @@ class ToolContext:
 
 
 class ToolHandler(ABC):
-    """Encapsulate a Tool's validation, execution, and result rendering."""
+    """封装 Tool 的校验、执行和结果整理。"""
 
     name: str
     description: str
@@ -39,7 +39,7 @@ class ToolHandler(ABC):
         context: ToolContext,
         arguments: JsonObject,
     ) -> ToolValidationResult:
-        """Validate model arguments and prepare trusted execution payloads."""
+        """校验模型参数，并准备可信执行载荷。"""
 
     @abstractmethod
     async def execute(
@@ -48,12 +48,12 @@ class ToolHandler(ABC):
         proposal_payload: JsonObject,
         guard_payload: JsonObject,
     ) -> ToolResult:
-        """Execute one prepared operation inside the injected transaction."""
+        """在注入的事务中执行已准备的操作。"""
 
     @abstractmethod
     def show_result(self, payload: JsonObject) -> ToolResult:
-        """Normalize a stable business result returned by this Handler."""
+        """整理并返回稳定的业务结果。"""
 
     def schema(self) -> dict[str, Any]:
-        """Return provider-independent Tool JSON schema."""
+        """返回与模型供应商无关的 Tool JSON Schema。"""
         return self.arguments_schema.model_json_schema()

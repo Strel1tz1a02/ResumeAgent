@@ -37,7 +37,7 @@ ToolValidationResult = ValidatedToolCall | ToolResult
 
 @dataclass(frozen=True)
 class PreparedToolCall:
-    """Validated Tool Call ready for Graph risk policy."""
+    """已完成校验、等待 Graph 风险策略判断的工具调用。"""
 
     tool_call_id: int
     tool_name: str
@@ -46,7 +46,7 @@ class PreparedToolCall:
 
 @dataclass(frozen=True)
 class ApprovalRequest:
-    """Persisted proposal awaiting an approval decision."""
+    """已持久化、等待审批决定的提案。"""
 
     tool_call_id: int
     tool_name: str
@@ -55,7 +55,7 @@ class ApprovalRequest:
 
 @dataclass(frozen=True)
 class ApprovedToolCall:
-    """Persisted approval ready for execution."""
+    """已持久化批准决定、等待执行的工具调用。"""
 
     tool_call_id: int
     tool_name: str
@@ -64,7 +64,7 @@ class ApprovedToolCall:
 
 @dataclass(frozen=True)
 class CompletedToolCall:
-    """Durably resolved Tool Call result."""
+    """已持久化完成的工具调用结果。"""
 
     tool_call_id: int
     tool_name: str

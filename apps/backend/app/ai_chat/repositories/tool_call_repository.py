@@ -221,7 +221,7 @@ class ToolCallRepository:
         *,
         tool_result: dict[str, Any],
     ) -> bool:
-        """Atomically persist a validation-time terminal result exactly once."""
+        """原子且仅一次地持久化校验阶段产生的终态结果。"""
         now = utcnow_iso()
         result = await self._session.execute(
             update(AiChatToolCall)

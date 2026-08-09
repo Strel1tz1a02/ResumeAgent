@@ -169,7 +169,7 @@ async def _start_graph_harness(
         )
     adapter = ExperienceAdapter()
     if handler is not None:
-        adapter._handlers = {handler.name: handler}  # noqa: SLF001 - fault injection
+        adapter._handlers = {handler.name: handler}  # noqa: SLF001 - 故障注入
     registry = AdapterRegistry()
     registry.register(adapter)
     repositories = RepositoryFactory()
@@ -1035,7 +1035,7 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
             "(1,'project','Agent',NULL,NULL,NULL,NULL,NULL,0,'必须销毁',NULL,'[2,1,2,999]','[]','[]',NULL,'draft',0,NULL,'now','now')"
         )
     database = Database(path)
-    with database._sync() as session:  # noqa: SLF001 - migration verification
+    with database._sync() as session:  # noqa: SLF001 - 迁移验证
         columns = session.connection().exec_driver_sql(
             "PRAGMA table_info(experience_items)"
         ).mappings().all()

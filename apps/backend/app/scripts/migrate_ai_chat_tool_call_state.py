@@ -1,4 +1,4 @@
-"""Add durable states and result integrity to AI Chat Tool Calls."""
+"""为 AI Chat 工具调用增加持久化状态与结果完整性约束。"""
 
 from sqlalchemy import Engine, text
 
@@ -9,7 +9,7 @@ MIGRATION_NAME = "2026_08_08_ai_chat_tool_call_state"
 
 
 def migrate(engine: Engine) -> None:
-    """Rebuild legacy SQLite Tool Call tables with the durable state machine."""
+    """使用持久化状态机重建旧版 SQLite 工具调用表。"""
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql(

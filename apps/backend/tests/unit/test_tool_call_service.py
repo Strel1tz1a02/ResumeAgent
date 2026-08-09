@@ -1,4 +1,4 @@
-"""Tests for durable AI Chat Tool Call persistence."""
+"""AI Chat 工具调用持久化测试。"""
 
 import asyncio
 import sqlite3

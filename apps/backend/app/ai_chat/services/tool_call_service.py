@@ -1,4 +1,4 @@
-"""Durable orchestration boundary for AI Chat Tool Calls."""
+"""AI Chat 工具调用的持久化编排边界。"""
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
@@ -33,7 +33,7 @@ SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
 class ApprovalDecision(TypedDict):
-    """A persisted approval choice at the ToolCallService boundary."""
+    """ToolCallService 边界中已持久化的审批选择。"""
 
     tool_call_id: int
     decision: Literal["approve", "reject"]
@@ -42,23 +42,23 @@ class ApprovalDecision(TypedDict):
 
 @dataclass(frozen=True)
 class ToolCallService:
-    """Bind Tool Handlers and coordinate durable Tool Call transitions."""
+    """绑定 Tool Handler，并协调工具调用的持久化状态流转。"""
 
     session_factory: SessionFactory
     repositories: RepositoryFactory
     handlers: Mapping[str, ToolHandler] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Freeze even the default Handler mapping."""
+        """冻结包括默认值在内的 Handler 映射。"""
         object.__setattr__(self, "handlers", MappingProxyType(dict(self.handlers)))
 
     def bind_handlers(self, handlers: Mapping[str, ToolHandler]) -> "ToolCallService":
-        """Return a service instance with a fixed Handler mapping."""
+        """返回绑定固定 Handler 映射的新服务实例。"""
         return replace(self, handlers=handlers)
 
     @property
     def model_handlers(self) -> Mapping[str, ToolHandler]:
-        """Expose the exact bound Handler mapping for model schema generation."""
+        """向模型结构生成逻辑暴露当前绑定的 Handler 映射。"""
         return self.handlers
 
     def _handler(self, name: str) -> ToolHandler:
@@ -147,7 +147,7 @@ class ToolCallService:
     async def validate_call(
         self, context: ToolContext, call: AssembledToolCall
     ) -> ToolCallState:
-        """Materialize a call, then validate it in a separate durable transaction."""
+        """先固化工具调用，再在独立事务中校验。"""
         handler = self._handler(call.name)
 
         async with self.session_factory() as session:
@@ -209,7 +209,7 @@ class ToolCallService:
     async def request_approval(
         self, tool_call_id: int
     ) -> ApprovalRequest | ApprovedToolCall | CompletedToolCall:
-        """Persist approval intent without making the approval policy decision."""
+        """持久化审批请求，但不替审批策略作出决定。"""
         async with self.session_factory() as session:
             repository = self.repositories.create(session).tool_calls
             row = await repository.get(tool_call_id)
@@ -240,7 +240,7 @@ class ToolCallService:
     async def _reload_decision(
         self, approval: ApprovalDecision
     ) -> ApprovedToolCall | CompletedToolCall:
-        """Map a decision CAS loser only from a new durable snapshot."""
+        """CAS 竞争失败后，只根据最新持久化快照映射审批结果。"""
         tool_call_id = approval["tool_call_id"]
         resolution_id = approval["client_resolution_id"]
         async with self.session_factory() as session:
@@ -267,7 +267,7 @@ class ToolCallService:
     async def record_decision(
         self, approval: ApprovalDecision
     ) -> ApprovedToolCall | CompletedToolCall:
-        """Durably record an external approval decision before any execution."""
+        """在执行前持久化外部审批决定。"""
         tool_call_id = approval["tool_call_id"]
         decision = approval["decision"]
         resolution_id = approval["client_resolution_id"]
@@ -336,7 +336,7 @@ class ToolCallService:
     async def execute_call(
         self, context: ToolContext, tool_call_id: int
     ) -> CompletedToolCall:
-        """Claim, execute, and resolve a validated Tool Call in one transaction."""
+        """在同一事务中认领、执行并完成已校验的工具调用。"""
         async with self.session_factory() as session:
             repository = self.repositories.create(session).tool_calls
             row = await repository.get(tool_call_id)

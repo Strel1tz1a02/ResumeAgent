@@ -150,29 +150,35 @@ class AiChatToolCall(Base):
     updated_at: Mapped[str] = mapped_column(String, default=utcnow_iso)
 
     __table_args__ = (
+        # 工具调用只能处于状态机声明的状态中。
         CheckConstraint(
             "status IN ('received', 'validated', 'awaiting_approval', "
             "'approved', 'executing', 'resolved')",
             name="ck_ai_chat_tool_status",
         ),
+        # 已完成的工具调用必须同时持久化执行结果。
         CheckConstraint(
             "status != 'resolved' OR tool_result IS NOT NULL",
             name="ck_ai_chat_tool_result",
         ),
+        # 审批决定为空表示尚未处理，否则只能是批准或拒绝。
         CheckConstraint(
             "decision IS NULL OR decision IN ('approve', 'reject')",
             name="ck_ai_chat_tool_decision",
         ),
+        # 工具结果尚未产生时投递状态为空，产生后只能是待投递或已消费。
         CheckConstraint(
             "delivery_status IS NULL OR delivery_status IN ('pending', 'consumed')",
             name="ck_ai_chat_tool_delivery",
         ),
+        # 同一次运行中的工具调用序号唯一，用于保证重放时不会重复固化。
         Index(
             "ux_ai_chat_tool_run_index",
             "run_id",
             "tool_call_index",
             unique=True,
         ),
+        # 模型供应商提供调用 ID 时，同一次运行中不允许重复。
         Index(
             "ux_ai_chat_tool_provider_call",
             "run_id",
@@ -180,6 +186,7 @@ class AiChatToolCall(Base):
             unique=True,
             sqlite_where=text("provider_tool_call_id IS NOT NULL"),
         ),
+        # 同一会话中的客户端审批请求 ID 唯一，用于保证审批操作幂等。
         UniqueConstraint(
             "conversation_id",
             "client_resolution_id",
