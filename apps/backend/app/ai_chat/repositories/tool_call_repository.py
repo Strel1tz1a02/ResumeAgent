@@ -10,6 +10,25 @@ from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.models import AiChatToolCall, utcnow_iso
 
 
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """按 JSON 类型和值比较，避免 Python 把 bool 与 int 视为相等。"""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(
+            _json_values_equal(value, right[key])
+            for key, value in left.items()
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_values_equal(left_value, right_value)
+            for left_value, right_value in zip(left, right, strict=True)
+        )
+    return left == right
+
+
 class ToolCallRepository:
     """持久化不透明工具载荷和通用投递状态。"""
 
@@ -75,7 +94,7 @@ class ToolCallRepository:
             or (provider_row is not None and provider_row.id != row.id)
             or row.conversation_id != conversation_id
             or row.tool_name != tool_name
-            or row.arguments != arguments
+            or not _json_values_equal(row.arguments, arguments)
         ):
             raise ToolProtocolError("Tool Call index was reused inconsistently")
         return row

@@ -334,8 +334,9 @@ register_adapter(ExperienceAdapter(...))
 class ExperienceState(BaseState):
     revision_snapshot: JsonObject
     model_messages: list[JsonObject]
-    tool_call: JsonObject | None
-    proposal_id: int | None
+    raw_tool_call: str | None
+    tool_call: ToolCall | None
+    approval: NotRequired[ApprovalDecision | None]
 ```
 
 State 中不得保存 ORM、Pydantic 对象、数据库 Session、异常对象、流连接或回调函数。
@@ -363,7 +364,7 @@ class ToolContext:
 async def ContentChangeHandler.validation(
     context: ToolContext,
     arguments: JsonObject,
-) -> ToolValidationResult:
+) -> tuple[JsonObject, JsonObject] | ToolResult:
     ...
 ```
 
@@ -445,18 +446,18 @@ flowchart TD
     E -->|"MEDIUM / HIGH"| F["approver"]
     F -->|"interrupt"| G["等待用户审批"]
     G -->|"approve"| H
-    G -->|"reject"| Z
+    G -->|"reject"| H
     H --> Z
 ```
 
 实现映射说明：
 
-- `llm` 只负责模型流式调用、`assistant.delta` 事件和完整 Tool Call 组装；普通文本由通用 `AiChatService` 持久化；
-- `validator` 只调用 `ToolCallService.validate_call()`；Service 按 `(run_id, tool_call_index)` 幂等持久化调用并调用 Handler 的 `validation()`；Checkpoint 不保存 trusted payload 或 ORM 对象，只保存 Tool Call ID，以及 `tool_call`、`tool_phase`、`tool_security`、`proposal_id`、`approval` 等 JSON control fields；
-- `guard` 读取 `validate_call()` 返回的 `security` 风险声明，统一决定直接执行或进入人工审批；Handler 不决定是否审批；
-- `approver` 是唯一调用 `interrupt()` 的节点，接收完整 `{tool_call_id, decision, client_resolution_id}`，并调用 `ToolCallService.record_decision()`；拒绝形成稳定结果，同意先提交 `approved` 再进入 `executor`；
+- `llm` 只负责模型流式调用、`assistant.delta` 事件和原始 Tool Call 字符串组装；普通文本由通用 `AiChatService` 持久化；
+- `validator` 只调用 `ToolCallService.validate_call()`；Service 解析字符串，按 `(run_id, tool_call_index)` 幂等持久化调用并调用 Handler 的 `validation()`；Checkpoint 不保存 trusted guard 或 ORM 对象，只保存 `raw_tool_call` 与统一 JSON `tool_call`；
+- `guard` 读取 `ToolCall.security`，LOW 设置瞬时 `should_execute=true`，MEDIUM/HIGH 路由到人工审批；Handler 不决定是否审批；
+- `approver` 持久化申请并发出展示内容，是唯一调用 `interrupt()` 的节点；恢复后接收完整 `{tool_call_id, decision, client_resolution_id}` 并调用 `ToolCallService.record_decision()`；批准和拒绝都进入 executor，由 `should_execute` 决定是否调用 Handler；
 - `executor` 只调用 `ToolCallService.execute_call()`；Service 在同一事务内原子认领调用、从数据库加载可信 payload、调用 Handler 的 `execute()` 并保存 Tool Result；
-- Graph 的生产 Tool 调用只允许经过 `runtime.tools` 的 `validate_call()`、`request_approval()`、`record_decision()` 和 `execute_call()` 四个入口，不直接访问 Handler 或 Repository；
+- Graph 的生产 Tool 调用只允许经过 `runtime.tools`，不直接访问 Handler 或 Repository；
 - 不得在 `approver` 调用 `interrupt()` 之前执行业务写入，避免节点重放造成重复副作用；
 - 无效 Tool 和 no-change 使用 opaque `ToolResult`，不进入审批，也不触发额外模型调用。
 - Graph 不包含 `load_context` 节点；业务上下文由 Adapter 在执行前构造，字段状态完整性由启动前 migration 保证，Graph 不编排任何 `ensure_field_states()` 节点。
@@ -504,7 +505,7 @@ Evidence 创建使用相同结构，但 `evidence_id=null`。Tool 参数中的 `
 1. 通过 `description` 向模型说明工具用途；
 2. 使用 Pydantic 把模型 JSON 解析为 `scope + suggested_content`；
 3. 根据 scope 形态路由到 `prepare_field_change()`、`prepare_evidence_change()` 或 `prepare_evidence_append()`；
-4. 通过 `validation()` 把 Service 准备结果转换成 `ValidatedToolCall` 或终态 `ToolResult`；
+4. 通过 `validation()` 把 Service 准备结果转换成 `(proposal_payload, guard_payload)` 或终态 `ToolResult`；
 5. 通过 `security` 描述风险，但不决定是否审批；
 6. 通过 `execute()` 路由到 `apply_field()`、`apply_evidence()` 或 `append_evidence()`，并在内部调用 `show_result()`。
 
@@ -526,7 +527,7 @@ Service 收到路由请求后：
 - revision 已变化：返回 `ToolResult`，不进入审批；
 - 目标或建议非法：返回 `ToolResult`，不进入审批；
 - 建议内容等于当前内容：返回 `ToolResult`，不进入审批；
-- 有效新建议：返回 `ValidatedToolCall`，是否审批由 Graph guard 决定。
+- 有效新建议：返回 proposal 与 guard 两个可信载荷，是否审批由 Graph guard 决定。
 
 统一 proposal payload：
 

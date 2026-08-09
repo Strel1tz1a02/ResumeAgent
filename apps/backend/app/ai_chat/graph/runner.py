@@ -12,12 +12,13 @@ from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
 from app.ai_chat.errors import IdempotencyConflictError, ProposalStateError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
-from app.ai_chat.graph.state import AdapterInput, ApprovalInput
+from app.ai_chat.graph.state import AdapterInput
+from app.ai_chat.tools.types import ApprovalDecision
 
 
 @dataclass(frozen=True)
 class GraphRecovery:
-    """把异常 Run 推进到下一持久边界后的结果。"""
+    """把异常运行推进到下一持久边界后的结果。"""
 
     interrupted: bool
     events: tuple[AiChatEvent, ...] = ()
@@ -50,23 +51,25 @@ class GraphRunner:
         self,
         *,
         adapter_name: str,
-        value: AdapterInput, # 本次执行需要的通用输入
+        value: AdapterInput,
     ) -> AsyncIterator[AiChatEvent]:
         """使用稳定的会话线程 ID 启动业务图。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
         graph_input: Any = await adapter.parse_input(value)
-        json.dumps(graph_input, ensure_ascii=False) # 验证 State 可被 checkpoint 序列化
+        # 检查点只能接收可由 JSON 序列化的状态。
+        json.dumps(graph_input, ensure_ascii=False)
         config = {
             "configurable": {
-                "thread_id": f"ai-chat:{value['conversation_id']}", # configurable 专门给 Checkpointer 等组件使用，Checkpointer 使用 thread_id 来存取和恢复 checkpoint
+                # 检查点器使用稳定的线程标识存取同一会话的检查点。
+                "thread_id": f"ai-chat:{value['conversation_id']}",
             }
         }
         async for part in graph.astream(
             graph_input,
             config=config,
             stream_mode=["updates", "custom"],
-            version="v2",# LangGraph 使用 v2 流事件格式：{ "type": "...","data": ...}
+            version="v2",
         ):
             event = self._normalize(part)
             if event is not None:
@@ -77,9 +80,9 @@ class GraphRunner:
         *,
         adapter_name: str,
         conversation_id: int,
-        approval: ApprovalInput,
+        approval: ApprovalDecision,
     ) -> AsyncIterator[AiChatEvent]:
-        """恢复同一会话的 interrupt，只传入审批结果。"""
+        """恢复同一会话的中断，只传入审批结果。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
         config = {
@@ -93,6 +96,12 @@ class GraphRunner:
         ):
             event = self._normalize(part)
             if event is not None:
+                if event.event == "proposal.requested":
+                    if event.data.get("proposal_id") != approval["tool_call_id"]:
+                        raise IdempotencyConflictError(
+                            approval["client_resolution_id"]
+                        )
+                    continue
                 yield event
 
     @staticmethod
@@ -126,9 +135,9 @@ class GraphRunner:
         *,
         adapter_name: str,
         conversation_id: int,
-        approval: ApprovalInput,
+        approval: ApprovalDecision,
     ) -> GraphRecovery:
-        """把异常 Graph 推进到 interrupt 或完成边界，并保留业务事件。"""
+        """把异常图推进到中断或完成边界，并保留业务事件。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
         config = {
@@ -136,18 +145,13 @@ class GraphRunner:
         }
         snapshot = await graph.aget_state(config)
         values = snapshot.values if isinstance(snapshot.values, dict) else {}
-        checkpoint_tool_call_id = values.get("tool_call_id")
-        checkpoint_proposal_id = values.get("proposal_id")
-        if (
-            checkpoint_tool_call_id is not None
-            and checkpoint_proposal_id is not None
-            and checkpoint_tool_call_id != checkpoint_proposal_id
-        ):
-            raise IdempotencyConflictError(approval["client_resolution_id"])
+        checkpoint_call = values.get("tool_call")
         checkpoint_identity = (
-            checkpoint_tool_call_id
-            if checkpoint_tool_call_id is not None
-            else checkpoint_proposal_id
+            checkpoint_call.get("tool_call_id")
+            if isinstance(checkpoint_call, dict)
+            and isinstance(checkpoint_call.get("status"), str)
+            and isinstance(checkpoint_call.get("tool_call_id"), int)
+            else None
         )
         if checkpoint_identity is None:
             raise ProposalStateError("Checkpoint has no Tool Call identity")
@@ -155,19 +159,7 @@ class GraphRunner:
             raise IdempotencyConflictError(approval["client_resolution_id"])
         checkpoint_approval = values.get("approval")
         if checkpoint_approval is not None:
-            if not isinstance(checkpoint_approval, dict):
-                raise IdempotencyConflictError(approval["client_resolution_id"])
-            identity_keys = {
-                "tool_call_id",
-                "decision",
-                "client_resolution_id",
-            }
-            if not identity_keys.issubset(checkpoint_approval):
-                raise IdempotencyConflictError(approval["client_resolution_id"])
-            if any(
-                checkpoint_approval[key] != approval[key]
-                for key in identity_keys
-            ):
+            if not isinstance(checkpoint_approval, dict) or checkpoint_approval != approval:
                 raise IdempotencyConflictError(approval["client_resolution_id"])
         if any(getattr(task, "interrupts", ()) for task in snapshot.tasks):
             return GraphRecovery(interrupted=True)

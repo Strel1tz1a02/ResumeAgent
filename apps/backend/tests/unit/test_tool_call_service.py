@@ -1,6 +1,7 @@
 """AI Chat 工具调用持久化测试。"""
 
 import asyncio
+import json
 import sqlite3
 import subprocess
 import sys
@@ -20,16 +21,9 @@ from app.ai_chat.repositories import (
     ToolCallRepository,
 )
 from app.ai_chat.services.tool_call_service import ToolCallService
-from app.ai_chat.tools.buffer import AssembledToolCall
-from app.ai_chat.tools.handler import ToolContext, ToolHandler
-from app.ai_chat.tools.results import (
-    ApprovalRequest,
-    ApprovedToolCall,
-    CompletedToolCall,
-    PreparedToolCall,
-    ToolResult,
-    ValidatedToolCall,
-)
+from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
+from app.ai_chat.tools.buffer import encode_tool_call
+from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.tools.security import ToolSecurity
 from app.database import Database
 from app.scripts.migrate_ai_chat_tool_call_state import (
@@ -41,6 +35,12 @@ class _DemoArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     value: str
+
+
+class _FloatArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: float
 
 
 class _DemoHandler(ToolHandler):
@@ -58,10 +58,7 @@ class _DemoHandler(ToolHandler):
         values = self.arguments_schema.model_validate(arguments)
         if values.value == "done":
             return self.show_result({"outcome": "no_change"})
-        return ValidatedToolCall(
-            proposal_payload={"value": values.value},
-            guard_payload={"trusted": values.value},
-        )
+        return {"value": values.value}, {"trusted": values.value}
 
     async def execute(  # type: ignore[no-untyped-def]
         self, context, proposal_payload, guard_payload
@@ -71,6 +68,11 @@ class _DemoHandler(ToolHandler):
 
     def show_result(self, payload):  # type: ignore[no-untyped-def]
         return ToolResult(dict(payload))
+
+
+class _FloatHandler(_DemoHandler):
+    name = "float_demo"
+    arguments_schema = _FloatArguments
 
 
 class _NeverValidateHandler(_DemoHandler):
@@ -94,9 +96,9 @@ class _ConcurrentDemoHandler(_DemoHandler):
         await self.release.wait()
         if self.immediate:
             return self.show_result({"outcome": f"immediate-{sequence}"})
-        return ValidatedToolCall(
-            proposal_payload={"value": f"{values.value}-{sequence}"},
-            guard_payload={"trusted": f"{values.value}-{sequence}"},
+        return (
+            {"value": f"{values.value}-{sequence}"},
+            {"trusted": f"{values.value}-{sequence}"},
         )
 
 
@@ -249,12 +251,12 @@ def _tool_context(conversation_id: int, run_id: int) -> ToolContext:
     )
 
 
-def _tool_call(*, value: str, index: int = 0) -> AssembledToolCall:
-    return AssembledToolCall(
+def _tool_call(*, value: str, index: int = 0) -> str:
+    return encode_tool_call(
         index=index,
         provider_id=f"provider-{index}",
         name="demo",
-        arguments={"value": value},
+        arguments=json.dumps({"value": value}),
     )
 
 
@@ -357,7 +359,7 @@ def test_tool_handler_requires_each_business_method() -> None:
 
 
 def test_fresh_process_exposes_only_the_unified_tool_contract() -> None:
-    """Fresh import 不得因 pytest 顺序继续暴露旧 Tool 协议。"""
+    """全新进程导入不得因测试执行顺序继续暴露旧工具协议。"""
     backend_root = Path(__file__).resolve().parents[2]
     script = """
 import importlib
@@ -370,8 +372,22 @@ except ModuleNotFoundError as exc:
 else:
     raise AssertionError("legacy lifecycle module is still importable")
 
+try:
+    importlib.import_module("app.ai_chat.tools.results")
+except ModuleNotFoundError as exc:
+    assert exc.name == "app.ai_chat.tools.results"
+else:
+    raise AssertionError("split Tool result types are still importable")
+
+try:
+    importlib.import_module("app.ai_chat.tools.contracts")
+except ModuleNotFoundError as exc:
+    assert exc.name == "app.ai_chat.tools.contracts"
+else:
+    raise AssertionError("old Tool contracts module is still importable")
+
 import app.ai_chat.tools as tools
-import app.ai_chat.tools.results as results
+import app.ai_chat.tools.types as tool_types
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.repositories import RepositoryFactory, ToolCallRepository
 from app.ai_chat.services import ToolCallService
@@ -382,9 +398,31 @@ from app.experience import ExperienceAdapter
 from app.experience.graph import build_experience_graph
 from app.experience.tools.content_change import ContentChangeHandler
 
-for alias in ("ApprovalProposal", "ToolInvocationResult"):
-    assert not hasattr(results, alias), alias
+for alias in (
+    "ApprovalProposal",
+    "ToolInvocationResult",
+    "ApprovalInput",
+    "ApprovalRequest",
+    "AssembledToolCall",
+    "ApprovedToolCall",
+    "CompletedToolCall",
+    "PendingToolResult",
+    "PreparedToolCall",
+    "ToolCallState",
+    "ToolValidationResult",
+    "ValidatedToolCall",
+):
+    assert not hasattr(tool_types, alias), alias
     assert not hasattr(tools, alias), alias
+for name in (
+    "ApprovalAction",
+    "ApprovalDecision",
+    "ToolCall",
+    "ToolCallStatus",
+    "ToolContext",
+    "ToolResult",
+):
+    assert getattr(tools, name) is getattr(tool_types, name), name
 assert ToolHandler.__abstractmethods__ == {"validation", "execute", "show_result"}
 assert not hasattr(ToolHandler, "invoke")
 assert not hasattr(ToolHandler, "resolve")
@@ -394,6 +432,11 @@ assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
 assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools"}
 assert not hasattr(AiChatRuntime, "receive_tool_call")
+assert "decision" not in tool_types.ToolCall.__annotations__
+assert "client_resolution_id" not in tool_types.ToolCall.__annotations__
+assert {"decision", "client_resolution_id"}.issubset(
+    tool_types.ApprovalDecision.__annotations__
+)
 
 service = ToolCallService(db.session, RepositoryFactory()).bind_handlers(
     ExperienceAdapter().get_tool_handlers()
@@ -421,6 +464,78 @@ for call in ("handler.validation", "handler.execute"):
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_parse_model_call_rejects_index_outside_sqlite_int64() -> None:
+    maximum = ToolCallService._parse_model_call(
+        encode_tool_call(
+            index=(1 << 63) - 1,
+            provider_id=None,
+            name="demo",
+            arguments="{}",
+        )
+    )
+    assert maximum[0] == (1 << 63) - 1
+
+    with pytest.raises(ToolProtocolError, match="index"):
+        ToolCallService._parse_model_call(
+            encode_tool_call(
+                index=1 << 63,
+                provider_id=None,
+                name="demo",
+                arguments="{}",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        '{"value":-Infinity}',
+        '{"value":1e400}',
+        '{"nested":[{"value":-1e400}]}',
+    ],
+)
+def test_parse_model_call_rejects_non_finite_json_numbers(arguments: str) -> None:
+    with pytest.raises(ToolProtocolError, match="finite|valid JSON"):
+        ToolCallService._parse_model_call(
+            encode_tool_call(
+                index=0,
+                provider_id=None,
+                name="demo",
+                arguments=arguments,
+            )
+        )
+
+
+async def test_validate_call_rejects_schema_coerced_non_finite_number(
+    isolated_db,
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    handler = _FloatHandler()
+
+    with pytest.raises(ToolProtocolError, match="non-finite"):
+        await _tool_service(isolated_db, handler).validate_call(
+            _tool_context(conversation_id, run_id),
+            encode_tool_call(
+                index=0,
+                provider_id="provider-0",
+                name=handler.name,
+                arguments=json.dumps({"value": "Infinity"}),
+            ),
+        )
+
+    assert handler.validation_count == 0
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.get_by_run_index(
+            run_id,
+            0,
+        )
+    assert row is not None
+    assert row.status == "received"
+    assert row.arguments == {"value": "Infinity"}
+
+
 async def test_validate_call_rejects_unknown_handler_before_materializing(
     isolated_db,
 ) -> None:
@@ -430,11 +545,11 @@ async def test_validate_call_rejects_unknown_handler_before_materializing(
     with pytest.raises(ToolProtocolError, match="Unknown tool: unknown"):
         await service.validate_call(
             _tool_context(conversation_id, run_id),
-            AssembledToolCall(
+            encode_tool_call(
                 index=0,
                 provider_id="provider-0",
                 name="unknown",
-                arguments={"value": "input"},
+                arguments=json.dumps({"value": "input"}),
             ),
         )
 
@@ -449,14 +564,14 @@ async def test_validate_call_keeps_invalid_arguments_as_durable_received_row(
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     service = _tool_service(isolated_db, _DemoHandler())
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolProtocolError, match="Invalid arguments"):
         await service.validate_call(
             _tool_context(conversation_id, run_id),
-            AssembledToolCall(
+            encode_tool_call(
                 index=0,
                 provider_id="provider-0",
                 name="demo",
-                arguments={"unexpected": "value"},
+                arguments=json.dumps({"unexpected": "value"}),
             ),
         )
 
@@ -469,6 +584,46 @@ async def test_validate_call_keeps_invalid_arguments_as_durable_received_row(
     assert row.arguments == {"unexpected": "value"}
 
 
+async def test_validate_call_rejects_corrupt_received_row_before_mutation(
+    isolated_db,
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    handler = _DemoHandler()
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.create(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-0",
+            tool_name="demo",
+            arguments={"value": "input"},
+        )
+        row.proposal_payload = {"stale": "proposal"}
+        row.guard_payload = {"stale": "guard"}
+        row.decision = "approve"
+        row.client_resolution_id = "orphan-resolution"
+        row.tool_result = {"outcome": "stale"}
+        row.delivery_status = "pending"
+        row.resolved_at = "stale"
+        await session.commit()
+        tool_call_id = row.id
+
+    with pytest.raises(ToolProtocolError, match="received|unexpected"):
+        await _tool_service(isolated_db, handler).validate_call(
+            _tool_context(conversation_id, run_id),
+            _tool_call(value="input"),
+        )
+
+    assert handler.validation_count == 0
+    async with isolated_db.session() as session:
+        durable = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
+    assert durable is not None
+    assert durable.status == "received"
+    assert durable.decision == "approve"
+    assert durable.client_resolution_id == "orphan-resolution"
+    assert durable.proposal_payload == {"stale": "proposal"}
+
+
 async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     handler = _DemoHandler()
@@ -476,13 +631,13 @@ async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db)
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
 
-    assert isinstance(dispatched, PreparedToolCall)
-    assert dispatched.tool_name == "demo"
-    assert dispatched.security is ToolSecurity.MEDIUM
+    assert dispatched["status"] == "validated"
+    assert dispatched["name"] == "demo"
+    assert dispatched["security"] == ToolSecurity.MEDIUM.value
     assert handler.validation_count == 1
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            dispatched.tool_call_id
+            dispatched["tool_call_id"]
         )
     assert row is not None
     assert row.status == "validated"
@@ -496,13 +651,14 @@ async def test_validate_call_resolves_immediate_result_before_returning(isolated
         _tool_context(conversation_id, run_id), _tool_call(value="done")
     )
 
-    assert isinstance(dispatched, CompletedToolCall)
-    assert dispatched.result == {"outcome": "no_change"}
-    assert dispatched.decision is None
-    assert dispatched.replayed is False
+    assert dispatched["status"] == "resolved"
+    assert dispatched["result"] == {"outcome": "no_change"}
+    assert "decision" not in dispatched
+    assert "client_resolution_id" not in dispatched
+    assert dispatched["replayed"] is False
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            dispatched.tool_call_id
+            dispatched["tool_call_id"]
         )
     assert row is not None
     assert row.status == "resolved"
@@ -521,9 +677,9 @@ async def test_validate_call_replay_does_not_validate_twice(isolated_db) -> None
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
 
-    assert isinstance(first, PreparedToolCall)
-    assert isinstance(replay, PreparedToolCall)
-    assert replay.tool_call_id == first.tool_call_id
+    assert first["status"] == "validated"
+    assert replay["status"] == "validated"
+    assert replay["tool_call_id"] == first["tool_call_id"]
     assert handler.validation_count == 1
 
 
@@ -541,12 +697,12 @@ async def test_validate_call_concurrent_prepared_validation_keeps_one_durable_wi
     handler.release.set()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert isinstance(first_result, PreparedToolCall)
-    assert isinstance(second_result, PreparedToolCall)
-    assert first_result.tool_call_id == second_result.tool_call_id
+    assert first_result["status"] == "validated"
+    assert second_result["status"] == "validated"
+    assert first_result["tool_call_id"] == second_result["tool_call_id"]
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            first_result.tool_call_id
+            first_result["tool_call_id"]
         )
     assert row is not None
     assert row.status == "validated"
@@ -568,34 +724,34 @@ async def test_validate_call_concurrent_immediate_result_replays_durable_winner(
     handler.release.set()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert isinstance(first_result, CompletedToolCall)
-    assert isinstance(second_result, CompletedToolCall)
-    assert first_result.tool_call_id == second_result.tool_call_id
-    assert first_result.result == second_result.result
-    assert first_result.result in (
+    assert first_result["status"] == "resolved"
+    assert second_result["status"] == "resolved"
+    assert first_result["tool_call_id"] == second_result["tool_call_id"]
+    assert first_result["result"] == second_result["result"]
+    assert first_result["result"] in (
         {"outcome": "immediate-1"},
         {"outcome": "immediate-2"},
     )
-    assert sorted((first_result.replayed, second_result.replayed)) == [False, True]
+    assert sorted((first_result["replayed"], second_result["replayed"])) == [False, True]
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            first_result.tool_call_id
+            first_result["tool_call_id"]
         )
     assert row is not None
     assert row.status == "resolved"
-    assert row.tool_result == first_result.result
+    assert row.tool_result == first_result["result"]
 
 
 @pytest.mark.parametrize(
-    ("status", "expected_type"),
+    "status",
     [
-        ("awaiting_approval", ApprovalRequest),
-        ("approved", ApprovedToolCall),
-        ("resolved", CompletedToolCall),
+        "awaiting_approval",
+        "approved",
+        "resolved",
     ],
 )
 async def test_validate_call_maps_existing_durable_status(
-    isolated_db, status: str, expected_type: type[object]
+    isolated_db, status: str
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     handler = _DemoHandler()
@@ -619,22 +775,30 @@ async def test_validate_call_maps_existing_durable_status(
             row.tool_result = {"outcome": "done"}
             row.decision = "reject"
             row.client_resolution_id = "rejected-1"
+            row.delivery_status = "pending"
+            row.resolved_at = "resolved-now"
         await session.commit()
 
     dispatched = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
 
-    assert isinstance(dispatched, expected_type)
+    assert dispatched["status"] == status
     assert handler.validation_count == 0
+    assert "decision" not in dispatched
+    assert "client_resolution_id" not in dispatched
     if status == "awaiting_approval":
-        assert dispatched.proposal_payload == {"value": "input"}  # type: ignore[union-attr]
+        assert dispatched["proposal_payload"] == {"value": "input"}
     elif status == "approved":
-        assert dispatched.client_resolution_id == "approved-1"  # type: ignore[union-attr]
+        assert dispatched["should_execute"] is True
+        assert row.decision == "approve"
+        assert row.client_resolution_id == "approved-1"
     else:
-        assert dispatched.result == {"outcome": "done"}  # type: ignore[union-attr]
-        assert dispatched.decision == "reject"  # type: ignore[union-attr]
-        assert dispatched.replayed is True  # type: ignore[union-attr]
+        assert dispatched["result"] == {"outcome": "done"}
+        assert dispatched["should_execute"] is False
+        assert row.decision == "reject"
+        assert row.client_resolution_id == "rejected-1"
+        assert dispatched["replayed"] is True
 
 
 @pytest.mark.parametrize(
@@ -667,6 +831,8 @@ async def test_validate_call_rejects_durable_decision_without_resolution_token(
         row.client_resolution_id = client_resolution_id
         if status == "resolved":
             row.tool_result = {"outcome": "done"}
+            row.delivery_status = "pending"
+            row.resolved_at = "resolved-now"
         await session.commit()
 
     with pytest.raises(ToolProtocolError, match="identity"):
@@ -740,6 +906,9 @@ async def test_service_rejects_inconsistent_durable_tool_call_state(
         row.proposal_payload = proposal_payload
         row.guard_payload = guard_payload
         row.tool_result = tool_result
+        if status == "resolved":
+            row.delivery_status = "pending"
+            row.resolved_at = "resolved-now"
         await session.commit()
 
     with pytest.raises(ToolProtocolError):
@@ -748,23 +917,69 @@ async def test_service_rejects_inconsistent_durable_tool_call_state(
         )
 
 
+@pytest.mark.parametrize(
+    ("status", "delivery_status", "resolved_at"),
+    [
+        ("validated", "pending", None),
+        ("awaiting_approval", None, "stale"),
+        ("approved", "pending", "stale"),
+        ("resolved", None, "resolved-now"),
+        ("resolved", "pending", None),
+        ("resolved", "pending", "   "),
+    ],
+)
+async def test_service_rejects_incomplete_lifecycle_metadata(
+    isolated_db,
+    status: str,
+    delivery_status: str | None,
+    resolved_at: str | None,
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.create(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-0",
+            tool_name="demo",
+            arguments={"value": "input"},
+        )
+        row.status = status
+        row.proposal_payload = {"value": "input"}
+        row.guard_payload = {"trusted": "input"}
+        row.delivery_status = delivery_status
+        row.resolved_at = resolved_at
+        if status in {"approved", "resolved"}:
+            row.decision = "approve"
+            row.client_resolution_id = "approval-1"
+        if status == "resolved":
+            row.tool_result = {"outcome": "done"}
+        await session.commit()
+        tool_call_id = row.id
+
+    with pytest.raises(ToolProtocolError, match="delivery|resolved"):
+        await _tool_service(isolated_db, _DemoHandler()).get_call(tool_call_id)
+
+
 async def test_request_approval_is_durable_and_idempotent(isolated_db) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     service = _tool_service(isolated_db, _DemoHandler())
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
+    assert prepared["status"] == "validated"
 
-    request = await service.request_approval(prepared.tool_call_id)
-    replay = await service.request_approval(prepared.tool_call_id)
+    request = await service.request_approval(prepared["tool_call_id"])
+    replay = await service.request_approval(prepared["tool_call_id"])
 
-    assert isinstance(request, ApprovalRequest)
-    assert replay == request
-    assert request.proposal_payload == {"value": "input"}
+    assert request["status"] == "awaiting_approval"
+    assert replay["status"] == "awaiting_approval"
+    assert request["replayed"] is False
+    assert replay["replayed"] is True
+    assert request["proposal_payload"] == {"value": "input"}
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            prepared.tool_call_id
+            prepared["tool_call_id"]
         )
     assert row is not None
     assert row.status == "awaiting_approval"
@@ -782,23 +997,23 @@ async def test_request_approval_concurrent_calls_converge_on_durable_request(
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
+    assert prepared["status"] == "validated"
     start = asyncio.Event()
 
-    async def request() -> ApprovalRequest | ApprovedToolCall | CompletedToolCall:
+    async def request() -> ToolCall:
         await start.wait()
-        return await service.request_approval(prepared.tool_call_id)
+        return await service.request_approval(prepared["tool_call_id"])
 
     first = asyncio.create_task(request())
     second = asyncio.create_task(request())
     start.set()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert first_result == second_result
-    assert isinstance(first_result, ApprovalRequest)
+    assert first_result["tool_call_id"] == second_result["tool_call_id"]
+    assert first_result["status"] == second_result["status"] == "awaiting_approval"
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            prepared.tool_call_id
+            prepared["tool_call_id"]
         )
     assert row is not None and row.status == "awaiting_approval"
 
@@ -809,13 +1024,13 @@ async def test_request_approval_replays_validation_time_result(isolated_db) -> N
     completed = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="done")
     )
-    assert isinstance(completed, CompletedToolCall)
+    assert completed["status"] == "resolved"
 
-    replay = await service.request_approval(completed.tool_call_id)
+    replay = await service.request_approval(completed["tool_call_id"])
 
-    assert isinstance(replay, CompletedToolCall)
-    assert replay.result == {"outcome": "no_change"}
-    assert replay.replayed is True
+    assert replay["status"] == "resolved"
+    assert replay["result"] == {"outcome": "no_change"}
+    assert replay["replayed"] is True
 
 
 async def test_record_decision_persists_approval_before_execution(isolated_db) -> None:
@@ -824,31 +1039,33 @@ async def test_record_decision_persists_approval_before_execution(isolated_db) -
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
 
     approved = await service.record_decision(
         {
-            "tool_call_id": prepared.tool_call_id,
+            "tool_call_id": prepared["tool_call_id"],
             "decision": "approve",
             "client_resolution_id": "resolution-1",
         }
     )
     approval_replay = await service.record_decision(
         {
-            "tool_call_id": prepared.tool_call_id,
+            "tool_call_id": prepared["tool_call_id"],
             "decision": "approve",
             "client_resolution_id": "resolution-1",
         }
     )
-    request_replay = await service.request_approval(prepared.tool_call_id)
+    request_replay = await service.request_approval(prepared["tool_call_id"])
 
-    assert isinstance(approved, ApprovedToolCall)
-    assert approval_replay == approved
-    assert request_replay == approved
+    assert approved["status"] == "approved"
+    assert approval_replay["status"] == "approved"
+    assert request_replay["status"] == "approved"
+    assert approved["replayed"] is False
+    assert approval_replay["replayed"] is True
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            prepared.tool_call_id
+            prepared["tool_call_id"]
         )
     assert row is not None
     assert row.status == "approved"
@@ -863,21 +1080,29 @@ async def test_record_decision_replays_resolved_approval_only_for_exact_identity
     service = _tool_service(isolated_db, _ExecutionHandler())
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
     approval = {
-        "tool_call_id": prepared.tool_call_id,
+        "tool_call_id": prepared["tool_call_id"],
         "decision": "approve",
         "client_resolution_id": "resolved-approval",
     }
     await service.record_decision(approval)
-    await service.execute_call(context, prepared.tool_call_id)
+    await service.execute_call(context, prepared["tool_call_id"])
 
     replay = await service.record_decision(approval)
 
-    assert isinstance(replay, CompletedToolCall)
-    assert replay.decision == "approve"
-    assert replay.replayed is True
+    assert replay["status"] == "resolved"
+    assert "decision" not in replay
+    assert "client_resolution_id" not in replay
+    assert replay["replayed"] is True
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.get(
+            prepared["tool_call_id"]
+        )
+    assert row is not None
+    assert row.decision == "approve"
+    assert row.client_resolution_id == "resolved-approval"
     for decision, token in (
         ("approve", "different-resolution"),
         ("reject", "resolved-approval"),
@@ -885,7 +1110,7 @@ async def test_record_decision_replays_resolved_approval_only_for_exact_identity
         with pytest.raises(IdempotencyConflictError):
             await service.record_decision(
                 {
-                    "tool_call_id": prepared.tool_call_id,
+                    "tool_call_id": prepared["tool_call_id"],
                     "decision": decision,
                     "client_resolution_id": token,
                 }
@@ -898,13 +1123,14 @@ async def test_record_decision_rejects_without_calling_handler_execute(
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     handler = _DemoHandler()
     service = _tool_service(isolated_db, handler)
+    context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(
-        _tool_context(conversation_id, run_id), _tool_call(value="input")
+        context, _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
     approval = {
-        "tool_call_id": prepared.tool_call_id,
+        "tool_call_id": prepared["tool_call_id"],
         "decision": "reject",
         "client_resolution_id": "reject-1",
     }
@@ -912,14 +1138,25 @@ async def test_record_decision_rejects_without_calling_handler_execute(
     rejected = await service.record_decision(approval)
     replay = await service.record_decision(approval)
 
-    assert isinstance(rejected, CompletedToolCall)
-    assert rejected.result == {"outcome": "rejected"}
-    assert rejected.decision == "reject"
-    assert rejected.replayed is False
-    assert isinstance(replay, CompletedToolCall)
-    assert replay.result == rejected.result
-    assert replay.replayed is True
+    assert rejected["status"] == "resolved"
+    assert rejected["result"] == {"outcome": "rejected"}
+    assert rejected["should_execute"] is False
+    assert "decision" not in rejected
+    assert "client_resolution_id" not in rejected
+    assert rejected["replayed"] is False
+    assert replay["status"] == "resolved"
+    assert replay["result"] == rejected["result"]
+    assert replay["replayed"] is True
     assert handler.execution_count == 0
+    result = await service.execute_call(context, prepared["tool_call_id"])
+    assert result.decision == "reject"
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).tool_calls.get(
+            prepared["tool_call_id"]
+        )
+    assert row is not None
+    assert row.decision == "reject"
+    assert row.client_resolution_id == "reject-1"
 
 
 async def test_record_decision_rejects_empty_or_conflicting_resolution_identity(
@@ -930,26 +1167,26 @@ async def test_record_decision_rejects_empty_or_conflicting_resolution_identity(
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
 
     for invalid_resolution_id in ("", "   "):
         with pytest.raises(ToolProtocolError, match="resolution"):
             await service.record_decision(
                 {
-                    "tool_call_id": prepared.tool_call_id,
+                    "tool_call_id": prepared["tool_call_id"],
                     "decision": "approve",
                     "client_resolution_id": invalid_resolution_id,
                 }
             )
     approved = await service.record_decision(
         {
-            "tool_call_id": prepared.tool_call_id,
+            "tool_call_id": prepared["tool_call_id"],
             "decision": "approve",
             "client_resolution_id": "resolution-1",
         }
     )
-    assert isinstance(approved, ApprovedToolCall)
+    assert approved["status"] == "approved"
 
     for decision, token in (
         ("approve", "resolution-2"),
@@ -958,7 +1195,7 @@ async def test_record_decision_rejects_empty_or_conflicting_resolution_identity(
         with pytest.raises(IdempotencyConflictError):
             await service.record_decision(
                 {
-                    "tool_call_id": prepared.tool_call_id,
+                    "tool_call_id": prepared["tool_call_id"],
                     "decision": decision,
                     "client_resolution_id": token,
                 }
@@ -977,10 +1214,10 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
     second = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="second", index=1)
     )
-    assert isinstance(first, PreparedToolCall)
-    assert isinstance(second, PreparedToolCall)
-    await service.request_approval(first.tool_call_id)
-    await service.request_approval(second.tool_call_id)
+    assert first["status"] == "validated"
+    assert second["status"] == "validated"
+    await service.request_approval(first["tool_call_id"])
+    await service.request_approval(second["tool_call_id"])
     start = asyncio.Event()
     observation = _RepositoryObservation(
         resolution_barrier=_TwoPartyBarrier(),
@@ -1001,19 +1238,22 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
             }
         )
 
-    first_task = asyncio.create_task(decide(first.tool_call_id))
-    second_task = asyncio.create_task(decide(second.tool_call_id))
+    first_task = asyncio.create_task(decide(first["tool_call_id"]))
+    second_task = asyncio.create_task(decide(second["tool_call_id"]))
     start.set()
     outcomes = await asyncio.gather(first_task, second_task, return_exceptions=True)
 
-    assert sum(isinstance(item, ApprovedToolCall) for item in outcomes) == 1
+    assert sum(
+        isinstance(item, dict) and item.get("status") == "approved"
+        for item in outcomes
+    ) == 1
     assert sum(isinstance(item, IdempotencyConflictError) for item in outcomes) == 1
     assert not any(isinstance(item, IntegrityError) for item in outcomes)
     async with isolated_db.session() as session:
         repository = RepositoryFactory().create(session).tool_calls
         rows = [
-            await repository.get(first.tool_call_id),
-            await repository.get(second.tool_call_id),
+            await repository.get(first["tool_call_id"]),
+            await repository.get(second["tool_call_id"]),
         ]
     owners = [row for row in rows if row and row.client_resolution_id]
     assert len(owners) == 1
@@ -1028,31 +1268,31 @@ async def test_execute_call_rolls_back_failure_then_retries_atomically(
     service = _tool_service(isolated_db, handler)
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
     await service.record_decision(
         {
-            "tool_call_id": prepared.tool_call_id,
+            "tool_call_id": prepared["tool_call_id"],
             "decision": "approve",
             "client_resolution_id": "approve-retry",
         }
     )
 
     with pytest.raises(RuntimeError, match="transient"):
-        await service.execute_call(context, prepared.tool_call_id)
+        await service.execute_call(context, prepared["tool_call_id"])
 
     async with isolated_db.session() as session:
         repository = RepositoryFactory().create(session)
-        failed_row = await repository.tool_calls.get(prepared.tool_call_id)
+        failed_row = await repository.tool_calls.get(prepared["tool_call_id"])
         side_effect_count = await session.scalar(
             select(func.count()).select_from(AiChatMessage)
         )
     assert failed_row is not None and failed_row.status == "approved"
     assert side_effect_count == 0
 
-    completed = await service.execute_call(context, prepared.tool_call_id)
+    completed = await service.execute_call(context, prepared["tool_call_id"])
 
-    assert completed.result["outcome"] == "applied"
+    assert completed.payload["outcome"] == "applied"
     assert completed.decision == "approve"
     assert completed.replayed is False
     assert handler.execution_count == 2
@@ -1069,11 +1309,11 @@ async def test_execute_call_rejects_awaiting_approval(isolated_db) -> None:
     service = _tool_service(isolated_db, _DemoHandler())
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
-    assert isinstance(prepared, PreparedToolCall)
-    await service.request_approval(prepared.tool_call_id)
+    assert prepared["status"] == "validated"
+    await service.request_approval(prepared["tool_call_id"])
 
     with pytest.raises(ToolProtocolError, match="not ready"):
-        await service.execute_call(context, prepared.tool_call_id)
+        await service.execute_call(context, prepared["tool_call_id"])
 
 
 async def test_execute_call_rejects_context_for_another_persisted_run(
@@ -1086,18 +1326,18 @@ async def test_execute_call_rejects_context_for_another_persisted_run(
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
-    assert isinstance(prepared, PreparedToolCall)
+    assert prepared["status"] == "validated"
 
     with pytest.raises(ToolProtocolError, match="identity"):
         await service.execute_call(
             _tool_context(other_conversation_id, other_run_id),
-            prepared.tool_call_id,
+            prepared["tool_call_id"],
         )
 
     assert handler.execution_count == 0
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            prepared.tool_call_id
+            prepared["tool_call_id"]
         )
     assert row is not None and row.status == "validated"
 
@@ -1110,27 +1350,27 @@ async def test_execute_call_uses_only_persisted_payloads_and_replays_result(
     service = _tool_service(isolated_db, handler)
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
-    assert isinstance(prepared, PreparedToolCall)
+    assert prepared["status"] == "validated"
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
-            prepared.tool_call_id
+            prepared["tool_call_id"]
         )
         assert row is not None
         row.proposal_payload = {"value": "persisted-proposal"}
         row.guard_payload = {"trusted": "persisted-guard"}
         await session.commit()
 
-    completed = await service.execute_call(context, prepared.tool_call_id)
-    replay = await service.execute_call(context, prepared.tool_call_id)
+    completed = await service.execute_call(context, prepared["tool_call_id"])
+    replay = await service.execute_call(context, prepared["tool_call_id"])
 
-    assert completed.result == {
+    assert completed.payload == {
         "outcome": "applied",
         "proposal": {"value": "persisted-proposal"},
         "guard": {"trusted": "persisted-guard"},
     }
     assert completed.decision is None
     assert completed.replayed is False
-    assert replay.result == completed.result
+    assert replay.payload == completed.payload
     assert replay.replayed is True
     assert handler.received_payloads == [
         (
@@ -1155,12 +1395,14 @@ async def test_execute_call_concurrent_claim_runs_business_side_effect_once(
     ).bind_handlers({"demo": handler})
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
-    assert isinstance(prepared, PreparedToolCall)
-    first = asyncio.create_task(service.execute_call(context, prepared.tool_call_id))
+    assert prepared["status"] == "validated"
+    first = asyncio.create_task(
+        service.execute_call(context, prepared["tool_call_id"])
+    )
     await asyncio.wait_for(handler.entered.wait(), timeout=2)
 
-    async def replay_while_executing() -> CompletedToolCall:
-        return await service.execute_call(context, prepared.tool_call_id)
+    async def replay_while_executing() -> ToolResult:
+        return await service.execute_call(context, prepared["tool_call_id"])
 
     second = asyncio.create_task(replay_while_executing())
     assert observation.second_execution_claim is not None
@@ -1168,8 +1410,8 @@ async def test_execute_call_concurrent_claim_runs_business_side_effect_once(
     handler.release.set()
     first_result, second_result = await asyncio.gather(first, second)
 
-    assert first_result.result == {"outcome": "applied-once"}
-    assert second_result.result == first_result.result
+    assert first_result.payload == {"outcome": "applied-once"}
+    assert second_result.payload == first_result.payload
     assert sorted((first_result.replayed, second_result.replayed)) == [False, True]
     assert handler.execution_count == 1
     assert handler.success_count == 1
@@ -1178,6 +1420,48 @@ async def test_execute_call_concurrent_claim_runs_business_side_effect_once(
             select(func.count()).select_from(AiChatMessage)
         )
     assert side_effect_count == 1
+
+
+@pytest.mark.parametrize(
+    ("first_arguments", "replayed_arguments"),
+    [
+        ({"value": True}, {"value": 1}),
+        (
+            {"nested": [{"value": False}]},
+            {"nested": [{"value": 0}]},
+        ),
+    ],
+)
+async def test_materialize_rejects_json_values_with_different_types(
+    isolated_db,
+    first_arguments: dict[str, object],
+    replayed_arguments: dict[str, object],
+) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    async with isolated_db.session() as session:
+        await RepositoryFactory().create(session).tool_calls.materialize(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_call_index=0,
+            provider_tool_call_id="provider-a",
+            tool_name="demo",
+            arguments=first_arguments,
+        )
+        await session.commit()
+
+    async with isolated_db.session() as session:
+        with pytest.raises(
+            ToolProtocolError,
+            match="index was reused inconsistently",
+        ):
+            await RepositoryFactory().create(session).tool_calls.materialize(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=0,
+                provider_tool_call_id="provider-b",
+                tool_name="demo",
+                arguments=replayed_arguments,
+            )
 
 
 async def test_materialize_is_atomic_under_concurrent_replay(isolated_db) -> None:
@@ -1505,15 +1789,15 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
                 conversation_id=1,
                 run_id=1,
             ),
-            AssembledToolCall(
+            encode_tool_call(
                 index=0,
                 provider_id=None,
                 name="demo",
-                arguments={"value": "input"},
+                arguments=json.dumps({"value": "input"}),
             ),
         )
-        assert isinstance(dispatched, PreparedToolCall)
-        assert dispatched.security is ToolSecurity.MEDIUM
+        assert dispatched["status"] == "validated"
+        assert dispatched["security"] == ToolSecurity.MEDIUM.value
         async with database.session() as session:
             row = await RepositoryFactory().create(session).tool_calls.get(1)
         assert row is not None

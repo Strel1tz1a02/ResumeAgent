@@ -1,12 +1,12 @@
-"""将通用 ToolContext 解析为经历业务上下文。"""
+"""将通用工具上下文解析为经历业务上下文。"""
 
 from __future__ import annotations
 
-from app.ai_chat.tools.handler import ToolContext
+from app.ai_chat.tools.types import ToolContext
 
 
 def experience_id(context: ToolContext) -> int:
-    """从服务端校验过的 subject 中取得经历 ID。"""
+    """从服务端校验过的主体中取得经历标识。"""
     if context.subject.get("type") != "experience":
         raise ValueError("invalid experience subject")
     return int(context.subject["id"])
@@ -21,7 +21,7 @@ def scope_field(context: ToolContext) -> str:
 
 
 def generation_revision(context: ToolContext) -> int:
-    """读取普通字段或 Evidence 集合在模型生成开始时的 revision。"""
+    """读取普通字段或证据集合在模型生成开始时的修订号。"""
     snapshot = context.adapter_context.get("revision_snapshot")
     if not isinstance(snapshot, dict):
         raise ValueError("missing generation revision snapshot")
@@ -33,7 +33,7 @@ def generation_revision(context: ToolContext) -> int:
 
 
 def evidence_generation_revision(context: ToolContext, evidence_id: int) -> int | None:
-    """读取共享 Evidence 会话生成开始时某一 Item 的 revision。"""
+    """读取共享证据会话生成开始时某一条目的修订号。"""
     snapshot = context.adapter_context.get("revision_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("scope") != "evidence":
         return None

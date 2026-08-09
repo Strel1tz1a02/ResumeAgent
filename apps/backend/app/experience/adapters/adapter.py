@@ -1,4 +1,4 @@
-"""个人经历库的业务 Adapter。"""
+"""个人经历库的业务适配器。"""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ class ExperienceAdapter(BaseAdapter):
     """把通用会话绑定和输出翻译为经历领域语义。"""
 
     def __init__(self) -> None:
-        """构造无请求状态、可长期复用的 Tool Handler 集合。"""
-        handlers: tuple[ToolHandler, ...] = (ContentChangeHandler(),) # ...：可以有任意多个 ToolHandler 类型的元素
+        """构造无请求状态、可长期复用的工具处理器集合。"""
+        handlers: tuple[ToolHandler, ...] = (ContentChangeHandler(),)
         self._handlers = {handler.name: handler for handler in handlers}
 
     async def validate_binding(
@@ -64,7 +64,7 @@ class ExperienceAdapter(BaseAdapter):
         )
 
     async def parse_input(self, value: AdapterInput) -> ExperienceState:
-        """把统一输入和已保存经历转换成完整经历 Graph State。"""
+        """把统一输入和已保存经历转换成完整的经历图状态。"""
         experience_id = int(value["subject"]["id"])
         field = str(value["scope"]["field"])
         async with database_module.db.session() as session:
@@ -107,19 +107,14 @@ class ExperienceAdapter(BaseAdapter):
             tools_enabled=value["tools_enabled"],
             revision_snapshot=revision_snapshot,
             model_messages=messages,
+            raw_tool_call=None,
             tool_call=None,
-            tool_call_id=None,
-            tool_phase=None,
-            tool_security=None,
-            tool_finished=False,
-            proposal_id=None,
-            approval=None,
         )
 
     def build_graph(self, runtime: AiChatRuntime) -> StateGraph:
-        """返回由经历业务定义、尚未编译的 Graph。"""
+        """返回由经历业务定义、尚未编译的图。"""
         return build_experience_graph(runtime)
 
     def get_tool_handlers(self) -> Mapping[str, ToolHandler]:
-        """返回经历业务唯一的内容修改 Tool Handler。"""
+        """返回经历业务唯一的内容修改工具处理器。"""
         return self._handlers

@@ -213,7 +213,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 1. `apps/backend/app/ai_chat/types.py`；
 2. `apps/backend/app/ai_chat/graph/state.py`；
-3. `apps/backend/app/ai_chat/tools/results.py`；
+3. `apps/backend/app/ai_chat/tools/types.py`；
 4. `apps/backend/app/ai_chat/adapters/base.py`；
 5. `apps/backend/app/ai_chat/graph/runtime.py`；
 6. `apps/backend/app/ai_chat/container.py`；
@@ -436,10 +436,9 @@ streamExperienceMessage
 → ToolCallService.validate_call
 → ContentChangeHandler.validation
 → ExperienceAiMutationService.prepare_*
-→ 持久化 ValidatedToolCall
-→ graph.guard 根据 ToolCallService 返回的 security 分流
-→ ToolCallService.request_approval
-→ graph.approver / interrupt
+→ 持久化可信 proposal / guard 并返回统一 ToolCall
+→ graph.guard 根据 ToolCall.security 分流
+→ graph.approver 持久化申请并 interrupt
 → run=suspended
 → 前端展示 proposal
 → resolveExperienceProposal

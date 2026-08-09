@@ -2,20 +2,8 @@
 
 import json
 from dataclasses import dataclass
-from typing import Any
 
 from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.types import JsonObject
-
-
-@dataclass(frozen=True)
-class AssembledToolCall:
-    """一个完整的模型提供方工具调用。"""
-
-    index: int
-    provider_id: str | None
-    name: str
-    arguments: JsonObject
 
 
 @dataclass
@@ -29,19 +17,19 @@ class ToolCallBuffer:
     """按模型提供方索引缓冲交错到达的工具片段。"""
 
     def __init__(self) -> None:
-        """创建按模型提供方索引组织的空片段缓冲区。""" 
+        """创建按模型提供方索引组织的空片段缓冲区。"""
         self._pending: dict[int, _PendingToolCall] = {}
 
     def add(
         self,
         *,
-        index: int, # 模型提供
+        index: int,
         provider_id: str | None,
         name: str | None,
         arguments: str | None,
     ) -> None:
         """追加一个片段，但不向调用方暴露中间状态。"""
-        pending = self._pending.setdefault(index, _PendingToolCall()) # 有就直接拿，没有就创建一个再拿
+        pending = self._pending.setdefault(index, _PendingToolCall())
         if provider_id:
             pending.provider_id = provider_id
         if name:
@@ -49,25 +37,39 @@ class ToolCallBuffer:
         if arguments:
             pending.arguments += arguments
 
-    def assemble(self) -> list[AssembledToolCall]:
-        """模型结束后原子解析全部已缓冲调用。"""
-        calls: list[AssembledToolCall] = []
+    def assemble(self) -> list[str]:
+        """模型结束后把完整调用封装成等待校验节点解析的字符串。"""
+        calls: list[str] = []
         for index in sorted(self._pending):
             pending = self._pending[index]
             if not pending.name:
                 raise ToolProtocolError("Tool Call did not include a name")
-            try:
-                raw: Any = json.loads(pending.arguments or "{}")
-            except json.JSONDecodeError as error:
-                raise ToolProtocolError("Tool Call arguments are not valid JSON") from error
-            if not isinstance(raw, dict):
-                raise ToolProtocolError("Tool Call arguments must be a JSON object")
             calls.append(
-                AssembledToolCall(
+                encode_tool_call(
                     index=index,
                     provider_id=pending.provider_id,
                     name=pending.name,
-                    arguments=raw,
+                    arguments=pending.arguments or "{}",
                 )
             )
         return calls
+
+
+def encode_tool_call(
+    *,
+    index: int,
+    provider_id: str | None,
+    name: str,
+    arguments: str,
+) -> str:
+    """把提供方字段封装成统一的原始工具调用字符串。"""
+    return json.dumps(
+        {
+            "index": index,
+            "provider_id": provider_id,
+            "name": name,
+            "arguments": arguments,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )

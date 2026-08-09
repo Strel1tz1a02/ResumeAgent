@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 
-from app.ai_chat.tools.results import PendingToolResult
 from app.ai_chat.types import JsonObject
 
 
-def tool_result_messages(item: PendingToolResult) -> list[JsonObject]:
-    """为 pending Tool Result 重建合法 assistant/tool 消息对。"""
+def tool_result_messages(item: JsonObject) -> list[JsonObject]:
+    """为待补传的工具结果重建合法的助手与工具消息对。"""
     provider_id = item.get("provider_tool_call_id") or f"ai-chat-tool:{item['tool_call_id']}"
     return [
         {
@@ -42,9 +41,9 @@ def build_model_messages(
     scope_status: str,
     scope_revision: int,
     history: list[JsonObject],
-    pending: list[PendingToolResult],
+    pending: list[JsonObject],
 ) -> list[JsonObject]:
-    """按稳定顺序组合 Prompt、结构化事实、历史和待补传 Tool Result。"""
+    """按稳定顺序组合提示词、结构化事实、历史和待补传的工具结果。"""
     messages: list[JsonObject] = [
         {"role": "system", "content": prompt},
         {
@@ -53,7 +52,7 @@ def build_model_messages(
             + json.dumps(
                 {
                     "experience": detail,
-                    # ref_id 是前端/持久化绑定字段，不是模型 Tool 参数。这里只暴露
+                    # ref_id 是前端与持久化的绑定字段，不是模型工具参数。这里只暴露
                     # 会话字段名，避免模型把 ref_id 复制成 evidence_id。
                     "scope": {"field": scope.get("field")},
                     "scope_status": scope_status,

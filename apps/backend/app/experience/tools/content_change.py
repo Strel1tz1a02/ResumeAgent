@@ -1,4 +1,4 @@
-"""统一的经历内容修改 Tool 路由。"""
+"""统一的经历内容修改工具路由。"""
 
 from __future__ import annotations
 
@@ -7,12 +7,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.handler import ToolContext, ToolHandler
-from app.ai_chat.tools.results import (
+from app.ai_chat.tools.types import (
+    ToolContext,
     ToolResult,
-    ToolValidationResult,
-    ValidatedToolCall,
 )
+from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.tools.security import ToolSecurity
 from app.ai_chat.types import JsonObject
 from app.experience.adapters.tool_context import (
@@ -51,9 +50,10 @@ class ContentChangeScope(BaseModel):
 
 
 class EvidenceContent(BaseModel):
-    """模型修改或新增的一条完整 EvidenceItem。"""
+    """模型修改或新增的一条完整证据。"""
 
-    model_config = ConfigDict(extra="forbid") # 不允许出现 Schema 未定义的额外字段
+    # 不允许出现参数模式未定义的额外字段。
+    model_config = ConfigDict(extra="forbid")
 
     action: str
     result: str | None
@@ -61,7 +61,7 @@ class EvidenceContent(BaseModel):
 
 
 class ContentChangeArguments(BaseModel):
-    """模型提交目标与建议内容，具体内容结构由 Service 校验。"""
+    """模型提交目标与建议内容，具体内容结构由服务校验。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -88,8 +88,8 @@ class ContentChangeHandler(ToolHandler):
         self,
         context: ToolContext,
         arguments: JsonObject,
-    ) -> ToolValidationResult:
-        """校验模型输入，并生成审批展示和可信 revision guard。"""
+    ) -> tuple[JsonObject, JsonObject] | ToolResult:
+        """校验模型输入，并生成审批展示和可信的版本保护数据。"""
         try:
             values = ContentChangeArguments.model_validate(arguments)
         except ValidationError as exc:
@@ -106,7 +106,7 @@ class ContentChangeHandler(ToolHandler):
             else values.suggested_content
         )
         service = ExperienceAiMutationService(session)
-        if scope.field == "evidence" and scope.evidence_id is None: # 新增证据
+        if scope.field == "evidence" and scope.evidence_id is None:
             prepared = await service.prepare_evidence_append(
                 experience_id(context),
                 scope.field,
@@ -115,7 +115,7 @@ class ContentChangeHandler(ToolHandler):
                 scope_field=conversation_field,
                 expected_revision=start_revision,
             )
-        elif scope.field == "evidence": # 修改证据
+        elif scope.field == "evidence":
             prepared = await service.prepare_evidence_change(
                 experience_id(context),
                 scope.field,
@@ -126,7 +126,7 @@ class ContentChangeHandler(ToolHandler):
                     context, scope.evidence_id
                 ),
             )
-        else: #  修改普通字段
+        else:
             prepared = await service.prepare_field_change(
                 experience_id(context),
                 scope.field,
@@ -135,11 +135,8 @@ class ContentChangeHandler(ToolHandler):
                 scope_field=conversation_field,
                 expected_revision=start_revision,
             )
-        if isinstance(prepared, PreparedExperienceChange): # 如果需要审批
-            return ValidatedToolCall(
-                proposal_payload=prepared.proposal_payload,
-                guard_payload=prepared.guard_payload,
-            )
+        if isinstance(prepared, PreparedExperienceChange):
+            return prepared.proposal_payload, prepared.guard_payload
         return self.show_result(prepared)
 
     async def execute(
@@ -182,5 +179,5 @@ class ContentChangeHandler(ToolHandler):
         return self.show_result(payload)
 
     def show_result(self, payload: JsonObject) -> ToolResult:
-        """保留稳定 outcome，并统一封装经历工具结果。"""
+        """保留稳定结果标记，并统一封装经历工具结果。"""
         return ToolResult(dict(payload))

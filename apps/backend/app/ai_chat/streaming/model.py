@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.ai_chat.tools.buffer import AssembledToolCall, ToolCallBuffer
+from app.ai_chat.tools.buffer import ToolCallBuffer
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.types import JsonObject
@@ -44,9 +44,9 @@ class TextDelta:
 
 @dataclass(frozen=True)
 class ToolCallsCompleted:
-    """仅在全部片段组装完成后发出的完整工具调用。"""
+    """仅在全部片段组装完成后发出的原始工具调用字符串。"""
 
-    calls: tuple[AssembledToolCall, ...]
+    calls: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ class AiChatModel:
         finish_reason: str | None = None
         response = await router.acompletion(**kwargs)
         async for chunk in response:
-            choices = _get(chunk, "choices", []) or [] # 候选回答
+            choices = _get(chunk, "choices", []) or []
             if not choices:
                 continue
             choice = choices[0]

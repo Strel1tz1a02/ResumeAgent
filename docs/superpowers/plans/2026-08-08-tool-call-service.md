@@ -15,7 +15,7 @@
 - Production Graph code must not call `ToolHandler` or mutate `ToolCallRepository` directly.
 - `proposal_payload` is user-facing; `guard_payload` is server-trusted and must be loaded from the database.
 - Persist `approved` before entering executor; execute business writes and final Tool Result in one transaction.
-- Keep LangGraph State JSON-only and preserve old checkpoint recovery.
+- Keep LangGraph State JSON-only.
 - Do not add dependencies or a second Tool table.
 - Preserve unrelated dirty frontend files and never stage them.
 - Use `apply_patch` for edits and UTF-8 for Chinese files.
@@ -25,7 +25,7 @@
 ## File Responsibility Map
 
 - `app/ai_chat/services/tool_call_service.py`: bound Handler registry and all production Tool Call coordination.
-- `app/ai_chat/tools/results.py`: immutable, ORM-free dispatch result types shared by Service and Graph.
+- `app/ai_chat/tools/types.py`: shared Tool inputs, context, approval commands, and immutable dispatch results.
 - `app/ai_chat/repositories/tool_call_repository.py`: atomic materialization and state-transition CAS primitives.
 - `app/ai_chat/models/models.py`: explicit Tool Call state constraints.
 - `app/scripts/migrate_ai_chat_tool_call_state.py`: old-row backfill and SQLite table rebuild.
@@ -114,7 +114,7 @@ Run:
 
 ```powershell
 $env:DATA_DIR = 'C:\Users\jvxi\AppData\Local\Temp\resume-matcher-tool-service'
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated -q
 ```
 
 Expected: collection/import fails because `migrate_ai_chat_tool_call_state` does not exist.
@@ -247,7 +247,7 @@ migrate_ai_chat_tool_call_state(engine)
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated tests/unit/test_database.py tests/unit/test_experience_ai_chat.py -k "tool_call_state_migration or database or low_risk" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py::test_tool_call_state_migration_backfills_validated tests/unit/test_database.py tests/unit/test_experience_ai_chat.py -k "tool_call_state_migration or database or low_risk" -q
 ```
 
 Expected: all selected tests pass and running the migration twice is a no-op.
@@ -309,7 +309,7 @@ Also call `materialize()` again with `arguments={"value": "different"}` and asse
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "materialize" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "materialize" -q
 ```
 
 Expected: the pre-existing `SELECT → INSERT` implementation can raise a unique-key error under concurrency.
@@ -363,7 +363,7 @@ Each claim must use one SQLAlchemy `update(AiChatToolCall)` whose `where()` incl
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "materialize or repository_transition" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "materialize or repository_transition" -q
 ```
 
 Expected: all selected tests pass.
@@ -384,15 +384,15 @@ git commit -m "refactor: make tool call transitions atomic"
 - Modify: `apps/backend/app/ai_chat/services/__init__.py`
 - Modify: `apps/backend/app/ai_chat/tools/handler.py`
 - Create: `apps/backend/app/ai_chat/tools/security.py`
-- Modify: `apps/backend/app/ai_chat/tools/results.py`
+- Create: `apps/backend/app/ai_chat/tools/types.py`
 - Modify: `apps/backend/tests/unit/test_tool_call_service.py`
 
 **Interfaces:**
-- Consumes: Task 2 Repository API, `ToolHandler`, `ToolContext`, `AssembledToolCall`.
+- Consumes: Task 2 Repository API、`ToolHandler`、`ToolContext` 和原始 Tool Call 字符串。
 - Produces:
   - `ToolCallService.bind_handlers()` and `model_handlers`
-  - `validate_call(context, call) -> ToolCallState`
-  - immutable `PreparedToolCall`, `ApprovalRequest`, `ApprovedToolCall`, `CompletedToolCall`.
+  - `validate_call(context, raw_call) -> ToolCall`
+  - 使用 `status` 与字段值表达生命周期的统一 `ToolCall`。
 
 - [ ] **Step 1: Define failing Service validation tests**
 
@@ -418,10 +418,7 @@ class _DemoHandler(ToolHandler):
         values = self.arguments_schema.model_validate(arguments)
         if values.value == "done":
             return self.show_result({"outcome": "no_change"})
-        return ValidatedToolCall(
-            proposal_payload={"value": values.value},
-            guard_payload={"trusted": values.value},
-        )
+        return {"value": values.value}, {"trusted": values.value}
 
     async def execute(self, context, proposal_payload, guard_payload):
         self.execution_count += 1
@@ -436,56 +433,41 @@ Tests must assert:
 - `bind_handlers()` exposes the exact bound mapping without mutating the base Service;
 - unknown tool raises `ToolProtocolError` before a row is created;
 - invalid arguments leave one durable `received` row;
-- prepared validation returns `PreparedToolCall` and stores trusted payloads as `validated`;
-- immediate result returns `CompletedToolCall` and stores `resolved`;
+- prepared validation returns `ToolCall(status="validated")` and stores trusted payloads;
+- immediate result returns `ToolCall(status="resolved")` and stores the result;
 - replay does not call Handler validation twice;
-- existing `awaiting_approval`, `approved`, and `resolved` rows map to the matching immutable return type.
+- existing `awaiting_approval`, `approved`, and `resolved` rows map to the same `ToolCall` shape with different field values.
 
 - [ ] **Step 2: Run Service validation tests and verify they fail**
 
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "bind_handlers or validate_call" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "bind_handlers or validate_call" -q
 ```
 
 Expected: import fails because `ToolCallService` and dispatch types do not exist.
 
-- [ ] **Step 3: Add immutable dispatch types**
+- [ ] **Step 3: Add one ToolCall type**
 
-In `tools/results.py` define:
+In `tools/types.py` define:
 
 ```python
-@dataclass(frozen=True)
-class PreparedToolCall:
+class ToolCall(TypedDict):
     tool_call_id: int
-    tool_name: str
-    security: ToolSecurity
-
-@dataclass(frozen=True)
-class ApprovalRequest:
-    tool_call_id: int
-    tool_name: str
-    proposal_payload: JsonObject
-
-@dataclass(frozen=True)
-class ApprovedToolCall:
-    tool_call_id: int
-    tool_name: str
-    client_resolution_id: str
-
-@dataclass(frozen=True)
-class CompletedToolCall:
-    tool_call_id: int
-    tool_name: str
-    result: JsonObject
-    decision: Literal["approve", "reject"] | None
+    index: int
+    provider_id: str | None
+    name: str
+    arguments: JsonObject
+    status: ToolCallStatus
+    security: Literal["low", "medium", "high"]
+    proposal_payload: JsonObject | None
+    should_execute: bool | None
+    result: JsonObject | None
     replayed: bool
-
-ToolCallState = (
-    PreparedToolCall | ApprovalRequest | ApprovedToolCall | CompletedToolCall
-)
 ```
+
+Keep `decision` and `client_resolution_id` in `ApprovalDecision` and the durable database row, not in `ToolCall`.
 
 - [ ] **Step 4: Implement the bound Service shell**
 
@@ -517,23 +499,23 @@ The method must:
 1. Resolve Handler.
 2. Open session A, `materialize()`, commit, retain ID.
 3. Open session B and reload the row.
-4. Return an immutable snapshot for `validated`, `awaiting_approval`, `approved`, or `resolved` without revalidating.
+4. Return one `ToolCall` snapshot for `validated`, `awaiting_approval`, `approved`, or `resolved` without revalidating.
 5. For `received`, call `handler.validation(replace(context, tool_call_id=id, session=session), row.arguments)`.
-6. Save `ValidatedToolCall` as `validated`, or save immediate `ToolResult` as `resolved`.
+6. Save the proposal/guard tuple as `validated`, or save immediate `ToolResult` as `resolved`.
 7. Commit before returning.
 
 Any unsupported status or result type raises `ToolProtocolError`; exceptions roll back session B while the raw `received` row remains durable.
 
-- [ ] **Step 6: Export Service and result types**
+- [ ] **Step 6: Export Service and the unified Tool types**
 
-Export `ToolCallService` from `ai_chat/services/__init__.py` and the new immutable results from `ai_chat/tools/__init__.py` if that module is the public Tool protocol surface.
+Export `ToolCallService` from `ai_chat/services/__init__.py` and `ToolCall`、`ToolContext`、`ToolResult` from `ai_chat/tools/__init__.py`.
 
 - [ ] **Step 7: Run validation tests**
 
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "bind_handlers or validate_call" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "bind_handlers or validate_call" -q
 ```
 
 Expected: all selected tests pass.
@@ -541,7 +523,7 @@ Expected: all selected tests pass.
 - [ ] **Step 8: Commit the validation service**
 
 ```powershell
-git add apps/backend/app/ai_chat/services/tool_call_service.py apps/backend/app/ai_chat/services/__init__.py apps/backend/app/ai_chat/tools/handler.py apps/backend/app/ai_chat/tools/security.py apps/backend/app/ai_chat/tools/results.py apps/backend/app/ai_chat/tools/__init__.py apps/backend/tests/unit/test_tool_call_service.py
+git add apps/backend/app/ai_chat/services/tool_call_service.py apps/backend/app/ai_chat/services/__init__.py apps/backend/app/ai_chat/tools/types.py apps/backend/app/ai_chat/tools/handler.py apps/backend/app/ai_chat/tools/security.py apps/backend/app/ai_chat/tools/__init__.py apps/backend/tests/unit/test_tool_call_service.py
 git commit -m "feat: add tool call validation service"
 ```
 
@@ -554,7 +536,7 @@ git commit -m "feat: add tool call validation service"
 - Modify: `apps/backend/tests/unit/test_tool_call_service.py`
 
 **Interfaces:**
-- Consumes: Task 3 Service and immutable dispatch types.
+- Consumes: Task 3 Service and unified `ToolCall`.
 - Produces:
   - `request_approval(tool_call_id)`
   - `record_decision(approval)`
@@ -565,19 +547,19 @@ git commit -m "feat: add tool call validation service"
 Cover these observable behaviors:
 
 ```python
-request = await service.request_approval(prepared.tool_call_id)
-assert isinstance(request, ApprovalRequest)
+request = await service.request_approval(call["tool_call_id"])
+assert request["status"] == "awaiting_approval"
 
 approved = await service.record_decision({
-    "tool_call_id": prepared.tool_call_id,
+    "tool_call_id": call["tool_call_id"],
     "decision": "approve",
     "client_resolution_id": "resolution-1",
 })
-assert isinstance(approved, ApprovedToolCall)
+assert approved["status"] == "approved"
 
 async with isolated_db.session() as session:
     row = await RepositoryFactory().create(session).tool_calls.get(
-        prepared.tool_call_id
+        call["tool_call_id"]
     )
 assert row is not None and row.status == "approved"
 ```
@@ -585,7 +567,7 @@ assert row is not None and row.status == "approved"
 Also assert:
 
 - repeated `request_approval()` is idempotent;
-- reject stores `CompletedToolCall(result={"outcome": "rejected"})` and never calls Handler `execute`;
+- reject stores `ToolCall(status="resolved", result={"outcome": "rejected"})` and never calls Handler `execute`;
 - same resolution token replays; different token or decision raises `IdempotencyConflictError`;
 - approve is durable before execute;
 - a fail-once Handler leaves status `approved`, then succeeds on retry exactly once;
@@ -598,7 +580,7 @@ Also assert:
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "approval or decision or execute_call" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -k "approval or decision or execute_call" -q
 ```
 
 Expected: methods are missing.
@@ -608,10 +590,10 @@ Expected: methods are missing.
 Load the row and return by durable state:
 
 ```text
-validated -> CAS awaiting_approval -> ApprovalRequest
-awaiting_approval -> ApprovalRequest(replayed)
-approved -> ApprovedToolCall
-resolved -> CompletedToolCall(replayed=True)
+validated -> CAS awaiting_approval -> ToolCall(status=awaiting_approval)
+awaiting_approval -> ToolCall(status=awaiting_approval, replayed=True)
+approved -> ToolCall(status=approved, should_execute=True)
+resolved -> ToolCall(status=resolved, replayed=True)
 other -> ToolProtocolError
 ```
 
@@ -660,7 +642,7 @@ If Handler raises, the transaction rolls back to `validated` or `approved`. If C
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_tool_call_service.py -q
 ```
 
 Expected: all Service, Repository, migration, and concurrency tests pass.
@@ -707,7 +689,7 @@ Add an assertion that the unbound Runtime remains empty after `bind_tools()`.
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_ai_chat_model.py tests/unit/test_experience_ai_chat.py -k "runtime or exposes_provider_tools" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_ai_chat_model.py tests/unit/test_experience_ai_chat.py -k "runtime or exposes_provider_tools" -q
 ```
 
 Expected: `AiChatRuntime` still expects `RepositoryFactory` and exposes `tool_handlers`.
@@ -776,7 +758,7 @@ Wrap `handler.validation()` in `async with isolated_db.session()` and use `repla
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_ai_chat_model.py tests/unit/test_experience_ai_chat.py -k "handler or runtime or provider_tools or content_change" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_ai_chat_model.py tests/unit/test_experience_ai_chat.py -k "handler or runtime or provider_tools or content_change" -q
 ```
 
 Expected: selected tests pass.
@@ -801,7 +783,7 @@ git commit -m "refactor: bind tool service into runtime"
 
 **Interfaces:**
 - Consumes: bound `runtime.tools` and dispatch types.
-- Produces: unchanged node names `llm`, `validator`, `guard`, `approver`, `executor`, with optional JSON `tool_phase`.
+- Produces: unchanged node names `llm`, `validator`, `guard`, `approver`, `executor`, with one nested `ToolCall` and one independent `ApprovalDecision`.
 
 - [ ] **Step 1: Tighten Graph behavior tests before refactoring**
 
@@ -816,7 +798,7 @@ reject -> proposal.resolved -> rejected event; execute count remains zero
 executor failure -> run.failed; DB remains approved
 same resolution retry -> one business mutation
 different decision/token after failure -> IdempotencyConflictError
-legacy checkpoint approval + DB awaiting -> persist decision then execute
+malformed or conflicting current approval -> fail before execution
 ```
 
 Add an architecture assertion using source inspection or a focused grep test that `experience/graph/builder.py` contains neither `runtime.repositories` nor `handler.validation` nor `handler.execute`.
@@ -826,22 +808,22 @@ Add an architecture assertion using source inspection or a focused grep test tha
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_experience_ai_chat.py -k "graph or approval or executor or recovery" -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_experience_ai_chat.py -k "graph or approval or executor or recovery" -q
 ```
 
 Expected: new durable-approved and architecture assertions fail.
 
-- [ ] **Step 3: Add JSON tool_phase to ExperienceState**
+- [ ] **Step 3: Keep one ToolCall in ExperienceState**
 
-Define:
+Define only:
 
 ```python
-tool_phase: Literal[
-    "validated", "awaiting_approval", "approved", "resolved"
-] | None
+raw_tool_call: str | None
+tool_call: ToolCall | None
+approval: NotRequired[ApprovalDecision | None]
 ```
 
-Initialize it to `None` in input/LLM reset paths. Do not store Service result objects in State.
+Initialize the first two fields to `None` in the adapter and clear all three before each new model turn. Do not duplicate lifecycle fields at the State top level.
 
 - [ ] **Step 4: Replace validator internals**
 
@@ -851,20 +833,20 @@ The node constructs `ToolContext`, calls only:
 dispatch = await runtime.tools.validate_call(context, call)
 ```
 
-Map dispatch to JSON state. Emit Tool events only for `CompletedToolCall`, after Service has committed.
+Write the unified `ToolCall` to JSON state. Emit Tool events only after Service has committed a resolved result.
 
 - [ ] **Step 5: Replace guard internals**
 
-Route persisted phases first:
+Route by `ToolCall.status` first:
 
 ```text
-awaiting_approval -> request_approval() -> approver
+awaiting_approval -> approver
 approved -> executor
-resolved -> END
+resolved -> executor for durable result replay
 validated -> guard_tool(dispatch security)
 ```
 
-For a new approval, call `runtime.tools.request_approval()`, emit `proposal.requested`, then set `proposal_id` and `tool_phase="awaiting_approval"`.
+For LOW risk, set only the transient `ToolCall.should_execute` route flag. Other validated calls enter approver.
 
 - [ ] **Step 6: Replace approver internals**
 
@@ -874,11 +856,11 @@ After `interrupt()` returns, call:
 dispatch = await runtime.tools.record_decision(approval)
 ```
 
-For reject, emit `proposal.resolved` and rejected Tool event, then end. For approve, set `tool_phase="approved"` and route executor. The database commit must occur before the node returns and before LangGraph writes the next checkpoint.
+Call `runtime.tools.request_approval()`, emit `proposal.requested`, then wait for `interrupt()`. After resume, persist the complete `ApprovalDecision` through `record_decision()` and return the resulting `ToolCall`. Both approve and reject route through executor so one node emits the durable result events.
 
 - [ ] **Step 7: Replace executor internals**
 
-For an old checkpoint with `state.approval` and DB still awaiting, call `record_decision()` idempotently first. Then call only:
+Reload the durable `ToolCall`; execute only a LOW-risk call authorized by guard, an approved call, or replay an already resolved result. Then call only:
 
 ```python
 completed = await runtime.tools.execute_call(context, tool_call_id)
@@ -888,14 +870,14 @@ Emit `proposal.resolved` only for approved calls, then emit the Tool business ev
 
 - [ ] **Step 8: Keep recovery comparison DB-compatible**
 
-Retain `GraphRunner.ensure_interrupted()` comparison of checkpoint approval to the incoming approval. In `AiChatService.resolve_proposal()`, treat durable `approved` with the same decision/token as resumable, and reject conflicting decisions before auto-progressing executor.
+`GraphRunner.ensure_interrupted()` accepts identity only from the nested `ToolCall` and compares the independent checkpoint approval exactly with the incoming approval. In `AiChatService.resolve_proposal()`, treat durable `approved` with the same decision/token as resumable, and reject conflicting decisions before auto-progressing executor.
 
 - [ ] **Step 9: Run Experience Graph tests**
 
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_experience_ai_chat.py -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest tests/unit/test_experience_ai_chat.py -q
 ```
 
 Expected: all Experience AI Chat tests pass, including real interrupt/resume and failure recovery.
@@ -958,7 +940,7 @@ Expected: no production-code match; documentation matches may only be explicit s
 Run:
 
 ```powershell
-& 'E:\anaconda\Scripts\ruff.exe' check app tests
+ruff check app tests
 ```
 
 Expected: `All checks passed!`
@@ -968,7 +950,7 @@ Expected: `All checks passed!`
 Run:
 
 ```powershell
-& 'E:\anaconda\envs\resume-matcher\python.exe' -c "from app.ai_chat.services import ToolCallService; from app.ai_chat.graph.runtime import AiChatRuntime; from app.experience.graph import build_experience_graph; print('imports ok')"
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -c "from app.ai_chat.services import ToolCallService; from app.ai_chat.graph.runtime import AiChatRuntime; from app.experience.graph import build_experience_graph; print('imports ok')"
 ```
 
 Expected: `imports ok` with no circular import or annotation error.
@@ -979,7 +961,7 @@ Run:
 
 ```powershell
 $env:DATA_DIR = 'C:\Users\jvxi\AppData\Local\Temp\resume-matcher-tool-service'
-& 'E:\anaconda\envs\resume-matcher\python.exe' -m pytest -q
+& 'E:\MiniConda\envs\resume-matcher\python.exe' -m pytest -q
 ```
 
 Expected: all non-eval backend tests pass; no test writes to the developer database.

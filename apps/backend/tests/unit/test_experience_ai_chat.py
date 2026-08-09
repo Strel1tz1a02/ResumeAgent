@@ -1,4 +1,4 @@
-"""经历字段状态、Tool 和 Graph 的确定性业务测试。"""
+"""经历字段状态、工具和图的确定性业务测试。"""
 
 from __future__ import annotations
 
@@ -28,15 +28,18 @@ from app.ai_chat.services import AiChatService, ToolCallService
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
-from app.ai_chat.tools.buffer import AssembledToolCall
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.tools.handler import ToolContext
-from app.ai_chat.tools.results import ToolResult, ValidatedToolCall
+from app.ai_chat.tools.types import (
+    ToolContext,
+    ToolResult,
+)
+from app.ai_chat.tools.buffer import encode_tool_call
 from app.ai_chat.tools.security import ToolSecurity, guard_tool
 from app.ai_chat.types import ScopeRef, SubjectRef
 from app.database import Database
 from app.experience import ExperienceAdapter
 from app.experience.graph import ExperienceState, build_experience_graph
+from app.experience.graph.builder import _durable_call
 from app.experience.prompts.ai_chat import system_prompt
 from app.experience.tools.content_change import (
     ContentChangeArguments,
@@ -84,14 +87,20 @@ class _ConversationModel:
             return
         yield ToolCallsCompleted(
             (
-                AssembledToolCall(
+                encode_tool_call(
                     index=0,
                     provider_id=self._provider_id,
                     name="content_change",
-                    arguments={
-                        "scope": {"field": "background", "evidence_id": None},
-                        "suggested_content": "新背景",
-                    },
+                    arguments=json.dumps(
+                        {
+                            "scope": {
+                                "field": "background",
+                                "evidence_id": None,
+                            },
+                            "suggested_content": "新背景",
+                        },
+                        ensure_ascii=False,
+                    ),
                 ),
             )
         )
@@ -146,7 +155,7 @@ class _ProposalStateFailingHandler(ContentChangeHandler):
 
 @dataclass(frozen=True)
 class _GraphHarness:
-    """真实数据库、checkpointer 与 Graph 的测试装配。"""
+    """真实数据库、检查点器与图的测试装配。"""
 
     experience_id: int
     adapter: ExperienceAdapter
@@ -290,8 +299,9 @@ async def test_content_change_routes_field_proposal_and_apply(
             replace(context, session=session),
             arguments.model_dump(mode="json"),
         )
-    assert isinstance(proposal, ValidatedToolCall)
-    assert proposal.proposal_payload["current_content"] == "旧背景"
+    assert isinstance(proposal, tuple)
+    proposal_payload, guard_payload = proposal
+    assert proposal_payload["current_content"] == "旧背景"
     shown: list[dict] = []
     original_show_result = handler.show_result
 
@@ -303,8 +313,8 @@ async def test_content_change_routes_field_proposal_and_apply(
     async with isolated_db.session() as session:
         result = await handler.execute(
             replace(context, session=session),
-            proposal.proposal_payload,
-            proposal.guard_payload,
+            proposal_payload,
+            guard_payload,
         )
         await session.commit()
     assert result.payload["outcome"] == "applied"
@@ -467,12 +477,13 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
             replace(context, session=session),
             arguments.model_dump(mode="json"),
         )
-    assert isinstance(proposal, ValidatedToolCall)
+    assert isinstance(proposal, tuple)
+    proposal_payload, guard_payload = proposal
     async with isolated_db.session() as session:
         result = await handler.execute(
             replace(context, session=session),
-            proposal.proposal_payload,
-            proposal.guard_payload,
+            proposal_payload,
+            guard_payload,
         )
         await session.commit()
     assert result.payload["outcome"] == "applied"
@@ -537,12 +548,13 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
             replace(context, session=session),
             arguments.model_dump(mode="json"),
         )
-    assert isinstance(proposal, ValidatedToolCall)
+    assert isinstance(proposal, tuple)
+    proposal_payload, guard_payload = proposal
     async with isolated_db.session() as session:
         result = await handler.execute(
             replace(context, session=session),
-            proposal.proposal_payload,
-            proposal.guard_payload,
+            proposal_payload,
+            guard_payload,
         )
         await session.commit()
     assert result.payload["scope"] == {
@@ -648,6 +660,67 @@ def test_guard_owns_security_routing() -> None:
     assert guard_tool(ToolSecurity.HIGH) == "approval"
 
 
+async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
+    isolated_db,
+) -> None:
+    """处理器风险升高后，旧低风险检查点必须重新进入审批。"""
+    async with isolated_db.session() as session:
+        repositories = RepositoryFactory().create(session)
+        conversation = await repositories.conversations.create(
+            adapter="ExperienceAdapter",
+            subject={"type": "experience", "id": "1"},
+            scope={"field": "background"},
+            language="zh",
+        )
+        run = await repositories.runs.create(
+            conversation_id=conversation.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        row = await repositories.tool_calls.create(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            tool_call_index=0,
+            provider_tool_call_id="security-drift",
+            tool_name="content_change",
+            arguments={},
+        )
+        assert await repositories.tool_calls.save_validation(
+            row,
+            proposal_payload={"suggested_content": "新背景"},
+            guard_payload={"trusted": True},
+        )
+        await session.commit()
+
+    low_service = ToolCallService(
+        isolated_db.session,
+        RepositoryFactory(),
+    ).bind_handlers({"content_change": _LowRiskContentChangeHandler()})
+    checkpoint_call = await low_service.get_call(row.id)
+    checkpoint_call["should_execute"] = True
+    medium_runtime = AiChatRuntime(
+        _UnusedModel(),  # type: ignore[arg-type]
+        ToolCallService(isolated_db.session, RepositoryFactory()),
+    ).bind_tools({"content_change": ContentChangeHandler()})
+    state = ExperienceState(
+        conversation_id=conversation.id,
+        run_id=run.id,
+        subject={"type": "experience", "id": "1"},
+        scope={"field": "background"},
+        run_kind="user_turn",
+        tools_enabled=True,
+        revision_snapshot={},
+        model_messages=[],
+        raw_tool_call=None,
+        tool_call=checkpoint_call,
+    )
+
+    restored = await _durable_call(state, medium_runtime)
+
+    assert restored["security"] == ToolSecurity.MEDIUM.value
+    assert restored["should_execute"] is None
+
+
 async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
     """LOW Tool 经 guard 直达 executor，且仍持久化稳定结果。"""
     async with isolated_db.session() as session:
@@ -692,9 +765,6 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
                 revision_snapshot={"scope": "field", "revision": revision},
                 model_messages=[],
                 tool_call=None,
-                tool_call_id=None,
-                tool_finished=False,
-                proposal_id=None,
                 approval=None,
             ),
             stream_mode=["custom", "updates"],
@@ -758,9 +828,6 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
         revision_snapshot={"scope": "field", "revision": revision},
         model_messages=[],
         tool_call=None,
-        tool_call_id=None,
-        tool_finished=False,
-        proposal_id=None,
         approval=None,
     )
     parts = [
@@ -867,9 +934,6 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
         revision_snapshot={"scope": "field", "revision": 0},
         model_messages=[],
         tool_call=None,
-        tool_call_id=None,
-        tool_finished=False,
-        proposal_id=None,
         approval=None,
     )
     handler = ContentChangeHandler()
@@ -879,8 +943,8 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
     assert "content_change" not in system_prompt("zh", "background")
 
 
-def test_legacy_experience_checkpoint_omits_new_tool_fields() -> None:
-    """部署前 checkpoint 不含新字段时仍是合法 JSON State。"""
+def test_experience_state_has_only_the_unified_tool_fields() -> None:
+    """经历状态只保留统一工具调用和独立审批命令。"""
     state = ExperienceState(
         conversation_id=1,
         run_id=2,
@@ -890,19 +954,20 @@ def test_legacy_experience_checkpoint_omits_new_tool_fields() -> None:
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": 0},
         model_messages=[],
-        tool_call={"index": 0, "name": "content_change", "arguments": {}},
-        proposal_id=7,
+        raw_tool_call=None,
+        tool_call=None,
+        approval=None,
     )
     assert json.loads(json.dumps(state)) == state
     hints = get_type_hints(ExperienceState, include_extras=True)
-    for field in (
+    assert not {
+        "proposal_id",
         "tool_call_id",
         "tool_phase",
         "tool_security",
         "tool_finished",
-        "approval",
-    ):
-        assert get_origin(hints[field]) is NotRequired
+    }.intersection(hints)
+    assert get_origin(hints["approval"]) is NotRequired
 
 
 def test_dsml_compatibility_recovers_atomic_tool_call() -> None:
@@ -922,9 +987,10 @@ def test_dsml_compatibility_recovers_atomic_tool_call() -> None:
 
     assert visible + trailing == "说明结束"
     assert len(calls) == 1
-    assert calls[0].provider_id is None
-    assert calls[0].name == "content_change"
-    assert calls[0].arguments == {
+    raw_call = json.loads(calls[0])
+    assert raw_call["provider_id"] is None
+    assert raw_call["name"] == "content_change"
+    assert json.loads(raw_call["arguments"]) == {
         "scope": {"field": "background", "evidence_id": None},
         "suggested_content": "新背景",
     }
@@ -965,9 +1031,6 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         revision_snapshot={"scope": "field", "revision": revision},
         model_messages=[],
         tool_call=None,
-        tool_call_id=None,
-        tool_finished=False,
-        proposal_id=None,
         approval=None,
     )
 
@@ -1247,7 +1310,7 @@ def test_migration_normalizes_experience_chat_scope_to_field(tmp_path) -> None:
 async def test_real_graph_interrupt_approve_and_deferred_tool_result(
     isolated_db, tmp_path
 ) -> None:
-    """真实 LangGraph/checkpointer 能暂停审批、应用字段并无 Tool 续跑。"""
+    """真实 LangGraph 与检查点器能暂停审批、应用字段并无工具续跑。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
             ExperienceCreate(title="Agent", background="旧背景")
@@ -1292,8 +1355,27 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             )
         ]
         assert any(event.event == "proposal.resolved" for event in continued)
+        resolution = next(
+            event for event in continued if event.event == "proposal.resolved"
+        )
+        assert resolution.data == {
+            "proposal_id": proposal_id,
+            "decision": "approve",
+        }
         assert any(event.event == "content_change.applied" for event in continued)
         assert not any(event.event.startswith("assistant.") for event in continued)
+        graph = runner._compiled(adapter)  # noqa: SLF001
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
+        )
+        checkpoint_call = snapshot.values["tool_call"]
+        assert "decision" not in checkpoint_call
+        assert "client_resolution_id" not in checkpoint_call
+        assert snapshot.values["approval"] == {
+            "tool_call_id": proposal_id,
+            "decision": "approve",
+            "client_resolution_id": "resolution-1",
+        }
         async with isolated_db.session() as session:
             detail = await ExperienceService(session).get(created.experience_id)
         assert detail.background == "新背景"
@@ -1326,6 +1408,10 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         assert [event.event for event in replayed_resolution] == [
             "proposal.resolved"
         ]
+        assert replayed_resolution[0].data == {
+            "proposal_id": proposal_id,
+            "decision": "approve",
+        }
         follow_up = [
             event
             async for event in service.stream_message(
@@ -1391,6 +1477,10 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
             "proposal.resolved",
             "content_change.rejected",
         ]
+        assert resolved[0].data == {
+            "proposal_id": proposal_id,
+            "decision": "reject",
+        }
         async with isolated_db.session() as session:
             detail = await ExperienceService(session).get(created.experience_id)
             row = await RepositoryFactory().create(session).tool_calls.get(proposal_id)
@@ -1450,6 +1540,10 @@ async def test_failed_executor_second_identical_approval_heals(
             "proposal.resolved",
             "content_change.applied",
         ]
+        assert second[0].data == {
+            "proposal_id": proposal_id,
+            "decision": "approve",
+        }
         assert handler.execute_count == 2
         async with isolated_db.session() as session:
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
@@ -1543,116 +1637,11 @@ async def test_repeated_executor_failures_each_yield_one_run_failed(
         await harness.checkpoints.close()
 
 
-async def test_legacy_checkpoint_with_only_proposal_id_resumes(
-    isolated_db,
-    tmp_path,
-) -> None:
-    """D：旧 checkpoint 缺 tool_call_id 时以 proposal_id 恢复。"""
-    handler = _FailingContentChangeHandler(failures=0)
-    harness = await _start_graph_harness(
-        isolated_db,
-        tmp_path / "legacy-proposal-id.db",
-        handler=handler,
-    )
-    try:
-        proposal_id = await _request_proposal(harness, "legacy-proposal-message")
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
-        await graph.aupdate_state(
-            config,
-            {"tool_call_id": None},
-        )
-        snapshot = await graph.aget_state(config)
-        assert snapshot.values["tool_call_id"] is None
-        assert snapshot.values["proposal_id"] == proposal_id
-
-        events = [
-            event
-            async for event in harness.service.resolve_proposal(
-                proposal_id,
-                "approve",
-                "r1",
-            )
-        ]
-        assert [event.event for event in events] == [
-            "proposal.resolved",
-            "content_change.applied",
-        ]
-        assert handler.execute_count == 1
-    finally:
-        await harness.checkpoints.close()
-
-
-async def test_executor_persists_legacy_checkpoint_approval_before_execution(
-    isolated_db,
-    tmp_path,
-) -> None:
-    """E：checkpoint 已批准而 DB awaiting 时，executor 先补录审批。"""
-    handler = _FailingContentChangeHandler(failures=1)
-    harness = await _start_graph_harness(
-        isolated_db,
-        tmp_path / "legacy-approved-checkpoint.db",
-        handler=handler,
-    )
-    try:
-        proposal_id = await _request_proposal(harness, "legacy-approved-message")
-        approval = {
-            "tool_call_id": proposal_id,
-            "decision": "approve",
-            "client_resolution_id": "r1",
-        }
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
-        await graph.aupdate_state(
-            config,
-            {"approval": approval, "tool_phase": "approved"},
-            as_node="approver",
-        )
-        async with isolated_db.session() as session:
-            repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
-            assert row is not None
-            assert row.status == "awaiting_approval"
-            assert await repositories.runs.transition(
-                row.run_id,
-                from_statuses={"suspended"},
-                to_status="failed",
-            )
-            await session.commit()
-
-        events = [
-            event
-            async for event in harness.service.resolve_proposal(
-                proposal_id,
-                "approve",
-                "r1",
-            )
-        ]
-        assert [(event.event, event.data) for event in events] == [
-            ("run.failed", {"code": "proposal_finalize_failed"})
-        ]
-        assert handler.execute_count == 1
-        async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
-        assert row is not None
-        assert (row.status, row.decision, row.client_resolution_id) == (
-            "approved",
-            "approve",
-            "r1",
-        )
-    finally:
-        await harness.checkpoints.close()
-
-
 async def test_recovery_rejects_incomplete_checkpoint_approval(
     isolated_db,
     tmp_path,
 ) -> None:
-    """自动推进前拒绝缺少任一审批身份字段的 checkpoint。"""
+    """自动推进前拒绝缺少任一审批身份字段的检查点。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -1672,73 +1661,19 @@ async def test_recovery_rejects_incomplete_checkpoint_approval(
                     "tool_call_id": proposal_id,
                     "decision": "approve",
                 },
-                "tool_phase": "approved",
             },
-            as_node="approver",
+            as_node="executor",
         )
-        async with isolated_db.session() as session:
-            repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
-            assert row is not None
-            assert await repositories.runs.transition(
-                row.run_id,
-                from_statuses={"suspended"},
-                to_status="failed",
-            )
-            await session.commit()
-
         with pytest.raises(IdempotencyConflictError):
-            _ = [
-                event
-                async for event in harness.service.resolve_proposal(
-                    proposal_id,
-                    "approve",
-                    "r1",
-                )
-            ]
-        assert handler.execute_count == 0
-    finally:
-        await harness.checkpoints.close()
-
-
-async def test_recovery_rejects_crossed_checkpoint_tool_identities(
-    isolated_db,
-    tmp_path,
-) -> None:
-    """tool_call_id 与 legacy proposal_id 交叉时禁止自动推进。"""
-    handler = _FailingContentChangeHandler(failures=0)
-    harness = await _start_graph_harness(
-        isolated_db,
-        tmp_path / "crossed-checkpoint-identities.db",
-        handler=handler,
-    )
-    try:
-        proposal_id = await _request_proposal(harness, "crossed-identity-message")
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
-        await graph.aupdate_state(config, {"tool_call_id": proposal_id + 100})
-        async with isolated_db.session() as session:
-            repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
-            assert row is not None
-            assert await repositories.runs.transition(
-                row.run_id,
-                from_statuses={"suspended"},
-                to_status="failed",
+            await harness.runner.ensure_interrupted(
+                adapter_name=harness.adapter.adapter_name(),
+                conversation_id=harness.conversation_id,
+                approval={
+                    "tool_call_id": proposal_id,
+                    "decision": "approve",
+                    "client_resolution_id": "r1",
+                },
             )
-            await session.commit()
-
-        with pytest.raises(IdempotencyConflictError):
-            _ = [
-                event
-                async for event in harness.service.resolve_proposal(
-                    proposal_id,
-                    "approve",
-                    "r1",
-                )
-            ]
         assert handler.execute_count == 0
     finally:
         await harness.checkpoints.close()
@@ -1748,7 +1683,7 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
     isolated_db,
     tmp_path,
 ) -> None:
-    """checkpoint 的 approve/r1 不能被 incoming reject/r2 自动执行。"""
+    """检查点中的 approve/r1 不能被传入的 reject/r2 自动执行。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -1769,31 +1704,19 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
                     "decision": "approve",
                     "client_resolution_id": "r1",
                 },
-                "tool_phase": "approved",
             },
-            as_node="approver",
+            as_node="executor",
         )
-        async with isolated_db.session() as session:
-            repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
-            assert row is not None
-            assert row.status == "awaiting_approval"
-            assert await repositories.runs.transition(
-                row.run_id,
-                from_statuses={"suspended"},
-                to_status="failed",
-            )
-            await session.commit()
-
         with pytest.raises(IdempotencyConflictError):
-            _ = [
-                event
-                async for event in harness.service.resolve_proposal(
-                    proposal_id,
-                    "reject",
-                    "r2",
-                )
-            ]
+            await harness.runner.ensure_interrupted(
+                adapter_name=harness.adapter.adapter_name(),
+                conversation_id=harness.conversation_id,
+                approval={
+                    "tool_call_id": proposal_id,
+                    "decision": "reject",
+                    "client_resolution_id": "r2",
+                },
+            )
         assert handler.execute_count == 0
         async with isolated_db.session() as session:
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
@@ -1809,7 +1732,7 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
     tmp_path,
     run_status,
 ) -> None:
-    """Tool 已提交而 Run 未完成时，从 durable result 补发业务事件。"""
+    """工具已提交而运行未完成时，从持久化结果补发业务事件。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -1846,6 +1769,10 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
             "proposal.resolved",
             "content_change.applied",
         ]
+        assert undelivered[0].data == {
+            "proposal_id": proposal_id,
+            "decision": "approve",
+        }
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
@@ -1872,6 +1799,10 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
             "proposal.resolved",
             "content_change.applied",
         ]
+        assert replayed[0].data == {
+            "proposal_id": proposal_id,
+            "decision": "approve",
+        }
         assert replayed[1].data == undelivered[1].data
         assert replayed[1].data["tool_call_id"] == proposal_id
         assert replayed[1].data["outcome"] == "applied"
@@ -1890,7 +1821,7 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
     isolated_db,
     tmp_path,
 ) -> None:
-    """suspended checkpoint 身份冲突在 Run 变为 running 前失败。"""
+    """暂停态检查点的身份冲突应在运行转为执行中之前失败。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -1903,7 +1834,17 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
         config = {
             "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
         }
-        await graph.aupdate_state(config, {"tool_call_id": proposal_id + 100})
+        snapshot = await graph.aget_state(config)
+        checkpoint_call = dict(snapshot.values["tool_call"])
+        await graph.aupdate_state(
+            config,
+            {
+                "tool_call": {
+                    **checkpoint_call,
+                    "tool_call_id": proposal_id + 100,
+                }
+            },
+        )
 
         with pytest.raises(IdempotencyConflictError):
             _ = [
@@ -1942,7 +1883,7 @@ async def test_cancelled_resolution_converges_claimed_run(
     isolated_db,
     tmp_path,
 ) -> None:
-    """Graph 已 claim 后取消时，Run 不能永久停在 running。"""
+    """图已认领执行后取消时，运行不能永久停在执行中。"""
     handler = _BlockingContentChangeHandler()
     harness = await _start_graph_harness(
         isolated_db,
@@ -1985,7 +1926,7 @@ async def test_second_cancellation_cannot_interrupt_run_cleanup(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """清理事务被第二次取消时仍须先把 owned Run 收敛。"""
+    """清理事务被第二次取消时，仍须先让本次认领的运行收敛。"""
     handler = _BlockingContentChangeHandler()
     harness = await _start_graph_harness(
         isolated_db,
@@ -2256,7 +2197,7 @@ async def test_cancelled_committed_claim_converges_its_run(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """外层取消不能中断已开始的 claim commit，提交后由 A 自己收敛。"""
+    """外层取消不能中断已开始的认领提交，提交后由 A 自己收敛。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -2322,7 +2263,7 @@ async def test_durable_claim_survives_session_close_failure(
     monkeypatch,
     cancel_outer,
 ) -> None:
-    """commit 已持久化后，session close 失败不能丢失 claim ownership。"""
+    """提交已持久化后，会话关闭失败不能丢失认领所有权。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -2406,7 +2347,7 @@ async def test_postclaim_proposal_state_error_yields_one_run_failed(
     isolated_db,
     tmp_path,
 ) -> None:
-    """Graph 启动后的协议错误收敛为单一 run.failed。"""
+    """图启动后的协议错误收敛为单一失败事件。"""
     handler = _ProposalStateFailingHandler()
     harness = await _start_graph_harness(
         isolated_db,

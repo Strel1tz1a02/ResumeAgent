@@ -21,8 +21,8 @@ from app.ai_chat.models import AiChatMessage
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
-from app.ai_chat.graph.state import AdapterInput, ApprovalInput
-from app.ai_chat.tools.results import PendingToolResult
+from app.ai_chat.graph.state import AdapterInput
+from app.ai_chat.tools.types import ApprovalDecision
 from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class AiChatService:
         runner: GraphRunner,
         repositories: RepositoryFactory,
     ) -> None:
-        """组装无状态协作者；审批互斥由数据库 CAS 保证。"""
+        """组装无状态协作者；审批互斥由数据库原子状态转换保证。"""
         self._registry = registry
         self._runner = runner
         self._repositories = repositories
@@ -117,7 +117,7 @@ class AiChatService:
         user_content: str | None,
         client_message_id: str | None,
     ) -> AsyncIterator[AiChatEvent]:
-        """原子创建run，然后流式生成并结束助手消息。"""
+        """原子创建运行记录，然后流式生成并结束助手消息。"""
         try:
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
@@ -195,7 +195,7 @@ class AiChatService:
                 raise ConversationNotFoundError(str(conversation_id))
             message_rows = await repositories.messages.list_completed(conversation_id)
             pending_rows = await repositories.tool_calls.pending_results(conversation_id)
-            pending: list[PendingToolResult] = [
+            pending: list[JsonObject] = [
                 {
                     "tool_call_id": row.id,
                     "provider_tool_call_id": row.provider_tool_call_id,
@@ -239,8 +239,8 @@ class AiChatService:
                     if isinstance(delta, str):
                         text += delta
                 if event.event == "proposal.requested":
-                    # Tool 提案已经落库，但此时 Graph 可能尚未完成 interrupt。
-                    # 先暂存，等 checkpoint 和 run.suspended 都提交后再发给前端。
+                    # 工具提案已经落库，但此时图可能尚未完成中断。
+                    # 先暂存，等检查点和暂停状态都提交后再发给前端。
                     proposal_event = event
                     continue
                 if event.event == "_graph.interrupted":
@@ -334,7 +334,7 @@ class AiChatService:
         decision: Literal["approve", "reject"],
         client_resolution_id: str,
     ) -> AsyncIterator[AiChatEvent]:
-        """只恢复审批决定；实际执行由 Graph executor 完成。"""
+        """只恢复审批决定；实际执行由图中的执行节点完成。"""
         async with database_module.db.session() as session:
             repositories = self._repositories.create(session)
             call = await repositories.tool_calls.get(proposal_id)
@@ -368,7 +368,7 @@ class AiChatService:
                 raise RunInProgressError(str(run.id))
             recover_interrupt = run.status != "suspended"
 
-        approval: ApprovalInput = {
+        approval: ApprovalDecision = {
             "tool_call_id": proposal_id,
             "decision": decision,
             "client_resolution_id": client_resolution_id,
@@ -407,6 +407,12 @@ class AiChatService:
                     )
                     recovered_events: list[AiChatEvent] = []
                     for event in recovery.events:
+                        if event.event == "proposal.requested":
+                            if event.data.get("proposal_id") != proposal_id:
+                                raise ProposalStateError(
+                                    "Recovered proposal request has a different identity"
+                                )
+                            continue
                         if event.event == "proposal.resolved":
                             if event.data != resolution_event.data:
                                 raise ProposalStateError(
@@ -492,6 +498,12 @@ class AiChatService:
             ):
                 if event.event == "_graph.interrupted":
                     raise ProposalStateError("proposal finalization interrupted again")
+                if event.event == "proposal.requested":
+                    if event.data.get("proposal_id") != proposal_id:
+                        raise ProposalStateError(
+                            "Resumed proposal request has a different identity"
+                        )
+                    continue
                 resumed_events.append(event)
             if not resumed_events:
                 raise ProposalStateError("proposal finalization produced no events")

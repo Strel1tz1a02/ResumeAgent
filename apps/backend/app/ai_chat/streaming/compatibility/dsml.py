@@ -1,4 +1,4 @@
-"""将模型泄漏到正文中的 DSML Tool Call 恢复为通用调用。"""
+"""将模型泄漏到正文中的 DSML 工具调用恢复为通用调用。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.ai_chat.tools.buffer import AssembledToolCall
+from app.ai_chat.tools.buffer import encode_tool_call
 
 _BARS = r"(?:\||｜)*"
 _START_RE = re.compile(rf"<{_BARS}DSML{_BARS}tool_calls>")
@@ -39,7 +39,7 @@ def _attributes(value: str) -> dict[str, str]:
 
 
 def _parameter_value(raw: str, is_string: bool | None) -> Any:
-    """按 DSML 的 string 标记恢复 JSON 值或普通字符串。"""
+    """按 DSML 的字符串标记恢复 JSON 值或普通字符串。"""
     value = html.unescape(raw).strip()
     if is_string is True:
         return value
@@ -51,12 +51,12 @@ def _parameter_value(raw: str, is_string: bool | None) -> Any:
         raise
 
 
-def _parse_calls(value: str) -> tuple[list[AssembledToolCall], str]:
+def _parse_calls(value: str) -> tuple[list[str], str]:
     """解析完整 DSML 块，并返回块外仍应展示的正文。"""
     block = _BLOCK_RE.search(value)
     if block is None:
         return [], value
-    calls: list[AssembledToolCall] = []
+    calls: list[str] = []
     try:
         for index, invoke in enumerate(_INVOKE_RE.finditer(block.group("body"))):
             invoke_attrs = _attributes(invoke.group("attrs"))
@@ -79,11 +79,11 @@ def _parse_calls(value: str) -> tuple[list[AssembledToolCall], str]:
                     parameter.group("value"), is_string
                 )
             calls.append(
-                AssembledToolCall(
+                encode_tool_call(
                     index=index,
                     provider_id=None,
                     name=name,
-                    arguments=arguments,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
                 )
             )
     except (json.JSONDecodeError, ValueError):
@@ -96,7 +96,7 @@ def _parse_calls(value: str) -> tuple[list[AssembledToolCall], str]:
 
 @dataclass
 class DsmlToolCallFallback:
-    """流式隐藏可能的 DSML 前缀，结束时原子恢复 Tool Call。"""
+    """流式隐藏可能的 DSML 前缀，结束时原子恢复工具调用。"""
 
     _buffer: str = field(default="", init=False)
     _capturing: bool = field(default=False, init=False)
@@ -121,7 +121,7 @@ class DsmlToolCallFallback:
         self._buffer = ""
         return visible
 
-    def finish(self) -> tuple[list[AssembledToolCall], str]:
+    def finish(self) -> tuple[list[str], str]:
         """流结束时解析已捕获协议；解析失败则原样作为正文返回。"""
         calls, visible = _parse_calls(self._buffer)
         self._buffer = ""

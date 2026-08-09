@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from app.ai_chat.graph.runtime import AiChatRuntime
@@ -13,7 +14,6 @@ from app.ai_chat.streaming.model import (
     TextDelta,
     ToolCallsCompleted,
 )
-from app.ai_chat.tools.buffer import AssembledToolCall
 from app.experience import ExperienceAdapter
 from app.experience.tools.content_change import (
     ContentChangeArguments,
@@ -107,8 +107,9 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
         isinstance(event, TextDelta) and "DSML" in event.text for event in events
     )
     completed = next(event for event in events if isinstance(event, ToolCallsCompleted))
-    assert completed.calls[0].name == "content_change"
-    assert completed.calls[0].arguments == {
+    raw_call = json.loads(completed.calls[0])
+    assert raw_call["name"] == "content_change"
+    assert json.loads(raw_call["arguments"]) == {
         "scope": {"field": "technologies", "evidence_id": None},
         "suggested_content": ["Python", "FastAPI"],
     }

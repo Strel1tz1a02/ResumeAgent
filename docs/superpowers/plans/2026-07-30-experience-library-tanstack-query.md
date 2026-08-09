@@ -550,8 +550,8 @@ Expected: every command exits 0 and the production route table includes `/experi
 Run in `apps/backend`:
 
 ```powershell
-E:\anaconda\envs\resume-matcher\python.exe -m pytest -q
-E:\anaconda\envs\resume-matcher\python.exe -m compileall -q app tests
+E:\MiniConda\envs\resume-matcher\python.exe -m pytest -q
+E:\MiniConda\envs\resume-matcher\python.exe -m compileall -q app tests
 ```
 
 Expected: the full backend suite passes with only the already-known Windows POSIX skip and third-party LiteLLM warnings.

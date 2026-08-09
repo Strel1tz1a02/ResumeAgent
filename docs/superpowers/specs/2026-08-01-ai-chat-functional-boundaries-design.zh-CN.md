@@ -401,7 +401,7 @@ Graph Runner 不合并通用输入与业务字段，只验证 Adapter 返回值�
 - 通过独立 `description` 字段向模型说明工具用途和调用条件；
 - 参数 Schema；
 - 根据 scope 形态选择字段修改、Evidence 修改或 Evidence 追加 Service；
-- 将 Service 结果转换为 `ValidatedToolCall` 或终态 `ToolResult`；
+- 将 Service 准备结果转换为 `(proposal_payload, guard_payload)` 或终态 `ToolResult`；
 - 通过 `security` 声明风险，并实现 `execute()` 与 `show_result()`。
 
 Evidence 业务只创建一个集合级会话。模型修改已有 EvidenceItem 时在 Tool 参数中提交 `evidence_id` 和完整 `action/result/metrics`，Handler 路由到按 ID 整体覆盖服务；创建时不提交 ID 并追加到末尾。通用聊天层仍不理解这些业务语义。
