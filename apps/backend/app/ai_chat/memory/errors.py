@@ -6,4 +6,4 @@ class MemoryContextFullError(RuntimeError):
 
 
 class MemoryCompactionError(RuntimeError):
-    """Memory Snapshot 无法安全生成、校验或晋升。"""
+    """Memory 无法安全占位、生成、校验或提交。"""

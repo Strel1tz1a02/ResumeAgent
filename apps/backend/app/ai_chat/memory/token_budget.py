@@ -104,3 +104,14 @@ def count_request_tokens(
     if not isinstance(count, int) or count < 0:
         raise TokenEstimationError("token counter returned an invalid value")
     return count
+
+
+def count_text_tokens(spec: MemoryTokenBudget, text: str) -> int:
+    """使用主模型 Tokenizer 计算一个待组装 Prompt 字符串。"""
+    try:
+        count = litellm.token_counter(model=spec.model, text=text)
+    except Exception as exc:
+        raise TokenEstimationError(str(exc)) from exc
+    if not isinstance(count, int) or count < 0:
+        raise TokenEstimationError("token counter returned an invalid value")
+    return count

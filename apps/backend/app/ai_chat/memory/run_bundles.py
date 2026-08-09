@@ -1,4 +1,4 @@
-"""把稳定的 completed Run 组装成不可拆分的历史单元。"""
+"""把终态 Run 组装成不可拆分的历史单元。"""
 
 from __future__ import annotations
 
@@ -12,49 +12,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai_chat.models import AiChatMessage, AiChatRun, AiChatToolCall
 from app.ai_chat.types import JsonObject
 
+_HISTORY_RUN_STATUSES = ("completed", "failed")
+
 
 @dataclass(frozen=True)
 class RunBundle:
-    """一个可整体保留、裁剪或压缩的 completed Run。"""
+    """一个只能整体保留或整体压缩的终态 Run。"""
 
     run_id: int
     kind: str
+    status: str
+    error_code: str | None
     messages: tuple[JsonObject, ...]
-    tool_outcomes: tuple[JsonObject, ...]
-    first_sequence: int
-    last_sequence: int
+    tool_calls: tuple[JsonObject, ...]
 
-    def model_messages(self) -> list[JsonObject]:
-        """生成中央 Renderer 使用的稳定消息序列。"""
-        rendered = [dict(message) for message in self.messages]
-        if self.tool_outcomes:
-            rendered.append(
-                {
-                    "role": "assistant",
-                    "content": "AI_CHAT_TOOL_OUTCOMES\n"
-                    + json.dumps(
-                        list(self.tool_outcomes),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    + "\nEND_AI_CHAT_TOOL_OUTCOMES",
-                }
-            )
-        return rendered
-
-    def stable_hash(self) -> str:
-        """绑定摘要结果与其真实来源内容。"""
-        payload = {
+    def history_record(self) -> JsonObject:
+        """返回可序列化进历史 Prompt 的完整 Run 记录。"""
+        return {
             "run_id": self.run_id,
             "kind": self.kind,
-            "messages": self.messages,
-            "tool_outcomes": self.tool_outcomes,
-            "first_sequence": self.first_sequence,
-            "last_sequence": self.last_sequence,
+            "status": self.status,
+            "error_code": self.error_code,
+            "messages": [dict(message) for message in self.messages],
+            "tool_calls": [dict(tool_call) for tool_call in self.tool_calls],
         }
+
+    def stable_hash(self) -> str:
+        """绑定压缩结果与 Run 的真实持久化内容。"""
         encoded = json.dumps(
-            payload,
+            self.history_record(),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -62,98 +48,85 @@ class RunBundle:
         return hashlib.sha256(encoded).hexdigest()
 
 
-def _compact_tool_outcome(row: AiChatToolCall) -> JsonObject:
-    result = dict(row.tool_result or {})
-    compact_result = {
-        key: result[key]
-        for key in (
-            "outcome",
-            "status",
-            "revision",
-            "collection_revision",
-            "changed_ids",
-        )
-        if key in result
-    }
+def _message_record(row: AiChatMessage) -> JsonObject:
     return {
+        "role": row.role,
+        "content": row.content,
+        "status": row.status,
+    }
+
+
+def _tool_call_record(row: AiChatToolCall) -> JsonObject:
+    return {
+        "tool_call_index": row.tool_call_index,
         "tool_name": row.tool_name,
+        "arguments": dict(row.arguments),
+        "status": row.status,
         "decision": row.decision,
-        "result": compact_result,
+        "result": dict(row.tool_result) if row.tool_result is not None else None,
     }
 
 
 class RunBundleBuilder:
-    """只读取 completed Run，并排除不完整消息残片。"""
+    """读取目标 Run 之前的 completed/failed Run。"""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_completed(self, conversation_id: int) -> list[RunBundle]:
+    async def history_before(
+        self, run_id: int
+    ) -> tuple[AiChatRun, list[RunBundle]]:
+        boundary = await self._session.get(AiChatRun, run_id)
+        if boundary is None:
+            raise LookupError(f"run {run_id} does not exist")
         run_result = await self._session.execute(
             select(AiChatRun)
             .where(
-                AiChatRun.conversation_id == conversation_id,
-                AiChatRun.status == "completed",
+                AiChatRun.conversation_id == boundary.conversation_id,
+                AiChatRun.id < boundary.id,
+                AiChatRun.status.in_(_HISTORY_RUN_STATUSES),
             )
             .order_by(AiChatRun.id)
         )
         runs = list(run_result.scalars().all())
         if not runs:
-            return []
+            return boundary, []
+
         run_ids = [run.id for run in runs]
         message_result = await self._session.execute(
             select(AiChatMessage)
-            .where(
-                AiChatMessage.run_id.in_(run_ids),
-                AiChatMessage.status == "completed",
-            )
+            .where(AiChatMessage.run_id.in_(run_ids))
             .order_by(AiChatMessage.sequence)
         )
         tool_result = await self._session.execute(
             select(AiChatToolCall)
-            .where(
-                AiChatToolCall.run_id.in_(run_ids),
-                AiChatToolCall.status == "resolved",
-            )
+            .where(AiChatToolCall.run_id.in_(run_ids))
             .order_by(AiChatToolCall.run_id, AiChatToolCall.tool_call_index)
         )
-        messages_by_run: dict[int, list[AiChatMessage]] = {run_id: [] for run_id in run_ids}
-        tools_by_run: dict[int, list[AiChatToolCall]] = {run_id: [] for run_id in run_ids}
+        messages_by_run: dict[int, list[AiChatMessage]] = {
+            item: [] for item in run_ids
+        }
+        tools_by_run: dict[int, list[AiChatToolCall]] = {
+            item: [] for item in run_ids
+        }
         for row in message_result.scalars().all():
             if row.run_id is not None:
                 messages_by_run[row.run_id].append(row)
         for row in tool_result.scalars().all():
             tools_by_run[row.run_id].append(row)
 
-        bundles: list[RunBundle] = []
-        for run in runs:
-            rows = messages_by_run[run.id]
-            users = [row for row in rows if row.role == "user"]
-            assistants = [row for row in rows if row.role == "assistant"]
-            tools = tools_by_run[run.id]
-            stable = (
-                run.kind == "opening" and bool(assistants)
-            ) or (
-                run.kind == "user_turn"
-                and bool(users)
-                and (bool(assistants) or bool(tools))
+        return boundary, [
+            RunBundle(
+                run_id=run.id,
+                kind=run.kind,
+                status=run.status,
+                error_code=run.error_code,
+                messages=tuple(
+                    _message_record(row) for row in messages_by_run[run.id]
+                ),
+                tool_calls=tuple(
+                    _tool_call_record(row) for row in tools_by_run[run.id]
+                ),
             )
-            if not stable:
-                continue
-            visible = tuple(
-                {"role": row.role, "content": row.content}
-                for row in rows
-                if row.role in {"user", "assistant"}
-            )
-            sequences = [row.sequence for row in rows]
-            bundles.append(
-                RunBundle(
-                    run_id=run.id,
-                    kind=run.kind,
-                    messages=visible,
-                    tool_outcomes=tuple(_compact_tool_outcome(row) for row in tools),
-                    first_sequence=min(sequences),
-                    last_sequence=max(sequences),
-                )
-            )
-        return bundles
+            for run in runs
+        ]

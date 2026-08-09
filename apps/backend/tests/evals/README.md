@@ -65,6 +65,24 @@ A clean keyless run shows the scorer tests passing and the one judge test
 the Settings UI → `data/config.json`) the same way you would to run the app,
 then re-run with `-m eval`.
 
+## Conversation-memory compaction
+
+The memory eval uses the same two layers:
+
+- `test_memory_scorers.py` always runs and proves the recall, forbidden-leak,
+  and token-ratio scorers detect known failures.
+- `test_memory_compaction_eval.py` is gated by `@pytest.mark.eval`. It feeds a
+  realistic multi-Run conversation through the real `MemorySummarizer` and
+  requires at least 80% intent recall, zero domain/stale/invented fact leaks,
+  removal of a resolved question, and at most 35% retained tokens.
+
+Run only this quality eval from `apps/backend`:
+
+```bash
+uv run pytest tests/evals/test_memory_scorers.py
+uv run pytest tests/evals/test_memory_compaction_eval.py -m eval -s
+```
+
 ---
 
 ## Adding a golden fixture

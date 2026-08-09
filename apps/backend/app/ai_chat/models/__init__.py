@@ -7,11 +7,13 @@ from app.ai_chat.models.models import (
     AiChatToolCall,
     utcnow_iso,
 )
+from app.ai_chat.models.memory import AiChatRunMemory
 
 __all__ = [
     "AiChatConversation",
     "AiChatMessage",
     "AiChatRun",
+    "AiChatRunMemory",
     "AiChatToolCall",
     "utcnow_iso",
 ]
