@@ -36,12 +36,13 @@ def _case(
     runs: list[dict[str, Any]],
     required_claims: list[tuple[str, str]],
     *,
+    version: int = 1,
     stale: list[str] | None = None,
     forbidden: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
-        "version": 1,
+        "version": version,
         "runs": runs,
         "oracle": {
             "required_claims": [
@@ -208,6 +209,11 @@ MEMORY_COMPACTION_CASES: list[dict[str, Any]] = [
         "tool_payload_boundary",
         [
             _run(
+                800,
+                "当前目标是准备一次技术方案风险评审。回答保持中文，只保留后续仍需要的结论。",
+                "收到，我会围绕风险评审整理后续回答。",
+            ),
+            _run(
                 801,
                 "以后最终答案先列风险，再给建议。",
                 "收到。",
@@ -223,7 +229,12 @@ MEMORY_COMPACTION_CASES: list[dict[str, Any]] = [
                 ),
             ),
         ],
-        [("answer_order", "最终答案需要先列风险，再给建议。")],
+        [
+            ("current_goal", "当前目标是准备技术方案风险评审。"),
+            ("response_language", "回答需要保持中文。"),
+            ("answer_order", "最终答案需要先列风险，再给建议。"),
+        ],
+        version=2,
         forbidden=["Tool 中的公司、营收、执行结果和 revision。"],
     ),
     _case(
