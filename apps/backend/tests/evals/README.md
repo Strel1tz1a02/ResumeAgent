@@ -1,113 +1,114 @@
-# Eval harness — "did the prompt change make tailoring _better_?"
+# Eval 测评说明
 
-Deterministic tests answer *"is the plumbing correct?"* They can't answer
-*"did this prompt edit make the tailored resume better or worse?"* — that needs
-**evals**. This directory holds the eval harness for the Resume-Matcher
-backend, in two deliberately separate layers.
+普通测试回答“代码是否按预期执行”，Eval 回答“模型输出的质量是否真的达标”。本目录同时包含简历定制测评和会话记忆压缩测评。
 
-See [`docs/agent/testing-strategy.md`](../../../../docs/agent/testing-strategy.md)
-§3 (Phase 5) for the full rationale.
+## 两类测评
 
----
+### 1. 确定性结构检查
 
-## The two layers
+这类测试不调用 LLM，不需要网络，也没有费用，默认测试会执行。
 
-### 1. Structural scorers — deterministic, free, run everywhere
+简历定制评分器位于 `scorers.py`，检查：
 
-Pure functions in [`scorers.py`](./scorers.py) that check invariants which must
-hold no matter how the LLM worded things. **No LLM, no network, no disk.** They
-form the cheap first line of defence: most "a prompt change broke something"
-regressions are caught here for free.
+- 原有简历章节是否保留；
+- 是否捏造雇主；
+- JD 关键词覆盖率；
+- 输出是否符合 `ResumeData`；
+- 个人身份信息是否被修改。
 
-| Scorer | What it checks |
-|--------|----------------|
-| `sections_preserved(original, tailored) -> bool` | No populated top-level section (work experience, education, …) vanishes during tailoring. |
-| `no_fabricated_employers(original, tailored) -> list[str]` | Company names in the tailored work history that were **not** in the original — i.e. invented employers. Empty list = truthful. |
-| `jd_keywords_present(tailored, keywords) -> float` | Fraction (0–1) of the JD's keywords that actually appear (case-insensitive) in the tailored resume. |
-| `is_valid_resume(data) -> bool` | The result still validates against `ResumeData`. |
-| `personal_info_unchanged(original, tailored) -> bool` | The candidate's identity block (`personalInfo`) is byte-for-byte unchanged. |
+`test_scorers.py` 会分别使用正确和错误样本，证明每个评分器确实能发现问题。
 
-Their tests live in [`test_scorers.py`](./test_scorers.py) and prove **each
-scorer fires on a known-bad input** (drop a section → `False`, invent a company
-→ it's returned, change the name → `False`, …). That's the anti-theater proof
-that the scorers detect real violations rather than always saying "OK".
+### 2. 真实 LLM 测评
 
-### 2. LLM-as-judge — real model, scores quality, run on demand
+真实测评使用开发者当前配置的模型，会产生调用费用并受网络和模型波动影响，因此统一标记为 `@pytest.mark.eval`，默认测试不会执行。没有可用模型配置时会安全跳过。
 
-[`test_tailoring_eval.py`](./test_tailoring_eval.py) sends a golden tailored
-resume + its JD to a **real LLM** and asks it to grade tailoring quality on a
-rubric (relevance / truthfulness / formatting), returning
-`{"score": 1-5, "reasons": "…"}`, then asserts `score >= 3`.
+简历定制测评由 LLM Judge 从相关性、真实性和格式三个维度评分。
 
-- Marked `@pytest.mark.eval` (the `eval` marker is declared in `pyproject.toml`).
-- Uses the **developer's own configured key/provider** via `app.llm`.
-- **Skips cleanly when no key is configured** — the key check (`_needs_key()`)
-  is the first line of the test, so a keyless environment never makes an
-  ungated real call. It is never part of a keyless CI gate.
+## 会话记忆压缩测评
 
----
+记忆测评包含 10 个独立黄金对话案例，覆盖目标切换、偏好更新与撤销、问题关闭、约束累计、失败助手消息和 Tool 数据边界。每个案例执行以下流程：
 
-## How to run
-
-From `apps/backend`:
-
-```bash
-# Structural scorers only — runs everywhere, no key needed, free & fast.
-uv run pytest tests/evals
-
-# Add the LLM-as-judge eval — only meaningful with a configured key.
-# Skips (does not error) when no key is present.
-uv run pytest tests/evals -m eval
+```text
+黄金 Runs
+→ MemorySummarizer 逐 Run 压缩
+→ 得到最终 Memory
+→ Judge LLM 对照原始 Runs 和人工 Oracle 逐条评审
+→ 程序计算 token 压缩率并执行质量门槛
 ```
 
-A clean keyless run shows the scorer tests passing and the one judge test
-**skipped**. To actually exercise the judge, configure a provider/key (env or
-the Settings UI → `data/config.json`) the same way you would to run the app,
-then re-run with `-m eval`.
+这里不使用关键词或同义词匹配。人工 Oracle 只描述应保留、已失效和禁止进入 Memory 的语义；Judge 必须逐条返回：
 
-## Conversation-memory compaction
+- `preserved`：语义完整保留；
+- `partial`：只保留了部分含义；
+- `missing`：应保留但没有表达；
+- `contradicted`：Memory 表达了相反含义；
+- `unsupported_claims`：没有用户依据的声明；
+- `stale_claims`：已经更新或解决但仍然存在的声明；
+- `forbidden_claims`：领域事实、Tool 数据或助手猜测。
 
-The memory eval uses the same two layers:
+Judge 使用专用结构校验，单次输出上限为 4096 tokens。遇到 JSON 截断或错误返回 Memory 本体时最多重新评审 3 次，不复用通用 enrichment 的重试提示。
 
-- `test_memory_scorers.py` always runs and proves the recall, forbidden-leak,
-  and token-ratio scorers detect known failures.
-- `test_memory_compaction_eval.py` is gated by `@pytest.mark.eval`. It feeds a
-  realistic multi-Run conversation through the real `MemorySummarizer` and
-  requires at least 80% intent recall, zero domain/stale/invented fact leaks,
-  removal of a resolved question, and at most 35% retained tokens.
+MemorySummarizer 遇到 JSON 或 Operations Schema 错误时会重新生成 1 次；例如 `delete` 错误携带 `value` 时，不会直接中断整场测评。若重试后仍失败，报告会记录失败 Run、错误、已完成的 Operations 链和部分 Memory。
 
-Run only this quality eval from `apps/backend`:
+当前通过门槛：
 
-```bash
-uv run pytest tests/evals/test_memory_scorers.py
-uv run pytest tests/evals/test_memory_compaction_eval.py -m eval -s
+- 完整保留率不低于 80%；
+- 无依据、过期和禁止内容均为 0；
+- Judge 综合评分不低于 4/5；
+- 最终 Memory token 不超过原始 Runs 的 35%。
+
+Token 压缩率由程序直接计算，因为它是客观数值，不需要 LLM 判断。
+
+## 测评报告
+
+每次真实记忆测评都会在执行质量断言前写入一份 UTF-8 JSON 报告，因此质量不达标时也能保留现场。
+
+报告目录：
+
+```text
+tests/evals/results/memory/
+└── 20260809T213000.000000Z_preference-revision-and-fact-boundary.json
 ```
 
----
+报告包含：
 
-## Adding a golden fixture
+- `model`：首先记录 provider、model 和 reasoning effort；
+- `metrics`：集中记录是否通过、事实保留、Judge 分数、问题数量和全部 token 指标；
+- `checks`：每项质量门槛是否通过；
+- `case`：案例名称、版本和使用的阈值；
+- `data`：原始 Runs、Oracle、最终 Memory、Judge 结论及每次尝试；
+- `metadata`：最后记录报告格式版本和执行时间。
 
-Golden fixtures live in [`golden/cases.py`](./golden/cases.py) as the
-`GOLDEN_CASES` list. Each entry is a plain dict:
+报告格式版本为 v2。JSON 保留上述字段顺序，不再按照键名字母排序，打开文件时可以先看到模型和指标，再查看具体数据。
 
-```python
-{
-    "name": "short_id",
-    "original": { ... },          # master resume (ResumeData-compatible)
-    "job_description": "…",        # the target JD text
-    "jd_keywords": ["…", "…"],     # keywords the tailoring should surface
-    "tailored_good": { ... },      # faithful tailoring — passes every scorer
-    "tailored_bad": { ... },       # broken tailoring — must trip the scorers
-}
+API Key 和 API Base 不会写入报告。`results/` 已加入 `.gitignore`，不会被提交到 Git。
+
+## 运行方式
+
+在 PowerShell 中进入后端目录：
+
+```powershell
+cd E:\projects\Resume-Matcher\apps\backend
+conda activate resume-matcher
 ```
 
-Guidelines:
+只运行无网络测试：
 
-- Keep `original` and `tailored_good` **valid against `ResumeData`** (so
-  `is_valid_resume` stays meaningful) and make sure every `jd_keywords` entry
-  truly appears in `tailored_good` (the structural test asserts a perfect 1.0).
-- Make `tailored_bad` violate at least one invariant on purpose — drop a
-  section, invent an employer, or rewrite the name — so the scorer tests keep
-  proving detection works.
-- Append; don't rewrite existing cases. The parametrized tests in
-  `test_scorers.py` pick up new cases automatically.
+```powershell
+python -m pytest tests/evals -q
+```
+
+运行真实记忆压缩测评：
+
+```powershell
+python -m pytest tests/evals/test_memory_compaction_eval.py -m eval -s -q
+```
+
+`-s` 会在终端打印报告内容和固化后的绝对路径。
+
+## 黄金样本
+
+- 简历定制样本：`golden/cases.py`
+- 记忆压缩样本：`golden/memory_cases.py`
+
+新增样本时应追加新案例，不要改写已有案例。每个案例都需要明确标注应保留、应清除和禁止出现的信息，否则 Judge 的评分没有稳定依据。
