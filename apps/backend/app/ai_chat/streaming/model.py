@@ -5,16 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.ai_chat.tools.buffer import AssembledToolCall, ToolCallBuffer
-from app.ai_chat.model_request import (
-    ModelRequestChangedError,
-    ModelRequestSpec,
-    config_fingerprint,
-    build_model_request_spec,
-)
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.types import JsonObject
-from app.ai_chat.errors import ContextFullError
 from app.llm import _calculate_timeout, get_router
 
 
@@ -40,21 +33,6 @@ def _text(value: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return ""
-
-
-def _is_context_overflow(error: Exception) -> bool:
-    name = type(error).__name__.lower()
-    message = str(error).lower()
-    return "contextwindow" in name or any(
-        marker in message
-        for marker in (
-            "context length",
-            "context window",
-            "maximum context",
-            "too many tokens",
-            "max_input_tokens",
-        )
-    )
 
 
 @dataclass(frozen=True)
@@ -88,48 +66,38 @@ class AiChatModel:
         self,
         *,
         messages: list[JsonObject],
-        request_spec: ModelRequestSpec | None = None,
-        handlers: Mapping[str, ToolHandler] | None = None,
-        tools_enabled: bool | None = None,
-        max_tokens: int | None = None,
+        handlers: Mapping[str, ToolHandler],
+        tools_enabled: bool,
+        max_tokens: int = 4096,
     ) -> AsyncIterator[ModelStreamEvent]:
         """调用已配置模型并规范化其流式响应。"""
-        preflighted = request_spec is not None
-        request_spec = request_spec or build_model_request_spec(
-            handlers or {},
-            tools_enabled=bool(tools_enabled),
-            requested_output=max_tokens,
-        )
         router, config = get_router()
-        if preflighted and config_fingerprint(config) != request_spec.config_fingerprint:
-            raise ModelRequestChangedError("model configuration changed after preflight")
         kwargs: dict[str, Any] = {
             "model": "primary",
             "messages": messages,
             "stream": True,
-            "max_tokens": request_spec.max_tokens,
-            "timeout": _calculate_timeout(
-                "completion", request_spec.max_tokens, config.provider
-            ),
+            "max_tokens": max_tokens,
+            "timeout": _calculate_timeout("completion", max_tokens, config.provider),
         }
-        if request_spec.reasoning_effort:
-            kwargs["reasoning_effort"] = request_spec.reasoning_effort
-        if request_spec.tools:
-            kwargs["tools"] = request_spec.tools
+        if config.reasoning_effort:
+            kwargs["reasoning_effort"] = config.reasoning_effort
+        if tools_enabled and handlers:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": handler.description.strip(),
+                        "parameters": handler.schema(),
+                    },
+                }
+                for name, handler in handlers.items()
+            ]
         buffer = ToolCallBuffer()
-        text_fallback = DsmlToolCallFallback() if request_spec.tools else None
+        text_fallback = DsmlToolCallFallback() if tools_enabled and handlers else None
         finish_reason: str | None = None
-        async def provider_chunks():  # type: ignore[no-untyped-def]
-            try:
-                response = await router.acompletion(**kwargs)
-                async for item in response:
-                    yield item
-            except Exception as exc:
-                if _is_context_overflow(exc):
-                    raise ContextFullError("provider_context_overflow") from exc
-                raise
-
-        async for chunk in provider_chunks():
+        response = await router.acompletion(**kwargs)
+        async for chunk in response:
             choices = _get(chunk, "choices", []) or [] # 候选回答
             if not choices:
                 continue

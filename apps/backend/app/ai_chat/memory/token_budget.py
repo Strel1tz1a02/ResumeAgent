@@ -1,9 +1,7 @@
-"""最终模型请求的不可变规格与真实 Token 计数。"""
+"""Memory 模块内部的最终请求 Token 预算。"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,43 +11,22 @@ from pydantic import BaseModel, ConfigDict
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.types import JsonObject
 from app.config import settings
-from app.llm import LLMConfig, get_llm_config, get_model_name, get_safe_max_tokens
+from app.llm import get_llm_config, get_model_name, get_safe_max_tokens
 
 
 class TokenEstimationError(RuntimeError):
     """最终请求无法被可靠计数。"""
 
 
-class ModelRequestChangedError(RuntimeError):
-    """预检后模型配置发生变化，旧规格不能继续使用。"""
-
-
-class ModelRequestSpec(BaseModel):
-    """预检与真实调用共同消费的非敏感请求规格。"""
+class MemoryTokenBudget(BaseModel):
+    """Memory 选择历史时使用的模型、Tools 与输入上限。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str
-    config_fingerprint: str
     tools: list[dict[str, Any]]
     max_tokens: int
-    reasoning_effort: str | None
     input_budget: int
-
-
-def config_fingerprint(config: LLMConfig) -> str:
-    """散列影响请求语义的配置，不持久化任何密钥。"""
-    key_digest = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
-    payload = {
-        "provider": config.provider,
-        "model": config.model,
-        "api_base": config.api_base,
-        "reasoning_effort": config.reasoning_effort,
-        "api_key_digest": key_digest,
-    }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
 
 
 def _positive_int(value: Any) -> int | None:
@@ -67,14 +44,14 @@ def _model_limits(model: str) -> tuple[int | None, int | None]:
     )
 
 
-def build_model_request_spec(
+def build_memory_token_budget(
     handlers: Mapping[str, ToolHandler],
     *,
     tools_enabled: bool,
     requested_output: int | None = None,
     configured_input_cap: int | None = None,
-) -> ModelRequestSpec:
-    """解析一次模型、Tools、输出上限和最终输入预算。"""
+) -> MemoryTokenBudget:
+    """解析历史选择所需的模型、Tools、输出预留和输入预算。"""
     config = get_llm_config()
     model = get_model_name(config)
     model_input, model_output = _model_limits(model)
@@ -103,18 +80,16 @@ def build_model_request_spec(
             }
             for name, handler in handlers.items()
         ]
-    return ModelRequestSpec(
+    return MemoryTokenBudget(
         model=model,
-        config_fingerprint=config_fingerprint(config),
         tools=tools,
         max_tokens=max_tokens,
-        reasoning_effort=config.reasoning_effort,
         input_budget=input_budget,
     )
 
 
 def count_request_tokens(
-    spec: ModelRequestSpec,
+    spec: MemoryTokenBudget,
     messages: list[JsonObject],
 ) -> int:
     """按最终模型的 Messages + Tools 格式计数。"""

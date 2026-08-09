@@ -237,14 +237,7 @@
       "approve": "Allow overwrite",
       "reject": "Reject",
       "unsavedHint": "AI cannot see unsaved changes",
-      "message": "Type a message",
-      "compacting": "Compressing conversation memory…",
-      "contextUsage": "Context {percent}%",
-      "errors": {
-        "response_failed": "AI cannot respond right now. You can keep editing manually.",
-        "context_full": "Context is full. Shorten the message or start a new chat; saved experience data is safe.",
-        "memory_compaction_failed": "Conversation memory compression failed. Please retry."
-      }
+      "message": "Type a message"
     }
   },
   "builder": {

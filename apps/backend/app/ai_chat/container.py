@@ -47,7 +47,6 @@ async def start_ai_chat() -> None:
     runtime = AiChatRuntime(AiChatModel(), tools)
     runner = GraphRunner(_registry, saver, runtime)
     _service = AiChatService(_registry, runner, _repositories)
-    await _service.recover_stale_preflight()
 
 
 def get_ai_chat_service() -> AiChatService:
@@ -60,8 +59,6 @@ def get_ai_chat_service() -> AiChatService:
 async def close_ai_chat() -> None:
     """关闭检查点资源，但保留适配器注册信息。"""
     global _checkpoints, _service
-    if _service is not None:
-        await _service.close()
     _service = None
     if _checkpoints is not None:
         await _checkpoints.close()
@@ -71,8 +68,6 @@ async def close_ai_chat() -> None:
 async def reset_ai_chat() -> None:
     """清除全部检查点状态并重新启动运行时。"""
     global _checkpoints, _service
-    if _service is not None:
-        await _service.close()
     _service = None
     desired_path = _checkpoint_path()
     if _checkpoints is not None and _checkpoints.path != desired_path:

@@ -9,23 +9,20 @@ from sqlalchemy.exc import IntegrityError
 
 from app import database as database_module
 from app.ai_chat.errors import (
-    ContextFullError,
     ConversationEndedError,
     ConversationNotFoundError,
     IdempotencyConflictError,
-    MemoryCompactionError,
     ProposalStateError,
     RunInProgressError,
     ToolCallNotFoundError,
 )
 from app.ai_chat.graph.runner import GraphRunner
-from app.ai_chat.context import ContextPlanner, PreparedContext
-from app.ai_chat.memory.service import MemoryMaintainer, MemoryService
 from app.ai_chat.models import AiChatMessage
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
-from app.ai_chat.graph.state import AdapterInput, ApprovalInput, BaseState
+from app.ai_chat.graph.state import AdapterInput, ApprovalInput
+from app.ai_chat.tools.results import PendingToolResult
 from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
 
 logger = logging.getLogger(__name__)
@@ -44,20 +41,6 @@ class AiChatService:
         self._registry = registry
         self._runner = runner
         self._repositories = repositories
-        self._memory = MemoryService(repositories)
-        self._planner = ContextPlanner(runner, repositories, self._memory)
-        self._maintainer = MemoryMaintainer(self._memory)
-
-    async def recover_stale_preflight(self) -> int:
-        """应用启动时解除无 Message 的遗留 Run 占用。"""
-        async with database_module.db.session() as session:
-            count = await self._repositories.create(session).runs.recover_stale_preflight()
-            await session.commit()
-            return count
-
-    async def close(self) -> None:
-        """等待或取消本进程持有的后台记忆任务。"""
-        await self._maintainer.close()
 
     async def create_conversation(
         self,
@@ -79,7 +62,6 @@ class AiChatService:
                 scope=binding.scope.model_dump(mode="json"),
                 language=language or "zh",
             )
-            await self._repositories.create(session).memory.get_or_create(row.id)
             await session.commit()
             return row.id
 
@@ -111,8 +93,7 @@ class AiChatService:
         user_content: str | None,
         client_message_id: str | None,
     ) -> AsyncIterator[AiChatEvent]:
-        """先保留 Run，再完成有界上下文预检，最后创建可见消息。"""
-        replay_event: AiChatEvent | None = None
+        """原子创建run，然后流式生成并结束助手消息。"""
         try:
             async with database_module.db.session() as session:
                 repositories = self._repositories.create(session)
@@ -131,132 +112,95 @@ class AiChatService:
                     if existing is not None:
                         if existing.content != user_content:
                             raise IdempotencyConflictError(client_message_id)
-                        replay_event = AiChatEvent(
-                            "message.replayed", {"message_id": existing.id}
-                        )
-                    if replay_event is not None:
-                        await session.rollback()
-                    else:
-                        if await runs_repository.current(conversation_id) is not None:
-                            raise RunInProgressError(str(conversation_id))
-                        run_row = await runs_repository.create(
-                            conversation_id=conversation_id,
-                            kind=kind,
-                            tools_enabled=True,
-                        )
-                        await session.commit()
-                        run_id = run_row.id
-                        adapter_name = conversation.adapter
-        except IntegrityError as exc:
-            raise RunInProgressError(str(conversation_id)) from exc
-        if replay_event is not None:
-            yield replay_event
-            return
-
-        assistant_id: int | None = None
-        prepared: PreparedContext | None = None
-        try:
-            async for item in self._planner.prepare(
-                conversation_id=conversation_id,
-                run_id=run_id,
-                kind=kind,
-                user_content=user_content,
-                tools_enabled=True,
-            ):
-                if isinstance(item, AiChatEvent):
-                    yield item
-                else:
-                    prepared = item
-            if prepared is None:
-                raise RuntimeError("context planner produced no prepared context")
-            async with database_module.db.session() as session:
-                repositories = self._repositories.create(session)
-                run = await repositories.runs.get(run_id)
-                if run is None or run.status != "running":
+                        yield AiChatEvent( "message.replayed", {"message_id": existing.id})
+                        return
+                    
+                if await runs_repository.current(conversation_id) is not None:
                     raise RunInProgressError(str(conversation_id))
+                run_row = await runs_repository.create(
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    tools_enabled=True,
+                )
+
                 if user_content is not None:
-                    await repositories.messages.create(
+                    await message_repository.create(
                         conversation_id=conversation_id,
-                        run_id=run_id,
+                        run_id=run_row.id,
                         role="user",
                         content=user_content,
                         status="completed",
                         client_message_id=client_message_id,
                     )
-                assistant = await repositories.messages.create(
+
+                assistant_row = await message_repository.create(
                     conversation_id=conversation_id,
-                    run_id=run_id,
+                    run_id=run_row.id,
                     role="assistant",
                     content="",
                     status="generating",
                 )
-                assistant_id = assistant.id
                 await session.commit()
-            yield AiChatEvent(
-                "context.usage",
-                {
-                    "used_tokens": prepared.used_tokens,
-                    "budget_tokens": prepared.budget_tokens,
-                    "percent": min(
-                        100,
-                        round(prepared.used_tokens * 100 / prepared.budget_tokens),
-                    ),
-                },
-            )
-            yield AiChatEvent("assistant.started", {"message_id": assistant_id})
-            async for event in self._execute(
-                adapter_name=adapter_name,
-                value=prepared.value,
-                prepared_state=prepared.state,
-                assistant_id=assistant_id,
-            ):
-                yield event
-        except ContextFullError as exc:
-            await self._finish_preflight_run(run_id, "failed", exc.code)
-            if exc.used_tokens is not None and exc.budget_tokens is not None:
-                yield AiChatEvent(
-                    "context.usage",
-                    {
-                        "used_tokens": exc.used_tokens,
-                        "budget_tokens": exc.budget_tokens,
-                        "percent": min(
-                            100,
-                            round(exc.used_tokens * 100 / exc.budget_tokens),
-                        ),
-                    },
+                value = await self._build_input(
+                    conversation_id,
+                    run_row.id,
+                    kind,
+                    True,
                 )
-            yield AiChatEvent(
-                "run.failed", {"code": exc.code, "reason": exc.reason}
-            )
-        except MemoryCompactionError:
-            logger.exception("AI Chat memory compaction failed")
-            await self._finish_preflight_run(
-                run_id, "failed", "memory_compaction_failed"
-            )
-            yield AiChatEvent(
-                "run.failed", {"code": "memory_compaction_failed"}
-            )
-        except asyncio.CancelledError:
-            await self._finish_preflight_run(run_id, "cancelled", None)
-            raise
-        except Exception as exc:
-            logger.exception(
-                "AI Chat context preparation failed: conversation=%s run=%s",
-                conversation_id,
-                run_id,
-            )
-            code = getattr(exc, "code", "context_preparation_failed")
-            await self._finish_preflight_run(run_id, "failed", code)
-            yield AiChatEvent("run.failed", {"code": code})
-        finally:
-            await self._cancel_unfinished_admission(run_id, assistant_id)
+                adapter_name = conversation.adapter
+                assistant_id = assistant_row.id
+        except IntegrityError as exc:
+            raise RunInProgressError(str(conversation_id)) from exc
+
+        yield AiChatEvent("assistant.started", {"message_id": assistant_id})
+        async for event in self._execute(adapter_name=adapter_name, value=value,assistant_id=assistant_id,):
+            yield event
+
+    async def _build_input(
+        self,
+        conversation_id: int,
+        run_id: int,
+        kind: str,
+        tools_enabled: bool,
+    ) -> AdapterInput:
+        """为一次调用加载可序列化历史和待补传工具结果。"""
+        async with database_module.db.session() as session:
+            repositories = self._repositories.create(session)
+            conversation = await repositories.conversations.get(conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError(str(conversation_id))
+            message_rows = await repositories.messages.list_completed(conversation_id)
+            pending_rows = await repositories.tool_calls.pending_results(conversation_id)
+            pending: list[PendingToolResult] = [
+                {
+                    "tool_call_id": row.id,
+                    "provider_tool_call_id": row.provider_tool_call_id,
+                    "tool_name": row.tool_name,
+                    "arguments": row.arguments,
+                    "result": dict(row.tool_result or {}),
+                }
+                for row in pending_rows
+            ]
+            value: AdapterInput = {
+                "conversation_id": conversation.id,
+                "run_id": run_id,
+                "subject": conversation.subject,
+                "scope": conversation.scope,
+                "language": conversation.language,
+                "run_kind": kind,
+                "tools_enabled": tools_enabled,
+                "messages": [
+                    {"role": row.role, "content": row.content} for row in message_rows
+                ],
+                "pending_tool_results": pending,
+            }
+            return value
 
     async def _execute(
         self,
         *,
         adapter_name: str,
         value: AdapterInput,
-        prepared_state: BaseState,
         assistant_id: int,
         silent_failure: bool = False,
     ) -> AsyncIterator[AiChatEvent]:
@@ -265,11 +209,7 @@ class AiChatService:
         suspended = False
         proposal_event: AiChatEvent | None = None
         try:
-            async for event in self._runner.stream(
-                adapter_name=adapter_name,
-                value=value,
-                prepared_state=prepared_state,
-            ):
+            async for event in self._runner.stream(adapter_name=adapter_name, value=value):
                 if event.event == "assistant.delta":
                     delta = event.data.get("text")
                     if isinstance(delta, str):
@@ -319,7 +259,6 @@ class AiChatService:
                     )
                 yield proposal_event
             else:
-                self._maintainer.schedule(value["conversation_id"])
                 yield AiChatEvent("assistant.completed", {"message_id": assistant_id, "content": text},)
         except asyncio.CancelledError:
             await self._finish_interrupted_run(
@@ -338,36 +277,6 @@ class AiChatService:
             )
             if not silent_failure:
                 yield AiChatEvent("run.failed", {"code": code})
-
-    async def _finish_preflight_run(
-        self,
-        run_id: int,
-        status: Literal["failed", "cancelled"],
-        code: str | None,
-    ) -> None:
-        async with database_module.db.session() as session:
-            await self._repositories.create(session).runs.transition(
-                run_id,
-                from_statuses={"running"},
-                to_status=status,
-                error_code=code,
-            )
-            await session.commit()
-
-    async def _cancel_unfinished_admission(
-        self, run_id: int, assistant_id: int | None
-    ) -> None:
-        """覆盖任意 yield 后调用方关闭生成器的收敛路径。"""
-        async with database_module.db.session() as session:
-            repositories = self._repositories.create(session)
-            transitioned = await repositories.runs.transition(
-                run_id,
-                from_statuses={"running"},
-                to_status="cancelled",
-            )
-            if transitioned and assistant_id is not None:
-                await repositories.messages.cancel_generating(run_id)
-            await session.commit()
 
     async def _finish_interrupted_run(
         self,
@@ -500,7 +409,6 @@ class AiChatService:
                         if current_run is None or current_run.status != "completed":
                             raise ProposalStateError(str(proposal_id))
                     await session.commit()
-                self._maintainer.schedule(conversation_id)
                 for event in (
                     resolution_event,
                     *recovered_events,
@@ -556,7 +464,6 @@ class AiChatService:
                 if not transitioned:
                     raise ProposalStateError(str(proposal_id))
                 await session.commit()
-            self._maintainer.schedule(conversation_id)
             for event in resumed_events:
                 yield event
         except asyncio.CancelledError:

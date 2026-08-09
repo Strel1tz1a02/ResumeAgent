@@ -225,7 +225,8 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
     await waitFor(() =>
       expect(chatApi.createExperienceConversation).toHaveBeenCalledWith(1, {
-        field: 'background',
+        key: 'background',
+        ref_id: null,
       })
     );
   });
@@ -280,7 +281,8 @@ describe('ExperienceLibraryPage', () => {
 
     await waitFor(() =>
       expect(chatApi.createExperienceConversation).toHaveBeenCalledWith(1, {
-        field: 'evidence',
+        key: 'evidence',
+        ref_id: null,
       })
     );
   });

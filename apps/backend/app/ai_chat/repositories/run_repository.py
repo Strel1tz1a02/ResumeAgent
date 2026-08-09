@@ -2,10 +2,10 @@
 
 from collections.abc import Collection
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.models import AiChatMessage, AiChatRun, utcnow_iso
+from app.ai_chat.models import AiChatRun, utcnow_iso
 
 
 class RunRepository:
@@ -69,20 +69,3 @@ class RunRepository:
         )
         await self._session.flush()
         return result.rowcount == 1
-
-    async def recover_stale_preflight(self) -> int:
-        """释放进程崩溃后没有创建任何 Message 的 running reservation。"""
-        has_message = exists(
-            select(AiChatMessage.id).where(AiChatMessage.run_id == AiChatRun.id)
-        )
-        result = await self._session.execute(
-            update(AiChatRun)
-            .where(AiChatRun.status == "running", ~has_message)
-            .values(
-                status="failed",
-                error_code="stale_preflight_recovered",
-                finished_at=utcnow_iso(),
-            )
-        )
-        await self._session.flush()
-        return int(result.rowcount or 0)

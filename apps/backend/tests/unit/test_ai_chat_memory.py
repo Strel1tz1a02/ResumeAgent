@@ -1,24 +1,25 @@
-"""有界上下文与 Conversation Memory 的确定性测试。"""
+"""Conversation Memory 单一 Messages 边界的确定性测试。"""
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from sqlalchemy import func, select
 
 from app.ai_chat.adapters import AdapterRegistry
-from app.ai_chat.errors import ContextFullError, MemoryCompactionError
+from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
 from app.ai_chat.memory.operations import MemoryDocument, MemoryOperation, apply_operations
+from app.ai_chat.memory.repository import MemoryRepository
 from app.ai_chat.memory.run_bundles import RunBundleBuilder
-from app.ai_chat.memory.service import MemoryService
-from app.ai_chat.context import ContextPlanner, PreparedContext
-from app.ai_chat.model_request import ModelRequestSpec, count_request_tokens
+from app.ai_chat.memory.service import MemoryContextService, _SnapshotService
+from app.ai_chat.memory.token_budget import MemoryTokenBudget, count_request_tokens
+from app.ai_chat.models import (
+    AiChatConversationMemory,
+    AiChatConversationMemorySnapshot,
+)
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services import AiChatService
-from app.experience import ExperienceAdapter
-from app.experience.schemas.experiences import ExperienceCreate
-from app.experience.services.experience_service import ExperienceService
 from app.config import settings
-from app.ai_chat.streaming.events import AiChatEvent
-from app.experience.routers.ai_chat import _business_event
 
 
 def test_operations_enforce_core_and_other_boundaries() -> None:
@@ -35,9 +36,7 @@ def test_operations_enforce_core_and_other_boundaries() -> None:
                 path="core.current_goal",
                 value="完善项目经历",
             ),
-            MemoryOperation(
-                op="delete", path="other.example_to_follow"
-            ),
+            MemoryOperation(op="delete", path="other.example_to_follow"),
             MemoryOperation(
                 op="add", path="other.preferred_wording", value="保留口语感"
             ),
@@ -61,30 +60,30 @@ def test_operations_enforce_core_and_other_boundaries() -> None:
         )
 
 
-def test_token_counter_receives_final_messages_and_tools(
+def test_token_counter_receives_rendered_messages_and_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
+    captured: dict[str, Any] = {}
 
     def fake_counter(**kwargs):  # type: ignore[no-untyped-def]
         captured.update(kwargs)
         return 37
 
-    monkeypatch.setattr("app.ai_chat.model_request.litellm.token_counter", fake_counter)
+    monkeypatch.setattr(
+        "app.ai_chat.memory.token_budget.litellm.token_counter", fake_counter
+    )
     tool = {
         "type": "function",
         "function": {"name": "change", "description": "change", "parameters": {}},
     }
-    spec = ModelRequestSpec(
+    budget = MemoryTokenBudget(
         model="provider/model",
-        config_fingerprint="fingerprint",
         tools=[tool],
         max_tokens=100,
-        reasoning_effort=None,
         input_budget=1000,
     )
     messages = [{"role": "system", "content": "prompt"}]
-    assert count_request_tokens(spec, messages) == 37
+    assert count_request_tokens(budget, messages) == 37
     assert captured == {
         "model": "provider/model",
         "messages": messages,
@@ -92,30 +91,19 @@ def test_token_counter_receives_final_messages_and_tools(
     }
 
 
-def test_router_preserves_context_and_compaction_failure_codes() -> None:
-    context = _business_event(
-        AiChatEvent(
-            "run.failed",
-            {"code": "context_full", "reason": "current_user_too_large"},
+async def _conversation(isolated_db, adapter: str = "TestAdapter") -> int:
+    async with isolated_db.session() as session:
+        row = await RepositoryFactory().create(session).conversations.create(
+            adapter=adapter,
+            subject={"type": "experience", "id": "1"},
+            scope={"field": "background"},
+            language="zh",
         )
-    )
-    compaction = _business_event(
-        AiChatEvent("run.failed", {"code": "memory_compaction_failed"})
-    )
-    assert context == AiChatEvent(
-        "chat.error",
-        {"code": "context_full", "reason": "current_user_too_large"},
-    )
-    assert compaction == AiChatEvent(
-        "chat.error", {"code": "memory_compaction_failed"}
-    )
+        await session.commit()
+        return row.id
 
 
-async def _completed_run(
-    isolated_db,
-    conversation_id: int,
-    text: str,
-) -> int:
+async def _completed_run(isolated_db, conversation_id: int, text: str) -> int:
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         run = await repositories.runs.create(
@@ -144,9 +132,71 @@ async def _completed_run(
         return run.id
 
 
+async def _running_user(isolated_db, conversation_id: int, text: str) -> int:
+    async with isolated_db.session() as session:
+        repositories = RepositoryFactory().create(session)
+        run = await repositories.runs.create(
+            conversation_id=conversation_id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        await repositories.messages.create(
+            conversation_id=conversation_id,
+            run_id=run.id,
+            role="user",
+            content=text,
+            status="completed",
+        )
+        await repositories.messages.create(
+            conversation_id=conversation_id,
+            run_id=run.id,
+            role="assistant",
+            content="partial output must stay invisible",
+            status="generating",
+        )
+        await session.commit()
+        return run.id
+
+
+async def test_run_bundle_builder_excludes_non_completed_runs(isolated_db) -> None:
+    conversation_id = await _conversation(isolated_db)
+    async with isolated_db.session() as session:
+        repositories = RepositoryFactory().create(session)
+        for status in ("failed", "cancelled", "suspended"):
+            run = await repositories.runs.create(
+                conversation_id=conversation_id,
+                kind="user_turn",
+                tools_enabled=True,
+            )
+            await repositories.messages.create(
+                conversation_id=conversation_id,
+                run_id=run.id,
+                role="user",
+                content=f"{status} user",
+                status="completed",
+            )
+            await repositories.messages.create(
+                conversation_id=conversation_id,
+                run_id=run.id,
+                role="assistant",
+                content=f"{status} assistant",
+                status="completed",
+            )
+            await repositories.runs.transition(
+                run.id, from_statuses={"running"}, to_status=status
+            )
+        await session.commit()
+    async with isolated_db.session() as session:
+        assert await RunBundleBuilder(session).list_completed(conversation_id) == []
+
+
 class _GoalSummarizer:
     async def summarize(self, parent, bundle):  # type: ignore[no-untyped-def]
-        user = next(message["content"] for message in bundle.messages if message["role"] == "user")
+        user = next(
+            message["content"]
+            for message in bundle.messages
+            if message["role"] == "user"
+        )
         return [
             MemoryOperation(
                 op="update",
@@ -161,230 +211,205 @@ class _GoalSummarizer:
         ]
 
 
-async def test_staged_chain_is_invisible_until_hash_checked_promotion(
+class _TestAdapter:
+    @classmethod
+    def adapter_name(cls) -> str:
+        return "TestAdapter"
+
+    async def parse_input(self, value):  # type: ignore[no-untyped-def]
+        return {
+            "model_messages": [
+                {"role": "system", "content": "fixed domain context"},
+                *value["messages"],
+            ]
+        }
+
+    def get_tool_handlers(self):  # type: ignore[no-untyped-def]
+        return {}
+
+
+async def test_snapshot_stage_is_invisible_and_source_hash_is_rechecked(
     isolated_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repositories = RepositoryFactory()
+    conversation_id = await _conversation(isolated_db)
+    first_id = await _completed_run(isolated_db, conversation_id, "目标一")
+    second_id = await _completed_run(isolated_db, conversation_id, "目标二")
     async with isolated_db.session() as session:
-        conversation = await repositories.create(session).conversations.create(
-            adapter="test",
-            subject={"type": "experience", "id": "1"},
-            scope={"field": "background"},
-            language="zh",
-        )
-        await session.commit()
-    first_id = await _completed_run(isolated_db, conversation.id, "目标一")
-    second_id = await _completed_run(isolated_db, conversation.id, "目标二")
-    async with isolated_db.session() as session:
-        bundles = await RunBundleBuilder(session).list_completed(conversation.id)
+        bundles = await RunBundleBuilder(session).list_completed(conversation_id)
 
     monkeypatch.setattr(
-        "app.ai_chat.memory.service.memory_token_count", lambda _document: 20
+        "app.ai_chat.memory.service.validate_memory_budget", lambda _document: 20
     )
-    memory = MemoryService(repositories, _GoalSummarizer())  # type: ignore[arg-type]
-    await memory.ensure_chain(
-        conversation_id=conversation.id,
+    snapshots = _SnapshotService(_GoalSummarizer())  # type: ignore[arg-type]
+    await snapshots.ensure_chain(
+        conversation_id=conversation_id,
         bundles=bundles,
         target_run_id=second_id,
     )
     async with isolated_db.session() as session:
-        repository = repositories.create(session).memory
-        pointer, active = await repository.get_or_create(conversation.id)
+        repository = MemoryRepository(session)
+        pointer, active = await repository.get_or_create(conversation_id)
         chain = await repository.chain_from(active.id)
         assert active.source_run_id is None
         assert [item.source_run_id for item in chain] == [first_id, second_id]
         assert pointer.active_snapshot_id == active.id
 
-    promoted = await memory.promote(
-        conversation_id=conversation.id,
+    promoted = await snapshots.promote(
+        conversation_id=conversation_id,
         target_run_id=first_id,
         bundles=bundles,
     )
     assert promoted.source_run_id == first_id
-    assert promoted.parent_snapshot_id is None
     async with isolated_db.session() as session:
-        repository = repositories.create(session).memory
-        pointer, active = await repository.get_or_create(conversation.id)
-        chain = await repository.chain_from(active.id)
-        assert pointer.active_snapshot_id == promoted.id
-        assert [item.source_run_id for item in chain] == [second_id]
-
-    async with isolated_db.session() as session:
-        rows = await repositories.create(session).messages.list_completed(conversation.id)
-        target = next(row for row in rows if row.run_id == second_id and row.role == "user")
-        target.content = "已变化"
+        rows = await RepositoryFactory().create(session).messages.list_completed(
+            conversation_id
+        )
+        target = next(
+            row for row in rows if row.run_id == second_id and row.role == "user"
+        )
+        target.content = "来源已变化"
         await session.commit()
     async with isolated_db.session() as session:
-        changed = await RunBundleBuilder(session).list_completed(conversation.id)
+        changed = await RunBundleBuilder(session).list_completed(conversation_id)
     with pytest.raises(MemoryCompactionError, match="source changed"):
-        await memory.promote(
-            conversation_id=conversation.id,
+        await snapshots.promote(
+            conversation_id=conversation_id,
             target_run_id=second_id,
             bundles=changed,
         )
 
 
-class _AlwaysFullPlanner:
-    async def prepare(self, **_kwargs):  # type: ignore[no-untyped-def]
-        raise ContextFullError(
-            "current_user_too_large", used_tokens=101, budget_tokens=100
-        )
-        yield  # pragma: no cover
-
-
-class _UnusedRunner:
-    pass
-
-
-async def test_preflight_failure_writes_no_messages_and_keeps_client_id_reusable(
+async def test_conversation_delete_cascades_memory_pointer_and_snapshots(
     isolated_db,
 ) -> None:
-    created = None
+    conversation_id = await _conversation(isolated_db)
+    await _SnapshotService().active(conversation_id)
     async with isolated_db.session() as session:
-        created = await ExperienceService(session).create(
-            ExperienceCreate(title="上下文测试", background="背景")
-        )
-    registry = AdapterRegistry()
-    registry.register(ExperienceAdapter())
-    repositories = RepositoryFactory()
-    service = AiChatService(registry, _UnusedRunner(), repositories)  # type: ignore[arg-type]
-    service._planner = _AlwaysFullPlanner()  # noqa: SLF001
-    conversation_id = await service.create_conversation(
-        "ExperienceAdapter",
-        {"type": "experience", "id": str(created.experience_id)},
-        {"field": "background"},
-    )
-
-    for _ in range(2):
-        events = [
-            event
-            async for event in service.stream_message(
-                conversation_id, "很长的输入", "same-client-id"
-            )
-        ]
-        assert [event.event for event in events] == ["context.usage", "run.failed"]
-        assert events[-1].data == {
-            "code": "context_full",
-            "reason": "current_user_too_large",
-        }
-
-    async with isolated_db.session() as session:
-        messages = await repositories.create(session).messages.list_completed(
-            conversation_id
-        )
-        assert messages == []
-
-
-async def test_startup_recovers_only_message_less_running_reservations(
-    isolated_db,
-) -> None:
-    repositories = RepositoryFactory()
-    async with isolated_db.session() as session:
-        bound = repositories.create(session)
-        conversation = await bound.conversations.create(
-            adapter="test",
-            subject={"type": "experience", "id": "1"},
-            scope={"field": "background"},
-            language="zh",
-        )
-        stale = await bound.runs.create(
-            conversation_id=conversation.id,
-            kind="user_turn",
-            tools_enabled=True,
-        )
+        await RepositoryFactory().create(session).conversations.delete(conversation_id)
         await session.commit()
     async with isolated_db.session() as session:
-        count = await repositories.create(session).runs.recover_stale_preflight()
-        await session.commit()
-    assert count == 1
-    async with isolated_db.session() as session:
-        recovered = await repositories.create(session).runs.get(stale.id)
-        assert recovered is not None
-        assert recovered.status == "failed"
-        assert recovered.error_code == "stale_preflight_recovered"
-
-
-class _PlannerRunner:
-    def prepare_request(self, **_kwargs):  # type: ignore[no-untyped-def]
-        return ModelRequestSpec(
-            model="gpt-4o-mini",
-            config_fingerprint="test",
-            tools=[],
-            max_tokens=64,
-            reasoning_effort=None,
-            input_budget=250,
+        pointers = await session.scalar(
+            select(func.count()).select_from(AiChatConversationMemory)
         )
-
-    async def prepare_state(self, *, value, **_kwargs):  # type: ignore[no-untyped-def]
-        return {
-            "conversation_id": value["conversation_id"],
-            "run_id": value["run_id"],
-            "subject": value["subject"],
-            "scope": value["scope"],
-            "run_kind": value["run_kind"],
-            "tools_enabled": value["tools_enabled"],
-            "model_request": value["model_request"],
-            "model_messages": [
-                {"role": "system", "content": "fixed domain context"},
-                *value["messages"],
-            ],
-        }
+        snapshots = await session.scalar(
+            select(func.count()).select_from(AiChatConversationMemorySnapshot)
+        )
+    assert pointers == 0
+    assert snapshots == 0
 
 
-async def test_context_planner_compacts_complete_prefix_and_never_injects_stage(
+async def test_public_service_returns_only_active_recent_and_current_messages(
     isolated_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repositories = RepositoryFactory()
-    async with isolated_db.session() as session:
-        conversation = await repositories.create(session).conversations.create(
-            adapter="test",
-            subject={"type": "experience", "id": "1"},
-            scope={"field": "background"},
-            language="zh",
-        )
-        await session.commit()
-    for index in range(6):
-        await _completed_run(
-            isolated_db,
-            conversation.id,
-            f"目标 {index} " + ("内容" * 12),
-        )
+    conversation_id = await _conversation(isolated_db)
+    completed_ids = [
+        await _completed_run(isolated_db, conversation_id, f"目标 {index}")
+        for index in range(8)
+    ]
+    current_id = await _running_user(isolated_db, conversation_id, "本轮问题")
+
+    def fixed_counter(**kwargs):  # type: ignore[no-untyped-def]
+        return len(kwargs.get("messages") or []) * 20
+
+    monkeypatch.setattr(
+        "app.ai_chat.memory.token_budget.litellm.token_counter", fixed_counter
+    )
+    monkeypatch.setattr(settings, "ai_chat_input_cap", 140)
+    monkeypatch.setattr(settings, "ai_chat_safety_margin", 0)
     monkeypatch.setattr(settings, "ai_chat_memory_token_cap", 20)
     monkeypatch.setattr(
-        "app.ai_chat.memory.service.memory_token_count", lambda _document: 10
+        "app.ai_chat.memory.service.validate_memory_budget", lambda _document: 10
     )
-    memory = MemoryService(repositories, _GoalSummarizer())  # type: ignore[arg-type]
-    planner = ContextPlanner(_PlannerRunner(), repositories, memory)  # type: ignore[arg-type]
+    registry = AdapterRegistry()
+    registry.register(_TestAdapter())  # type: ignore[arg-type]
+    service = MemoryContextService(
+        registry, RepositoryFactory(), _GoalSummarizer()  # type: ignore[arg-type]
+    )
 
-    items = [
-        item
-        async for item in planner.prepare(
-            conversation_id=conversation.id,
-            run_id=999,
-            kind="user_turn",
-            user_content="继续",
+    messages = await service.get_context_messages(
+        conversation_id=conversation_id,
+        run_id=current_id,
+        run_kind="user_turn",
+        tools_enabled=True,
+    )
+
+    assert isinstance(messages, list)
+    assert messages[-1] == {"role": "user", "content": "本轮问题"}
+    assert all("partial output" not in str(message) for message in messages)
+    assert messages[0]["content"].startswith(
+        "CONVERSATION_MEMORY_DERIVED_NON_AUTHORITATIVE"
+    )
+    async with isolated_db.session() as session:
+        repository = MemoryRepository(session)
+        _, active = await repository.get_or_create(conversation_id)
+        chain = await repository.chain_from(active.id)
+        assert active.source_run_id == completed_ids[-3]
+        assert [item.source_run_id for item in chain] == completed_ids[-2:]
+        staged_markers = [item.other["summary_marker"] for item in chain]
+    assert active.other["summary_marker"] in str(messages)
+    assert all(marker not in str(messages) for marker in staged_markers)
+
+
+async def test_memory_failure_is_exposed_to_future_caller(
+    isolated_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conversation_id = await _conversation(isolated_db)
+    current_id = await _running_user(isolated_db, conversation_id, "仍需回答")
+    registry = AdapterRegistry()
+    registry.register(_TestAdapter())  # type: ignore[arg-type]
+    service = MemoryContextService(registry, RepositoryFactory())
+
+    async def fail_select(**_kwargs):  # type: ignore[no-untyped-def]
+        raise MemoryCompactionError("broken memory")
+
+    monkeypatch.setattr(service, "_select_messages", fail_select)
+    with pytest.raises(MemoryCompactionError, match="broken memory"):
+        await service.get_context_messages(
+            conversation_id=conversation_id,
+            run_id=current_id,
+            run_kind="user_turn",
             tools_enabled=True,
         )
-    ]
-    prepared = next(item for item in items if isinstance(item, PreparedContext))
-    event_names = [item.event for item in items if hasattr(item, "event")]
-    assert event_names[0] == "memory.compaction.started"
-    assert event_names[-1] == "memory.compaction.completed"
-    assert prepared.used_tokens <= prepared.budget_tokens
-    assert 0 < len(prepared.recent_run_ids) < 6
 
-    async with isolated_db.session() as session:
-        repository = repositories.create(session).memory
-        pointer, active = await repository.get_or_create(conversation.id)
-        chain = await repository.chain_from(active.id)
-        assert pointer.active_snapshot_id == active.id
-        available_after_active = sum(
-            bundle.last_sequence > active.covered_through_sequence
-            for bundle in await RunBundleBuilder(session).list_completed(conversation.id)
+
+async def test_fixed_context_overflow_is_exposed_to_future_caller(
+    isolated_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conversation_id = await _conversation(isolated_db)
+    current_id = await _running_user(isolated_db, conversation_id, "超长输入")
+    registry = AdapterRegistry()
+    registry.register(_TestAdapter())  # type: ignore[arg-type]
+    service = MemoryContextService(registry, RepositoryFactory())
+    monkeypatch.setattr(settings, "ai_chat_input_cap", 100)
+    monkeypatch.setattr(settings, "ai_chat_safety_margin", 0)
+    monkeypatch.setattr(
+        "app.ai_chat.memory.token_budget.litellm.token_counter",
+        lambda **_kwargs: 101,
+    )
+
+    with pytest.raises(MemoryContextFullError, match="fixed_input_too_large"):
+        await service.get_context_messages(
+            conversation_id=conversation_id,
+            run_id=current_id,
+            run_kind="user_turn",
+            tools_enabled=True,
         )
-        assert len(chain) == min(2, available_after_active)
-        assert chain
-        staged_markers = [item.other["summary_marker"] for item in chain]
-    visible = str(prepared.state["model_messages"])
-    assert active.other["summary_marker"] in visible
-    assert all(marker not in visible for marker in staged_markers)
+
+
+async def test_public_service_rejects_run_from_another_conversation(
+    isolated_db,
+) -> None:
+    first_conversation = await _conversation(isolated_db)
+    second_conversation = await _conversation(isolated_db)
+    foreign_run = await _running_user(isolated_db, second_conversation, "私有消息")
+    registry = AdapterRegistry()
+    registry.register(_TestAdapter())  # type: ignore[arg-type]
+    service = MemoryContextService(registry, RepositoryFactory())
+
+    with pytest.raises(ValueError, match="run does not belong"):
+        await service.get_context_messages(
+            conversation_id=first_conversation,
+            run_id=foreign_run,
+            run_kind="user_turn",
+            tools_enabled=True,
+        )

@@ -1,4 +1,4 @@
-"""Active Memory Pointer 与不可变 Snapshot Chain 仓储。"""
+"""Memory 模块内部的 Active Pointer 与不可变 Snapshot Chain 仓储。"""
 
 from __future__ import annotations
 

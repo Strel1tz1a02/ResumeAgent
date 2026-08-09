@@ -6,21 +6,29 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app import database as database_module
-from app.ai_chat.errors import ContextFullError, MemoryCompactionError
+from app.ai_chat.adapters import AdapterRegistry
+from app.ai_chat.graph.state import AdapterInput
+from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
 from app.ai_chat.memory.operations import MemoryDocument, apply_operations
+from app.ai_chat.memory.repository import MemoryRepository
 from app.ai_chat.memory.run_bundles import RunBundle, RunBundleBuilder
 from app.ai_chat.memory.summarizer import MemorySummarizer
-from app.ai_chat.model_request import build_model_request_spec, count_request_tokens
-from app.ai_chat.models import AiChatConversationMemorySnapshot
+from app.ai_chat.memory.token_budget import (
+    MemoryTokenBudget,
+    build_memory_token_budget,
+    count_request_tokens,
+)
+from app.ai_chat.models import AiChatConversationMemorySnapshot, AiChatMessage, AiChatRun
 from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.tools.results import PendingToolResult
+from app.ai_chat.types import JsonObject
 from app.config import settings
-from app.llm import get_llm_config
 
 Progress = Callable[[int, int], Awaitable[None]]
 logger = logging.getLogger(__name__)
@@ -31,7 +39,7 @@ def snapshot_document(snapshot: AiChatConversationMemorySnapshot) -> MemoryDocum
 
 
 def memory_token_count(document: MemoryDocument) -> int:
-    spec = build_model_request_spec({}, tools_enabled=False)
+    spec = build_memory_token_budget({}, tools_enabled=False)
     payload = json.dumps(document.model_dump(mode="json"), ensure_ascii=False)
     return count_request_tokens(spec, [{"role": "user", "content": payload}])
 
@@ -39,44 +47,42 @@ def memory_token_count(document: MemoryDocument) -> int:
 def validate_memory_budget(document: MemoryDocument) -> int:
     """强制整体与 Other 的分层上限，避免 Other 退化成 Transcript。"""
     if len(document.other) > settings.ai_chat_memory_other_max_keys:
-        raise ContextFullError("memory_other_keys_full")
-    spec = build_model_request_spec({}, tools_enabled=False)
+        raise MemoryContextFullError("memory_other_keys_full")
+    spec = build_memory_token_budget({}, tools_enabled=False)
     other_total = 0
     for key, value in document.other.items():
         payload = json.dumps({key: value}, ensure_ascii=False)
         tokens = count_request_tokens(spec, [{"role": "user", "content": payload}])
         if tokens > settings.ai_chat_memory_other_field_token_cap:
-            raise ContextFullError("memory_other_field_full")
+            raise MemoryContextFullError("memory_other_field_full")
         other_total += tokens
     if other_total > settings.ai_chat_memory_other_token_cap:
-        raise ContextFullError("memory_other_full")
+        raise MemoryContextFullError("memory_other_full")
     total = memory_token_count(document)
     if total > settings.ai_chat_memory_token_cap:
-        raise ContextFullError("memory_full")
+        raise MemoryContextFullError("memory_full")
     return total
 
 
-class MemoryService:
-    """前后台共享同一条 ensure_chain 实现。"""
+class _SnapshotService:
+    """Memory facade 内部共享的 Snapshot Chain 实现。"""
 
     def __init__(
         self,
-        repositories: RepositoryFactory,
         summarizer: MemorySummarizer | None = None,
     ) -> None:
-        self._repositories = repositories
         self._summarizer = summarizer or MemorySummarizer()
 
     async def ensure_root(self, conversation_id: int) -> None:
         async with database_module.db.session() as session:
-            await self._repositories.create(session).memory.get_or_create(conversation_id)
+            await MemoryRepository(session).get_or_create(conversation_id)
             await session.commit()
 
     async def active(
         self, conversation_id: int
     ) -> AiChatConversationMemorySnapshot:
         async with database_module.db.session() as session:
-            _, active = await self._repositories.create(session).memory.get_or_create(
+            _, active = await MemoryRepository(session).get_or_create(
                 conversation_id
             )
             await session.commit()
@@ -92,7 +98,7 @@ class MemoryService:
     ) -> bool:
         """判断规范链是否覆盖目标，并可顺便清除来源已变化的 Stage。"""
         async with database_module.db.session() as session:
-            memory = self._repositories.create(session).memory
+            memory = MemoryRepository(session)
             _, active = await memory.get_or_create(conversation_id)
             if active.source_run_id == target_run_id:
                 await session.commit()
@@ -133,7 +139,7 @@ class MemoryService:
         acquired = False
         for _ in range(200):
             async with database_module.db.session() as session:
-                memory = self._repositories.create(session).memory
+                memory = MemoryRepository(session)
                 await memory.get_or_create(conversation_id)
                 acquired = await memory.acquire_lease(conversation_id, owner)
                 await session.commit()
@@ -151,7 +157,7 @@ class MemoryService:
             )
         finally:
             async with database_module.db.session() as session:
-                await self._repositories.create(session).memory.release_lease(
+                await MemoryRepository(session).release_lease(
                     conversation_id, owner
                 )
                 await session.commit()
@@ -165,7 +171,7 @@ class MemoryService:
         progress: Progress | None,
     ) -> AiChatConversationMemorySnapshot:
         async with database_module.db.session() as session:
-            memory = self._repositories.create(session).memory
+            memory = MemoryRepository(session)
             _, active = await memory.get_or_create(conversation_id)
             chain = await memory.chain_from(active.id)
             valid_tail = active
@@ -216,14 +222,14 @@ class MemoryService:
             try:
                 candidate = apply_operations(parent_doc, operations)
                 tokens = validate_memory_budget(candidate)
-            except ContextFullError:
+            except MemoryContextFullError:
                 raise
             except Exception as exc:
                 raise MemoryCompactionError(
                     "memory operations or token accounting are invalid"
                 ) from exc
             async with database_module.db.session() as session:
-                memory = self._repositories.create(session).memory
+                memory = MemoryRepository(session)
                 fresh_bundles = await RunBundleBuilder(session).list_completed(
                     conversation_id
                 )
@@ -273,7 +279,7 @@ class MemoryService:
         """重验来源 Hash 后，无 LLM 地把目标节点晋升为 Active。"""
         bundle_by_run = {bundle.run_id: bundle for bundle in bundles}
         async with database_module.db.session() as session:
-            memory = self._repositories.create(session).memory
+            memory = MemoryRepository(session)
             pointer, active = await memory.get_or_create(conversation_id)
             chain = await memory.chain_from(active.id)
             target: AiChatConversationMemorySnapshot | None = None
@@ -304,71 +310,184 @@ class MemoryService:
             return target
 
 
-class MemoryMaintainer:
-    """Run 完成后异步维持 Active 后两个 Staged Snapshot。"""
+def _memory_message(document: MemoryDocument) -> list[JsonObject]:
+    """把派生记忆明确标记为非权威历史，而不是系统指令。"""
+    if document == MemoryDocument():
+        return []
+    return [
+        {
+            "role": "user",
+            "content": "CONVERSATION_MEMORY_DERIVED_NON_AUTHORITATIVE\n"
+            + json.dumps(document.model_dump(mode="json"), ensure_ascii=False)
+            + "\nEND_CONVERSATION_MEMORY",
+        }
+    ]
 
-    def __init__(self, memory: MemoryService) -> None:
-        self._memory = memory
-        self._tasks: dict[int, asyncio.Task[None]] = {}
 
-    def schedule(self, conversation_id: int) -> None:
-        try:
-            config = get_llm_config()
-        except Exception:
-            logger.exception("Cannot resolve LLM config for background memory compaction")
-            return
-        if not config.api_key and config.provider not in {"ollama", "openai_compatible"}:
-            logger.info(
-                "Skip AI Chat background memory compaction without an available provider"
+def _rendered_messages(state: Mapping[str, object]) -> list[JsonObject]:
+    messages = state.get("model_messages")
+    if not isinstance(messages, list) or not all(
+        isinstance(message, dict) for message in messages
+    ):
+        raise TypeError("adapter state must expose model_messages")
+    return [dict(message) for message in messages]
+
+
+class MemoryContextService:
+    """Memory 模块唯一公开入口：返回本轮应拼入的历史 Messages。"""
+
+    def __init__(
+        self,
+        registry: AdapterRegistry,
+        repositories: RepositoryFactory,
+        summarizer: MemorySummarizer | None = None,
+    ) -> None:
+        self._registry = registry
+        self._repositories = repositories
+        self._snapshots = _SnapshotService(summarizer)
+
+    async def get_context_messages(
+        self,
+        *,
+        conversation_id: int,
+        run_id: int,
+        run_kind: str,
+        tools_enabled: bool,
+    ) -> list[JsonObject]:
+        """返回 Active Memory、完整短期 Runs 和当前 Run 的已完成消息。"""
+        async with database_module.db.session() as session:
+            repositories = self._repositories.create(session)
+            conversation = await repositories.conversations.get(conversation_id)
+            if conversation is None:
+                raise LookupError(f"conversation {conversation_id} disappeared")
+            run = await session.get(AiChatRun, run_id)
+            if run is None or run.conversation_id != conversation_id:
+                raise ValueError("run does not belong to conversation")
+            bundles = await RunBundleBuilder(session).list_completed(conversation_id)
+            current_result = await session.execute(
+                select(AiChatMessage)
+                .where(
+                    AiChatMessage.conversation_id == conversation_id,
+                    AiChatMessage.run_id == run_id,
+                    AiChatMessage.status == "completed",
+                    AiChatMessage.role.in_(("user", "assistant")),
+                )
+                .order_by(AiChatMessage.sequence)
             )
-            return
-        current = self._tasks.get(conversation_id)
-        if current is not None and not current.done():
-            return
-        task = asyncio.create_task(self._maintain(conversation_id))
-        self._tasks[conversation_id] = task
+            current_messages = [
+                {"role": row.role, "content": row.content}
+                for row in current_result.scalars().all()
+            ]
+            pending_rows = await repositories.tool_calls.pending_results(conversation_id)
+            pending: list[PendingToolResult] = [
+                {
+                    "tool_call_id": row.id,
+                    "provider_tool_call_id": row.provider_tool_call_id,
+                    "tool_name": row.tool_name,
+                    "arguments": row.arguments,
+                    "result": dict(row.tool_result or {}),
+                }
+                for row in pending_rows
+            ]
+            adapter_name = conversation.adapter
+            subject = dict(conversation.subject)
+            scope = dict(conversation.scope)
+            language = conversation.language
 
-        def finished(done: asyncio.Task[None]) -> None:
-            self._tasks.pop(conversation_id, None)
-            try:
-                done.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception(
-                    "AI Chat background memory compaction failed: conversation=%s",
-                    conversation_id,
+        adapter = self._registry.get(adapter_name)
+        budget = build_memory_token_budget(
+            adapter.get_tool_handlers(),
+            tools_enabled=tools_enabled and run_kind != "opening",
+        )
+
+        async def count_history(history: list[JsonObject]) -> int:
+            value: AdapterInput = {
+                "conversation_id": conversation_id,
+                "run_id": run_id,
+                "subject": subject,
+                "scope": scope,
+                "language": language,
+                "run_kind": run_kind,
+                "tools_enabled": tools_enabled,
+                "messages": history,
+                "pending_tool_results": pending,
+            }
+            state = await adapter.parse_input(value)
+            return count_request_tokens(budget, _rendered_messages(state))
+
+        return await self._select_messages(
+            conversation_id=conversation_id,
+            bundles=bundles,
+            current_messages=current_messages,
+            budget=budget,
+            count_history=count_history,
+        )
+
+    async def _select_messages(
+        self,
+        *,
+        conversation_id: int,
+        bundles: list[RunBundle],
+        current_messages: list[JsonObject],
+        budget: MemoryTokenBudget,
+        count_history: Callable[[list[JsonObject]], Awaitable[int]],
+    ) -> list[JsonObject]:
+        active = await self._snapshots.active(conversation_id)
+        fixed_tokens = await count_history(current_messages)
+        if fixed_tokens > budget.input_budget:
+            raise MemoryContextFullError("fixed_input_too_large")
+
+        eligible = [
+            bundle
+            for bundle in bundles
+            if bundle.last_sequence > active.covered_through_sequence
+        ]
+        recent: list[RunBundle] = []
+        for bundle in reversed(eligible):
+            candidate = [bundle, *recent]
+            candidate_history = _memory_message(snapshot_document(active))
+            for candidate_bundle in candidate:
+                candidate_history.extend(candidate_bundle.model_messages())
+            candidate_history.extend(current_messages)
+            if await count_history(candidate_history) > budget.input_budget:
+                break
+            recent = candidate
+
+        while True:
+            excluded_count = len(eligible) - len(recent)
+            if excluded_count:
+                promotion = eligible[excluded_count - 1]
+                promotion_index = bundles.index(promotion)
+                buffer_target = bundles[
+                    min(len(bundles) - 1, promotion_index + 2)
+                ]
+                await self._snapshots.ensure_chain(
+                    conversation_id=conversation_id,
+                    bundles=bundles,
+                    target_run_id=buffer_target.run_id,
+                )
+                active = await self._snapshots.promote(
+                    conversation_id=conversation_id,
+                    target_run_id=promotion.run_id,
+                    bundles=bundles,
                 )
 
-        task.add_done_callback(finished)
-
-    async def close(self) -> None:
-        tasks = tuple(self._tasks.values())
-        self._tasks.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _maintain(self, conversation_id: int) -> None:
-        while True:
-            async with database_module.db.session() as session:
-                bundles = await RunBundleBuilder(session).list_completed(conversation_id)
-            active = await self._memory.active(conversation_id)
-            candidates = [
-                bundle
-                for bundle in bundles
-                if bundle.last_sequence > active.covered_through_sequence
-            ][:2]
-            if not candidates:
-                return
-            target = candidates[-1]
-            if await self._memory.covers(
-                conversation_id, target.run_id, bundles=bundles
-            ):
-                return
-            await self._memory.ensure_chain(
-                conversation_id=conversation_id,
-                bundles=bundles,
-                target_run_id=target.run_id,
-            )
+            history = _memory_message(snapshot_document(active))
+            for bundle in recent:
+                history.extend(bundle.model_messages())
+            history.extend(current_messages)
+            used_tokens = await count_history(history)
+            if used_tokens <= budget.input_budget:
+                logger.info(
+                    "AI Chat memory context selected: conversation=%s used=%s "
+                    "budget=%s recent_runs=%s active_sequence=%s",
+                    conversation_id,
+                    used_tokens,
+                    budget.input_budget,
+                    len(recent),
+                    active.covered_through_sequence,
+                )
+                return history
+            if not recent:
+                raise MemoryContextFullError("fixed_input_too_large")
+            recent = recent[1:]

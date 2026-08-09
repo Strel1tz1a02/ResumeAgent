@@ -13,8 +13,6 @@ from app.ai_chat.errors import IdempotencyConflictError, ProposalStateError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.graph.state import AdapterInput, ApprovalInput
-from app.ai_chat.graph.state import BaseState
-from app.ai_chat.model_request import ModelRequestSpec, build_model_request_spec
 
 
 @dataclass(frozen=True)
@@ -53,12 +51,11 @@ class GraphRunner:
         *,
         adapter_name: str,
         value: AdapterInput, # 本次执行需要的通用输入
-        prepared_state: BaseState | None = None,
     ) -> AsyncIterator[AiChatEvent]:
         """使用稳定的会话线程 ID 启动业务图。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
-        graph_input: Any = prepared_state or await adapter.parse_input(value)
+        graph_input: Any = await adapter.parse_input(value)
         json.dumps(graph_input, ensure_ascii=False) # 验证 State 可被 checkpoint 序列化
         config = {
             "configurable": {
@@ -74,24 +71,6 @@ class GraphRunner:
             event = self._normalize(part)
             if event is not None:
                 yield event
-
-    def prepare_request(
-        self,
-        *,
-        adapter_name: str,
-        tools_enabled: bool,
-    ) -> ModelRequestSpec:
-        """冻结本轮实际模型、Tools 和 Token 上限。"""
-        adapter = self._registry.get(adapter_name)
-        return build_model_request_spec(
-            adapter.get_tool_handlers(), tools_enabled=tools_enabled
-        )
-
-    async def prepare_state(
-        self, *, adapter_name: str, value: AdapterInput
-    ) -> BaseState:
-        """在 Graph 启动前生成并冻结 Adapter State。"""
-        return await self._registry.get(adapter_name).parse_input(value)
 
     async def resume(
         self,

@@ -6,11 +6,11 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.ai_chat.errors import ContextFullError, MemoryCompactionError
+from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
 from app.ai_chat.memory.operations import MemoryDocument, MemoryOperation
 from app.ai_chat.memory.run_bundles import RunBundle
-from app.ai_chat.model_request import (
-    build_model_request_spec,
+from app.ai_chat.memory.token_budget import (
+    build_memory_token_budget,
     count_request_tokens,
 )
 from app.config import settings
@@ -61,7 +61,7 @@ class MemorySummarizer:
         self, parent: MemoryDocument, bundle: RunBundle
     ) -> list[MemoryOperation]:
         prompt = _prompt(parent, bundle)
-        spec = build_model_request_spec(
+        spec = build_memory_token_budget(
             {},
             tools_enabled=False,
             requested_output=settings.ai_chat_summary_output_reserve,
@@ -69,7 +69,7 @@ class MemorySummarizer:
         )
         tokens = count_request_tokens(spec, [{"role": "user", "content": prompt}])
         if tokens > spec.input_budget:
-            raise ContextFullError("summary_run_too_large")
+            raise MemoryContextFullError("summary_run_too_large")
         try:
             result = await complete_json(
                 prompt,
@@ -77,7 +77,7 @@ class MemorySummarizer:
                 schema_type="memory",
             )
             return MemoryOperationsResult.model_validate(result).operations
-        except ContextFullError:
+        except MemoryContextFullError:
             raise
         except Exception as exc:
             raise MemoryCompactionError(str(exc)) from exc
