@@ -1,4 +1,4 @@
-"""管理可复用 AI 会话生命周期的内部应用服务。"""
+"""管理可复用 AI Chat 会话生命周期的内部应用服务。"""
 
 import asyncio
 import logging
@@ -193,7 +193,7 @@ class AiChatService:
             conversation = await repositories.conversations.get(conversation_id)
             if conversation is None:
                 raise ConversationNotFoundError(str(conversation_id))
-            message_rows = await repositories.messages.list_completed_for_run(run_id)
+            current_message_rows = await repositories.messages.list_completed_for_run(run_id)
             pending_rows = await repositories.tool_calls.pending_results(conversation_id)
             pending: list[JsonObject] = [
                 {
@@ -215,7 +215,7 @@ class AiChatService:
                 "tools_enabled": tools_enabled,
                 "messages": [
                     {"role": row.role, "content": row.content}
-                    for row in message_rows
+                    for row in current_message_rows
                 ],
                 "pending_tool_results": pending,
             }
