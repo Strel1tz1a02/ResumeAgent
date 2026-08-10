@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from app.ai_chat.memory.operations import MemoryDocument
-from app.ai_chat.memory.run_bundles import RunBundle
+from app.ai_chat.memory.runs import Memory
+from app.ai_chat.memory.runs import OriginRun
 from app.ai_chat.memory.summarizer import MemorySummarizer
 from app.ai_chat.memory.token_budget import MemoryTokenBudget
 
@@ -44,7 +44,6 @@ async def test_invalid_delete_value_is_retried(
         "app.ai_chat.memory.summarizer.build_memory_token_budget",
         lambda *_args, **_kwargs: MemoryTokenBudget(
             model="provider/model",
-            tools=[],
             max_tokens=100,
             input_budget=1000,
         ),
@@ -59,8 +58,8 @@ async def test_invalid_delete_value_is_retried(
     )
 
     operations = await MemorySummarizer().summarize(
-        MemoryDocument(open_questions=["项目经历是否单列"]),
-        RunBundle(
+        Memory(open_questions=["项目经历是否单列"]),
+        OriginRun(
             run_id=103,
             kind="user_turn",
             status="completed",
