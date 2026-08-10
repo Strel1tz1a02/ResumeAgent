@@ -10,8 +10,8 @@ from typing import Any, Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.ai_chat.memory.operations import MemoryDocument, apply_operations
-from app.ai_chat.memory.run_bundles import RunBundle
+from app.ai_chat.memory.operations import apply_operations
+from app.ai_chat.memory.runs import Memory, OriginRun
 from app.ai_chat.memory.summarizer import MemorySummarizer
 from app.ai_chat.memory.token_budget import (
     build_memory_token_budget,
@@ -57,7 +57,7 @@ def _needs_key() -> LLMConfig:
 
 
 def _token_count(value: object) -> int:
-    spec = build_memory_token_budget({}, tools_enabled=False)
+    spec = build_memory_token_budget()
     payload = json.dumps(
         value,
         ensure_ascii=False,
@@ -295,9 +295,9 @@ async def test_llm_judges_real_memory_compaction_quality(
 ) -> None:
     config = _needs_key()  # Must remain first: no ungated provider call.
 
-    document = MemoryDocument()
+    document = Memory()
     summarizer = MemorySummarizer()
-    bundles = [RunBundle(**run) for run in case["runs"]]
+    bundles = [OriginRun(**run) for run in case["runs"]]
     source_runs = [bundle.history_record() for bundle in bundles]
     source_tokens = _token_count(source_runs)
     compaction_trace: list[dict[str, object]] = []
@@ -306,7 +306,7 @@ async def test_llm_judges_real_memory_compaction_quality(
         try:
             operations = await summarizer.summarize(document, bundle)
         except Exception as exc:
-            partial_memory = document.model_dump(mode="json")
+            partial_memory = document.content_json()
             partial_tokens = _token_count(partial_memory)
             failure_report: dict[str, object] = {
                 "model": {
@@ -365,7 +365,11 @@ async def test_llm_judges_real_memory_compaction_quality(
             }
             report_path = _write_report(failure_report)
             pytest.fail(f"memory compaction failed; report={report_path}")
-        document = apply_operations(document, operations)
+        document = apply_operations(
+            document,
+            operations,
+            run_id=bundle.run_id,
+        )
         compaction_trace.append(
             {
                 "run_id": bundle.run_id,
@@ -373,11 +377,11 @@ async def test_llm_judges_real_memory_compaction_quality(
                     operation.model_dump(mode="json", exclude_none=True)
                     for operation in operations
                 ],
-                "memory": document.model_dump(mode="json"),
+                "memory": document.content_json(),
             }
         )
 
-    memory = document.model_dump(mode="json")
+    memory = document.content_json()
     memory_tokens = _token_count(memory)
     compression_ratio = memory_tokens / source_tokens
     token_reduction_ratio = 1 - compression_ratio

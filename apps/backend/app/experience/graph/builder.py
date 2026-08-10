@@ -110,6 +110,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         """流式执行模型，并在结束后暴露原始工具调用字符串。"""
         calls: tuple[str, ...] = ()
         async for event in runtime.stream_model(
+            run_id=state["run_id"],
             messages=state["model_messages"],
             tools_enabled=(
                 state["tools_enabled"] and state["run_kind"] != "opening"

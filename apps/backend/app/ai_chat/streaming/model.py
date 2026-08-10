@@ -59,6 +59,23 @@ class ModelCompleted:
 ModelStreamEvent = TextDelta | ToolCallsCompleted | ModelCompleted
 
 
+def build_model_tools(
+    handlers: Mapping[str, ToolHandler],
+) -> list[JsonObject]:
+    """生成实际发送给模型的 Tool 定义，供调用与 Token 计数共用。"""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": handler.description.strip(),
+                "parameters": handler.schema(),
+            },
+        }
+        for name, handler in handlers.items()
+    ]
+
+
 class AiChatModel:
     """通过 LiteLLM 流式输出可见文本和原子组装的工具调用。"""
 
@@ -82,17 +99,7 @@ class AiChatModel:
         if config.reasoning_effort:
             kwargs["reasoning_effort"] = config.reasoning_effort
         if tools_enabled and handlers:
-            kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": handler.description.strip(),
-                        "parameters": handler.schema(),
-                    },
-                }
-                for name, handler in handlers.items()
-            ]
+            kwargs["tools"] = build_model_tools(handlers)
         buffer = ToolCallBuffer()
         text_fallback = DsmlToolCallFallback() if tools_enabled and handlers else None
         finish_reason: str | None = None

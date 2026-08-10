@@ -74,6 +74,13 @@ class _UnusedModel:
             yield kwargs
 
 
+class _PassthroughMemoryService:
+    async def prepare_request_messages(  # type: ignore[no-untyped-def]
+        self, _run_id, messages, *, tools=None
+    ):
+        return messages
+
+
 class _ConversationModel:
     """生成确定性的经历内容修改提案。"""
 
@@ -187,6 +194,7 @@ async def _start_graph_harness(
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, repositories),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)
@@ -626,6 +634,7 @@ async def test_graph_separates_validator_guard_approval_and_executor(
     runtime = AiChatRuntime(
         _UnusedModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, RepositoryFactory()),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     ).bind_tools(adapter.get_tool_handlers())
     graph = adapter.build_graph(runtime)
     assert tuple(adapter.get_tool_handlers()) == ("content_change",)
@@ -701,6 +710,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
     medium_runtime = AiChatRuntime(
         _UnusedModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, RepositoryFactory()),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     ).bind_tools({"content_change": ContentChangeHandler()})
     state = ExperienceState(
         conversation_id=conversation.id,
@@ -747,6 +757,7 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, RepositoryFactory()),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     ).bind_tools({handler.name: handler})
     graph = build_experience_graph(runtime).compile()
     parts = [
@@ -816,6 +827,7 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, RepositoryFactory()),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     ).bind_tools(adapter.get_tool_handlers())
     graph = build_experience_graph(runtime).compile()
     state = ExperienceState(
@@ -1039,6 +1051,7 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         runtime = AiChatRuntime(
             _ConversationModel(provider_id),  # type: ignore[arg-type]
             ToolCallService(isolated_db.session, RepositoryFactory()),
+            _PassthroughMemoryService(),  # type: ignore[arg-type]
         ).bind_tools(adapter.get_tool_handlers())
         graph = build_experience_graph(runtime).compile()
         parts = [
@@ -1324,6 +1337,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, repositories),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)
@@ -1444,6 +1458,7 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         ToolCallService(isolated_db.session, repositories),
+        _PassthroughMemoryService(),  # type: ignore[arg-type]
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)

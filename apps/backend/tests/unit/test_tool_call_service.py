@@ -389,6 +389,7 @@ else:
 import app.ai_chat.tools as tools
 import app.ai_chat.tools.types as tool_types
 from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.memory import MemoryService
 from app.ai_chat.repositories import RepositoryFactory, ToolCallRepository
 from app.ai_chat.services import ToolCallService
 from app.ai_chat.streaming.model import AiChatModel
@@ -430,7 +431,7 @@ assert not hasattr(ContentChangeHandler, "invoke")
 assert not hasattr(ContentChangeHandler, "resolve")
 assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
-assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools"}
+assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "memory"}
 assert not hasattr(AiChatRuntime, "receive_tool_call")
 assert "decision" not in tool_types.ToolCall.__annotations__
 assert "client_resolution_id" not in tool_types.ToolCall.__annotations__
@@ -441,7 +442,9 @@ assert {"decision", "client_resolution_id"}.issubset(
 service = ToolCallService(db.session, RepositoryFactory()).bind_handlers(
     ExperienceAdapter().get_tool_handlers()
 )
-graph = build_experience_graph(AiChatRuntime(AiChatModel(), service))
+graph = build_experience_graph(
+    AiChatRuntime(AiChatModel(), service, MemoryService())
+)
 assert set(graph.nodes) == {"llm", "validator", "guard", "approver", "executor"}
 graph.compile()
 

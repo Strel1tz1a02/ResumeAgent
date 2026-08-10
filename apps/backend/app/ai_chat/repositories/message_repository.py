@@ -73,6 +73,18 @@ class MessageRepository:
         )
         return list(result.scalars().all())
 
+    async def list_completed_for_run(self, run_id: int) -> list[AiChatMessage]:
+        """按稳定顺序返回当前 Run 已完成的可见消息。"""
+        result = await self._session.execute(
+            select(AiChatMessage)
+            .where(
+                AiChatMessage.run_id == run_id,
+                AiChatMessage.status == "completed",
+            )
+            .order_by(AiChatMessage.sequence)
+        )
+        return list(result.scalars().all())
+
     async def append(self, row: AiChatMessage, delta: str) -> None:
         """向生成中的助手消息追加流式文本增量。"""
         row.content += delta

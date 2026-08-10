@@ -74,12 +74,14 @@ def build_memory_token_budget(
 def count_request_tokens(
     spec: MemoryTokenBudget,
     messages: list[JsonObject],
+    tools: list[JsonObject] | None = None,
 ) -> int:
-    """按摘要模型的 Messages 格式计数。"""
+    """按模型最终收到的 Messages 与 Tools 格式计数。"""
     try:
         count = litellm.token_counter(
             model=spec.model,
             messages=messages,
+            tools=tools,
         )
     except Exception as exc:
         raise TokenEstimationError(str(exc)) from exc
