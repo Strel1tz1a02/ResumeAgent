@@ -1145,6 +1145,7 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
         "2026_08_08_ai_chat_tool_call_state",
         "2026_08_08_ai_chat_conversation_scope",
         "2026_08_08_experience_chat_scope_field",
+        "2026_08_10_ai_chat_memory_background",
     }
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
     assert {

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import database as database_module
 from app.ai_chat.memory.runs import (
@@ -41,20 +45,35 @@ class MemoryPersistenceService:
         """批量读取目标 Run 之前的完整历史。"""
         async with database_module.db.session() as session:
             origin_runs = await OriginRunRepository(session).history_before(run_id)
-            repository = MemoryRepository(session)
-            rows = await repository.get_by_run_ids(
-                [origin_run.run_id for origin_run in origin_runs]
+            return await MemoryPersistenceService._load_runs(session, origin_runs)
+
+    @staticmethod
+    async def load_history_through(run_id: int) -> list[Run]:
+        """批量读取截至目标终态 Run 的完整历史。"""
+        async with database_module.db.session() as session:
+            origin_runs = await OriginRunRepository(session).history_through(run_id)
+            return await MemoryPersistenceService._load_runs(session, origin_runs)
+
+    @staticmethod
+    async def _load_runs(
+        session: AsyncSession,
+        origin_runs: list[OriginRun],
+    ) -> list[Run]:
+        """把原始 Run 与已完成或已跳过的有效快照合并。"""
+        repository = MemoryRepository(session)
+        rows = await repository.get_by_run_ids(
+            [origin_run.run_id for origin_run in origin_runs]
+        )
+        runs = []
+        for origin_run in origin_runs:
+            row = rows.get(origin_run.run_id)
+            memory = (
+                _memory(row)
+                if row is not None and row.status in {"completed", "skipped"}
+                else None
             )
-            runs = []
-            for origin_run in origin_runs:
-                row = rows.get(origin_run.run_id)
-                memory = (
-                    _memory(row)
-                    if row is not None and row.status == "completed"
-                    else None
-                )
-                runs.append(Run(origin=origin_run, memory=memory))
-            return runs
+            runs.append(Run(origin=origin_run, memory=memory))
+        return runs
 
     @staticmethod
     async def prepare_compression(
@@ -72,7 +91,11 @@ class MemoryPersistenceService:
                 await session.commit()
             return CompressionSlot(
                 memory_id=row.id,
-                completed=_memory(row) if row.status == "completed" else None,
+                completed=(
+                    _memory(row)
+                    if row.status in {"completed", "skipped"}
+                    else None
+                ),
             )
 
     @staticmethod
@@ -89,16 +112,51 @@ class MemoryPersistenceService:
                 memory=memory,
             )
             if not completed:
-                return None
+                row = await repository.get(memory_id)
+                if row is None or row.status not in {"completed", "skipped"}:
+                    return None
+                return _memory(row)
             await session.commit()
             return memory
 
     @staticmethod
-    async def fail(*, memory_id: int, error: str) -> None:
-        """记录本次记忆压缩失败。"""
+    async def skip(
+        *,
+        memory_id: int,
+        memory: Memory,
+        error: str,
+    ) -> Memory | None:
+        """持久化无变化的 skipped 快照。"""
         async with database_module.db.session() as session:
-            await MemoryRepository(session).fail(
+            repository = MemoryRepository(session)
+            skipped = await repository.skip(
                 memory_id=memory_id,
+                memory=memory,
                 error=error,
             )
+            if not skipped:
+                row = await repository.get(memory_id)
+                if row is None or row.status not in {"completed", "skipped"}:
+                    return None
+                return _memory(row)
             await session.commit()
+            return memory
+
+    @staticmethod
+    async def wait_until_ready(
+        run_id: int,
+        *,
+        timeout_seconds: float,
+        poll_seconds: float,
+    ) -> bool:
+        """等待数据库中出现可用于链路的 completed/skipped Snapshot。"""
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            async with database_module.db.session() as session:
+                row = await MemoryRepository(session).get_by_run_id(run_id)
+                if row is not None and row.status in {"completed", "skipped"}:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(poll_seconds, remaining))

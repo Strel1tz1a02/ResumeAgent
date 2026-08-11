@@ -29,8 +29,49 @@ services:
       # For Ollama running on host machine, use host.docker.internal:
       # - LLM_API_BASE=http://host.docker.internal:11434
       - LLM_API_BASE=${LLM_API_BASE:-}
+      - REDIS_URL=redis://redis:6379/0
       # CORS origins (JSON array format). FRONTEND_BASE_URL is auto-included.
       #- CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+    restart: unless-stopped
+
+  memory-worker:
+    image: ghcr.io/srbhr/resume-matcher
+    build: .
+    working_dir: /app/backend
+    command: ["arq", "app.ai_chat.memory.worker.WorkerSettings"]
+    volumes:
+      - resume-data:/app/backend/data
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_LLM=${LOG_LLM:-WARNING}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_API_BASE=${LLM_API_BASE:-}
+      - REDIS_URL=redis://redis:6379/0
+      - AI_CHAT_MEMORY_QUEUE_NAME=ai-chat:memory
+    depends_on:
+      redis:
+        condition: service_healthy
+      resume-matcher:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.ai_chat.memory.worker.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
 #secrets:
@@ -39,4 +80,6 @@ services:
 
 volumes:
   resume-data:
+    driver: local
+  redis-data:
     driver: local

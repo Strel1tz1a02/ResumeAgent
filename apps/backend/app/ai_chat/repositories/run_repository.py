@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.models import AiChatRun, utcnow_iso
+from app.background_jobs.repository import OutboxRepository
 
 
 class RunRepository:
@@ -68,4 +69,11 @@ class RunRepository:
             )
         )
         await self._session.flush()
-        return result.rowcount == 1
+        transitioned = result.rowcount == 1
+        if transitioned and to_status in {"completed", "failed"}:
+            await OutboxRepository(self._session).enqueue(
+                topic="memory.compact",
+                dedupe_key=f"memory.compact:{run_id}",
+                payload={"run_id": run_id},
+            )
+        return transitioned

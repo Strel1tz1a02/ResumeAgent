@@ -32,7 +32,7 @@ class AiChatRunMemory(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'completed', 'failed')",
+            "status IN ('pending', 'completed', 'skipped')",
             name="ck_ai_chat_run_memory_status",
         ),
     )

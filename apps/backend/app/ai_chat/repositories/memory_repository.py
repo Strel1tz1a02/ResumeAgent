@@ -24,6 +24,10 @@ class MemoryRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get(self, memory_id: int) -> AiChatRunMemory | None:
+        """按主键读取一条记忆记录。"""
+        return await self._session.get(AiChatRunMemory, memory_id)
+
     async def get_by_run_ids(
         self,
         run_ids: list[int],
@@ -69,7 +73,10 @@ class MemoryRepository:
         """写入完整校验后的记忆结果。"""
         result = await self._session.execute(
             update(AiChatRunMemory)
-            .where(AiChatRunMemory.id == memory_id)
+            .where(
+                AiChatRunMemory.id == memory_id,
+                AiChatRunMemory.status == "pending",
+            )
             .values(
                 status="completed",
                 core=memory.core_json(),
@@ -81,13 +88,25 @@ class MemoryRepository:
         await self._session.flush()
         return result.rowcount == 1
 
-    async def fail(self, *, memory_id: int, error: str) -> bool:
-        """记录失败，使后续调用能够重新生成。"""
+    async def skip(
+        self,
+        *,
+        memory_id: int,
+        memory: Memory,
+        error: str,
+    ) -> bool:
+        """以父 Memory 内容固化一个不阻断后续链路的跳过快照。"""
         result = await self._session.execute(
             update(AiChatRunMemory)
-            .where(AiChatRunMemory.id == memory_id)
+            .where(
+                AiChatRunMemory.id == memory_id,
+                AiChatRunMemory.status == "pending",
+            )
             .values(
-                status="failed",
+                status="skipped",
+                core=memory.core_json(),
+                other=memory.other,
+                memory_token_count=memory.token_count,
                 error_message=error[:2000],
             )
         )

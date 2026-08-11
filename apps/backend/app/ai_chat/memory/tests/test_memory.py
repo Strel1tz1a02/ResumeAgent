@@ -9,17 +9,20 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select, text
 
-from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
+from app.ai_chat.memory.errors import (
+    MemoryCompactionTimeoutError,
+    MemoryContextFullError,
+)
 from app.ai_chat.memory.operations import MemoryOperation, apply_operations
 from app.ai_chat.memory.runs import (
     Memory,
     OriginRun,
     Run,
 )
-from app.ai_chat.memory.services.memory_service import MemoryService
 from app.ai_chat.memory.services.memory_persistence_service import (
     MemoryPersistenceService,
 )
+from app.ai_chat.memory.services.memory_service import MemoryService
 from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.memory.summarizer import MemorySummarizer
 from app.ai_chat.memory.token_budget import MemoryTokenBudget
@@ -174,7 +177,7 @@ async def test_prepare_request_messages_injects_history_after_system_context(
         return 200
 
     monkeypatch.setattr(service, "count_request_tokens", fake_count)
-    monkeypatch.setattr(service, "get_history_prompt", fake_history)
+    monkeypatch.setattr(service, "_get_history_prompt", fake_history)
     monkeypatch.setattr(service, "validate_request", fake_validate)
     messages = [
         {"role": "system", "content": "policy"},
@@ -461,6 +464,7 @@ async def test_history_prompt_uses_exact_memory_boundary_and_two_run_buffer(
         lambda _document: 10,
     )
 
+    await service.compact_run(history_ids[-1])
     prompt = await service._get_history_prompt(current_id, occupied_token=20)
     payload = json.loads(prompt)
 
@@ -487,7 +491,7 @@ async def test_history_prompt_uses_exact_memory_boundary_and_two_run_buffer(
     assert history_runs[2].memory is not None
     assert history_runs[2].memory.current_goal == "目标 2"
 
-    await service.compress(current_id, occupied_token=20)
+    assert await service.compact_run(history_ids[-1])
     assert summarizer.calls == history_ids
 
 
@@ -525,7 +529,9 @@ async def test_history_prompt_uses_existing_memory_without_compressing_again(
 ) -> None:
     conversation_id = await _conversation(isolated_db)
     await _terminal_run(isolated_db, conversation_id, "历史 0")
-    await _terminal_run(isolated_db, conversation_id, "历史 1")
+    latest_history_id = await _terminal_run(
+        isolated_db, conversation_id, "历史 1"
+    )
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     service = MemoryService(_GoalSummarizer())  # type: ignore[arg-type]
     monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
@@ -548,12 +554,7 @@ async def test_history_prompt_uses_existing_memory_without_compressing_again(
         "app.ai_chat.memory.services.memory_service._validate_memory_budget",
         lambda _document: 10,
     )
-    await service.compress(current_id, occupied_token=20)
-
-    async def unexpected_compress(_run_id: int, _occupied_token: int) -> None:
-        raise AssertionError("existing memory should be reused")
-
-    monkeypatch.setattr(service, "compress", unexpected_compress)
+    await service.compact_run(latest_history_id)
 
     prompt = json.loads(
         await service._get_history_prompt(current_id, occupied_token=20)
@@ -562,26 +563,26 @@ async def test_history_prompt_uses_existing_memory_without_compressing_again(
     assert prompt["runs"] == []
 
 
-class _FlakySummarizer(_GoalSummarizer):
-    def __init__(self) -> None:
+class _FailRunSummarizer(_GoalSummarizer):
+    def __init__(self, fail_run_id: int) -> None:
         super().__init__()
-        self.should_fail = True
+        self.fail_run_id = fail_run_id
 
     async def summarize(self, parent, origin_run):  # type: ignore[no-untyped-def]
-        if self.should_fail:
-            self.should_fail = False
-            raise RuntimeError("temporary summary failure")
+        if origin_run.run_id == self.fail_run_id:
+            raise RuntimeError("summary retries exhausted")
         return await super().summarize(parent, origin_run)
 
 
-async def test_failed_placeholder_is_retried_without_duplicate_row(
+async def test_skipped_run_keeps_chain_open_for_later_run(
     isolated_db,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conversation_id = await _conversation(isolated_db)
-    history_id = await _terminal_run(isolated_db, conversation_id, "需要重试")
-    current_id = await _running_run(isolated_db, conversation_id, "当前问题")
-    summarizer = _FlakySummarizer()
+    parent_id = await _terminal_run(isolated_db, conversation_id, "已有目标")
+    skipped_id = await _terminal_run(isolated_db, conversation_id, "会失败")
+    completed_id = await _terminal_run(isolated_db, conversation_id, "继续压缩")
+    summarizer = _FailRunSummarizer(skipped_id)
     service = MemoryService(summarizer)  # type: ignore[arg-type]
     monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 1)
@@ -590,25 +591,26 @@ async def test_failed_placeholder_is_retried_without_duplicate_row(
         lambda _document: 10,
     )
 
-    with pytest.raises(MemoryCompactionError, match="token accounting"):
-        await service.compress(current_id, occupied_token=0)
+    assert await service.compact_run(completed_id)
     async with isolated_db.session() as session:
-        failed = await MemoryRepository(session).get_by_run_id(history_id)
-        assert failed is not None
-        assert failed.status == "failed"
-        assert "temporary summary failure" in str(failed.error_message)
-
-    await service.compress(current_id, occupied_token=0)
-    async with isolated_db.session() as session:
+        parent = await MemoryRepository(session).get_by_run_id(parent_id)
+        skipped = await MemoryRepository(session).get_by_run_id(skipped_id)
+        completed = await MemoryRepository(session).get_by_run_id(completed_id)
         count = await session.scalar(
             select(func.count()).select_from(AiChatRunMemory)
         )
-        completed = await MemoryRepository(session).get_by_run_id(history_id)
-    assert count == 1
+        assert parent is not None and parent.status == "completed"
+        assert skipped is not None
+        assert skipped.status == "skipped"
+        assert skipped.core == parent.core
+        assert skipped.other == parent.other
+        assert "summary retries exhausted" in str(skipped.error_message)
+    assert count == 3
     assert completed is not None and completed.status == "completed"
+    assert completed.core["current_goal"] == "继续压缩"
 
 
-async def test_compress_treats_run_id_as_exclusive_history_boundary(
+async def test_compact_run_includes_target_terminal_run(
     isolated_db,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -625,7 +627,7 @@ async def test_compress_treats_run_id_as_exclusive_history_boundary(
         lambda _document: 10,
     )
 
-    await service.compress(run_ids[-1], occupied_token=0)
+    assert await service.compact_run(run_ids[-1])
 
     async with isolated_db.session() as session:
         compressed = list(
@@ -635,7 +637,41 @@ async def test_compress_treats_run_id_as_exclusive_history_boundary(
                 )
             ).scalars()
         )
-    assert [row.run_id for row in compressed] == run_ids[:2]
+    assert [row.run_id for row in compressed] == run_ids
+
+
+async def test_history_prompt_times_out_instead_of_compressing_in_web_process(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation_id = await _conversation(isolated_db)
+    await _terminal_run(isolated_db, conversation_id, "历史 0")
+    await _terminal_run(isolated_db, conversation_id, "历史 1")
+    current_id = await _running_run(isolated_db, conversation_id, "当前问题")
+    summarizer = _GoalSummarizer()
+    service = MemoryService(summarizer)  # type: ignore[arg-type]
+    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+
+    def count_history_tokens(text: str) -> int:
+        payload = json.loads(text)
+        if "runs" in payload:
+            return 10 + len(payload["runs"]) * 80
+        if "run_id" in payload:
+            return 80
+        return 10
+
+    monkeypatch.setattr(service, "_count_string_tokens", count_history_tokens)
+    monkeypatch.setattr(memory_settings, "ai_chat_memory_token_cap", 10)
+    monkeypatch.setattr(
+        memory_settings,
+        "ai_chat_memory_wait_timeout_seconds",
+        0,
+    )
+
+    with pytest.raises(MemoryCompactionTimeoutError):
+        await service._get_history_prompt(current_id, occupied_token=20)
+
+    assert summarizer.calls == []
 
 
 async def test_context_full_when_occupied_content_exhausts_budget(
@@ -657,8 +693,8 @@ async def test_conversation_delete_cascades_run_memories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conversation_id = await _conversation(isolated_db)
-    await _terminal_run(isolated_db, conversation_id, "历史")
-    current_id = await _running_run(isolated_db, conversation_id, "当前")
+    history_id = await _terminal_run(isolated_db, conversation_id, "历史")
+    await _running_run(isolated_db, conversation_id, "当前")
     service = MemoryService(_GoalSummarizer())  # type: ignore[arg-type]
     monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 1)
@@ -666,7 +702,7 @@ async def test_conversation_delete_cascades_run_memories(
         "app.ai_chat.memory.services.memory_service._validate_memory_budget",
         lambda _document: 10,
     )
-    await service.compress(current_id, occupied_token=0)
+    assert await service.compact_run(history_id)
 
     async with isolated_db.session() as session:
         await RepositoryFactory().create(session).conversations.delete(conversation_id)

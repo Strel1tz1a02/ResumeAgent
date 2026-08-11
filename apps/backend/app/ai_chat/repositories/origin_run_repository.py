@@ -40,14 +40,30 @@ class OriginRunRepository:
 
     async def history_before(self, run_id: int) -> list[OriginRun]:
         """读取同一会话中目标 Run 之前的终态 Run。"""
+        return await self._history(run_id, inclusive=False)
+
+    async def history_through(self, run_id: int) -> list[OriginRun]:
+        """读取同一会话中截至目标 Run 的全部终态 Run。"""
+        return await self._history(run_id, inclusive=True)
+
+    async def _history(
+        self,
+        run_id: int,
+        *,
+        inclusive: bool,
+    ) -> list[OriginRun]:
+        """按目标边界统一读取完整终态 Run。"""
         boundary = await self._session.get(AiChatRun, run_id)
         if boundary is None:
             raise LookupError(f"run {run_id} does not exist")
+        boundary_condition = (
+            AiChatRun.id <= boundary.id if inclusive else AiChatRun.id < boundary.id
+        )
         run_result = await self._session.execute(
             select(AiChatRun)
             .where(
                 AiChatRun.conversation_id == boundary.conversation_id,
-                AiChatRun.id < boundary.id,
+                boundary_condition,
                 AiChatRun.status.in_(_HISTORY_RUN_STATUSES),
             )
             .order_by(AiChatRun.id)

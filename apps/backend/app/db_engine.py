@@ -62,6 +62,7 @@ def init_models_sync(engine: Engine) -> None:
     # 模块 ORM 共享同一个声明式 Base；create_all 前必须显式注册。
     import app.experience.models  # noqa: F401
     import app.ai_chat.models  # noqa: F401
+    import app.background_jobs.models  # noqa: F401
 
     from app.scripts.migrate_experience_field_states import migrate
     from app.scripts.migrate_experience_evidence_items import (
@@ -85,6 +86,9 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_experience_chat_scope_field import (
         migrate as migrate_experience_chat_scope_field,
     )
+    from app.scripts.migrate_ai_chat_memory_background import (
+        migrate as migrate_ai_chat_memory_background,
+    )
 
     migrate(engine)
     migrate_experience_evidence_items(engine)
@@ -94,6 +98,7 @@ def init_models_sync(engine: Engine) -> None:
     migrate_ai_chat_tool_call_state(engine)
     migrate_ai_chat_conversation_scope(engine)
     migrate_experience_chat_scope_field(engine)
+    migrate_ai_chat_memory_background(engine)
 
     # ``create_all`` 不会修改既有 SQLite 表，因此增量迁移必须保持幂等，
     # 使旧版数据库仍能安全加载简历。
