@@ -14,9 +14,13 @@ if sys.platform == "win32":
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.ai_chat import close_ai_chat, start_ai_chat
+from app.ai_chat import close_ai_chat, register_adapter, start_ai_chat
 from app.config import settings
 from app.database import db
+from app.experience import ExperienceAdapter
+from app.experience.routers import ai_chat_router as experience_ai_chat_router
+from app.experience.routers import experiences_router
+from app.jd_analysis import router as jd_analysis_router
 from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
@@ -27,10 +31,6 @@ from app.routers import (
     resume_wizard_router,
     resumes_router,
 )
-from app.experience import ExperienceAdapter
-from app.experience.routers import ai_chat_router as experience_ai_chat_router
-from app.experience.routers import experiences_router
-from app.ai_chat import register_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,7 @@ app.include_router(applications_router, prefix="/api/v1")
 app.include_router(resume_wizard_router, prefix="/api/v1")
 app.include_router(experiences_router, prefix="/api/v1")
 app.include_router(experience_ai_chat_router, prefix="/api/v1")
+app.include_router(jd_analysis_router, prefix="/api/v1")
 
 
 @app.get("/")
