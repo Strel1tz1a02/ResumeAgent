@@ -10,11 +10,7 @@ from pathlib import Path
 from typing import NotRequired, get_origin, get_type_hints
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.repositories.run_repository import RunRepository
+from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.checkpoint import CheckpointLifecycle
 from app.ai_chat.errors import (
     IdempotencyConflictError,
@@ -23,49 +19,65 @@ from app.ai_chat.errors import (
     ToolProtocolError,
 )
 from app.ai_chat.graph.runner import GraphRecovery, GraphRunner
-from app.ai_chat.adapters import AdapterRegistry
-from app.ai_chat.services import AiChatService, ToolCallService
-from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
-from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
-from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
 from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.repositories.run_repository import RunRepository
+from app.ai_chat.services import AiChatService, ToolCallService
+from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
+from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
+from app.ai_chat.streaming.model import ModelCompleted, TextDelta, ToolCallsCompleted
+from app.ai_chat.tools.buffer import encode_tool_call
+from app.ai_chat.tools.security import ToolSecurity, guard_tool
 from app.ai_chat.tools.types import (
     ToolContext,
     ToolResult,
 )
-from app.ai_chat.tools.buffer import encode_tool_call
-from app.ai_chat.tools.security import ToolSecurity, guard_tool
 from app.ai_chat.types import ScopeRef, SubjectRef
 from app.database import Database
 from app.experience import ExperienceAdapter
 from app.experience.graph import ExperienceState, build_experience_graph
 from app.experience.graph.builder import _durable_call
 from app.experience.prompts.ai_chat import system_prompt
+from app.experience.schemas.evidence_items import EvidenceCreateRequest
+from app.experience.schemas.experiences import ExperienceCreate, ExperienceUpdate
+from app.experience.services.evidence_service import EvidenceService
+from app.experience.services.experience_ai_mutation_service import (
+    ExperienceAiMutationService,
+)
+from app.experience.services.experience_service import (
+    ExperienceConflictError,
+    ExperienceService,
+)
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeHandler,
 )
-from app.experience.schemas.evidence_items import EvidenceCreateRequest
-from app.experience.schemas.experiences import ExperienceCreate, ExperienceUpdate
-from app.experience.services.evidence_service import EvidenceService
-from app.experience.services.experience_ai_mutation_service import ExperienceAiMutationService
-from app.experience.services.experience_service import ExperienceConflictError, ExperienceService
-from app.scripts.migrate_unified_experience_revision_units import (
-    MIGRATION_NAME as UNIFIED_REVISION_MIGRATION,
-    migrate as migrate_unified_revision_units,
+from app.scripts.migrate_ai_chat_conversation_scope import (
+    MIGRATION_NAME as AI_CHAT_SCOPE_MIGRATION,
+)
+from app.scripts.migrate_ai_chat_conversation_scope import (
+    migrate as migrate_ai_chat_conversation_scope,
 )
 from app.scripts.migrate_ai_chat_tool_call_index import (
     MIGRATION_NAME as AI_CHAT_TOOL_INDEX_MIGRATION,
-    migrate as migrate_ai_chat_tool_call_index,
 )
-from app.scripts.migrate_ai_chat_conversation_scope import (
-    MIGRATION_NAME as AI_CHAT_SCOPE_MIGRATION,
-    migrate as migrate_ai_chat_conversation_scope,
+from app.scripts.migrate_ai_chat_tool_call_index import (
+    migrate as migrate_ai_chat_tool_call_index,
 )
 from app.scripts.migrate_experience_chat_scope_field import (
     MIGRATION_NAME as EXPERIENCE_CHAT_SCOPE_FIELD_MIGRATION,
+)
+from app.scripts.migrate_experience_chat_scope_field import (
     migrate as migrate_experience_chat_scope_field,
 )
+from app.scripts.migrate_unified_experience_revision_units import (
+    MIGRATION_NAME as UNIFIED_REVISION_MIGRATION,
+)
+from app.scripts.migrate_unified_experience_revision_units import (
+    migrate as migrate_unified_revision_units,
+)
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class _UnusedModel:
@@ -185,7 +197,7 @@ async def _start_graph_harness(
         )
     adapter = ExperienceAdapter()
     if handler is not None:
-        adapter._handlers = {handler.name: handler}  # noqa: SLF001 - 故障注入
+        adapter._handlers = {handler.name: handler}
     registry = AdapterRegistry()
     registry.register(adapter)
     repositories = RepositoryFactory()
@@ -243,6 +255,7 @@ class _ResultOnlyResumeRunner:
         assert kwargs["approval"]["decision"] == "reject"
         return GraphRecovery(interrupted=True)
 
+
 async def test_create_initializes_states_and_group_revision(isolated_db) -> None:
     """身份保存单元任一真实变更都会同步推进 kind/title revision。"""
     async with isolated_db.session() as session:
@@ -256,9 +269,7 @@ async def test_create_initializes_states_and_group_revision(isolated_db) -> None
     async with isolated_db.session() as session:
         updated = await ExperienceService(session).patch(
             created.experience_id,
-            ExperienceUpdate(
-                title="新标题", expected_field_revisions={"title": 0}
-            ),
+            ExperienceUpdate(title="新标题", expected_field_revisions={"title": 0}),
         )
     states = {(state.key, state.ref_id): state for state in updated.field_states}
     assert states[("title", None)].revision == 1
@@ -441,9 +452,9 @@ async def test_content_change_routes_by_requested_scope(
             ContentChangeArguments(
                 scope={"field": "evidence", "evidence_id": None},
                 suggested_content={
+                    "background": None,
                     "action": "行动",
                     "result": None,
-                    "metrics": None,
                 },
             ).model_dump(mode="json"),
         )
@@ -455,8 +466,12 @@ async def test_content_change_routes_by_requested_scope(
 async def test_content_change_routes_evidence_append(isolated_db) -> None:
     """统一 Tool 将新增 Evidence 建议路由到追加 Service。"""
     async with isolated_db.session() as session:
-        created = await ExperienceService(session).create(ExperienceCreate(title="Agent"))
-    collection = next(item for item in created.field_states if item.key == "evidence_new")
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Agent")
+        )
+    collection = next(
+        item for item in created.field_states if item.key == "evidence_new"
+    )
     context = ToolContext(
         conversation_id=2,
         run_id=2,
@@ -474,9 +489,9 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
     arguments = ContentChangeArguments(
         scope={"field": "evidence", "evidence_id": None},
         suggested_content={
+            "background": None,
             "action": "搭建发布流水线",
             "result": "自动发布",
-            "metrics": None,
         },
     )
     handler = ContentChangeHandler()
@@ -498,17 +513,21 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
     assert result.payload["evidence_ids"] == [result.payload["evidence_id"]]
 
 
-async def test_content_change_overwrites_one_complete_evidence_item(isolated_db) -> None:
+async def test_content_change_overwrites_one_complete_evidence_item(
+    isolated_db,
+) -> None:
     """共享 Evidence 会话按 ID 整体覆盖一项，不修改其他 EvidenceItem。"""
     async with isolated_db.session() as session:
-        created = await ExperienceService(session).create(ExperienceCreate(title="Agent"))
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Agent")
+        )
     async with isolated_db.session() as session:
         await EvidenceService(session).create(
             created.experience_id,
             EvidenceCreateRequest(
+                background="旧背景一",
                 action="旧行动一",
                 result="旧结果一",
-                metrics="旧指标一",
                 expected_collection_revision=0,
             ),
         )
@@ -516,9 +535,9 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
         with_both = await EvidenceService(session).create(
             created.experience_id,
             EvidenceCreateRequest(
+                background="旧背景二",
                 action="旧行动二",
                 result="旧结果二",
-                metrics="旧指标二",
                 expected_collection_revision=1,
             ),
         )
@@ -545,9 +564,9 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
     arguments = ContentChangeArguments(
         scope={"field": "evidence", "evidence_id": first.id},
         suggested_content={
+            "background": "新背景一",
             "action": "新行动一",
             "result": "新结果一",
-            "metrics": "新指标一",
         },
     )
     handler = ContentChangeHandler()
@@ -572,10 +591,10 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
     async with isolated_db.session() as session:
         detail = await ExperienceService(session).get(created.experience_id)
     updated_first, unchanged_second = detail.evidence_items
-    assert (updated_first.action, updated_first.result, updated_first.metrics) == (
+    assert (updated_first.background, updated_first.action, updated_first.result) == (
+        "新背景一",
         "新行动一",
         "新结果一",
-        "新指标一",
     )
     assert unchanged_second.model_dump() == second.model_dump()
 
@@ -583,14 +602,16 @@ async def test_content_change_overwrites_one_complete_evidence_item(isolated_db)
 async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> None:
     """EvidenceAdapter 为共享会话一次加载全部 Item 和各自 revision。"""
     async with isolated_db.session() as session:
-        created = await ExperienceService(session).create(ExperienceCreate(title="Agent"))
+        created = await ExperienceService(session).create(
+            ExperienceCreate(title="Agent")
+        )
     async with isolated_db.session() as session:
         detail = await EvidenceService(session).create(
             created.experience_id,
             EvidenceCreateRequest(
+                background="需要缩短交付周期",
                 action="搭建平台",
-                result="完成上线",
-                metrics="2 周",
+                result="2 周完成上线",
                 expected_collection_revision=0,
             ),
         )
@@ -782,17 +803,15 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
             version="v2",
         )
     ]
-    events = [
-        part["data"]["event"]
-        for part in parts
-        if part.get("type") == "custom"
-    ]
+    events = [part["data"]["event"] for part in parts if part.get("type") == "custom"]
     assert "proposal.requested" not in events
     assert "content_change.applied" in events
     async with isolated_db.session() as session:
         detail = await ExperienceService(session).get(created.experience_id)
-        row = await RepositoryFactory().create(session).tool_calls.get_by_run_index(
-            run.id, 0
+        row = (
+            await RepositoryFactory()
+            .create(session)
+            .tool_calls.get_by_run_index(run.id, 0)
         )
     assert detail.background == "新背景"
     assert row is not None
@@ -990,10 +1009,10 @@ def test_dsml_compatibility_recovers_atomic_tool_call() -> None:
         '<｜｜DSML｜｜invoke name="content_change">'
         '<｜｜DSML｜｜parameter name="scope" string="false">'
         '{"field":"background","evidence_id":null}'
-        '</｜｜DSML｜｜parameter>'
+        "</｜｜DSML｜｜parameter>"
         '<｜｜DSML｜｜parameter name="suggested_content" string="true">新背景'
-        '</｜｜DSML｜｜parameter>'
-        '</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>结束'
+        "</｜｜DSML｜｜parameter>"
+        "</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>结束"
     )
     calls, trailing = fallback.finish()
 
@@ -1074,15 +1093,19 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
     replay_id = await requested_id("retry-generated-id")
     assert replay_id == first_id
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get_by_run_index(
-            run.id, 0
+        row = (
+            await RepositoryFactory()
+            .create(session)
+            .tool_calls.get_by_run_index(run.id, 0)
         )
     assert row is not None
     assert row.id == first_id
     assert row.provider_tool_call_id == "first-provider-id"
 
 
-def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path) -> None:
+def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(
+    tmp_path,
+) -> None:
     """旧库 JSON 关系按顺序迁移，重复与悬空 ID 不进入关系表。"""
     path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as connection:
@@ -1111,31 +1134,58 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
             "(1,'project','Agent',NULL,NULL,NULL,NULL,NULL,0,'必须销毁',NULL,'[2,1,2,999]','[]','[]',NULL,'draft',0,NULL,'now','now')"
         )
     database = Database(path)
-    with database._sync() as session:  # noqa: SLF001 - 迁移验证
-        columns = session.connection().exec_driver_sql(
-            "PRAGMA table_info(experience_items)"
-        ).mappings().all()
-        state_columns = session.connection().exec_driver_sql(
-            "PRAGMA table_info(experience_field_states)"
-        ).mappings().all()
+    with database._sync() as session:
+        columns = (
+            session.connection()
+            .exec_driver_sql("PRAGMA table_info(experience_items)")
+            .mappings()
+            .all()
+        )
+        evidence_columns = (
+            session.connection()
+            .exec_driver_sql("PRAGMA table_info(evidence_items)")
+            .mappings()
+            .all()
+        )
+        state_columns = (
+            session.connection()
+            .exec_driver_sql("PRAGMA table_info(experience_field_states)")
+            .mappings()
+            .all()
+        )
         migrations = set(
             session.connection()
             .exec_driver_sql("SELECT name FROM schema_migrations")
             .scalars()
             .all()
         )
-        evidence_links = session.connection().exec_driver_sql(
-            "SELECT experience_id, evidence_id, position "
-            "FROM experience_evidence_items ORDER BY position"
-        ).all()
+        evidence_links = (
+            session.connection()
+            .exec_driver_sql(
+                "SELECT experience_id, evidence_id, position "
+                "FROM experience_evidence_items ORDER BY position"
+            )
+            .all()
+        )
         revision_rows = set(
-            session.connection().exec_driver_sql(
+            session.connection()
+            .exec_driver_sql(
                 "SELECT scope, unit_key, ref_id, revision FROM experience_revisions"
-            ).all()
+            )
+            .all()
+        )
+        evidence_field_keys = set(
+            session.connection()
+            .exec_driver_sql(
+                "SELECT target_key FROM experience_field_states WHERE ref_id > 0"
+            )
+            .scalars()
+            .all()
         )
     assert "raw_input" not in {column["name"] for column in columns}
     assert "evidence_ids" not in {column["name"] for column in columns}
     assert "revision" not in {column["name"] for column in state_columns}
+    assert "background" in {column["name"] for column in evidence_columns}
     assert migrations == {
         "2026_08_01_experience_field_states",
         "2026_08_03_experience_evidence_items",
@@ -1146,7 +1196,9 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(tmp_path)
         "2026_08_08_ai_chat_conversation_scope",
         "2026_08_08_experience_chat_scope_field",
         "2026_08_10_ai_chat_memory_background",
+        "2026_08_12_evidence_background",
     }
+    assert evidence_field_keys == {"background", "action", "result"}
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
     assert {
         ("unit", "identity", 0, 0),
@@ -1355,11 +1407,13 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             if event.event == "proposal.requested":
                 break
         await stream.aclose()
-        proposal = next(event for event in events if event.event == "proposal.requested")
+        proposal = next(
+            event for event in events if event.event == "proposal.requested"
+        )
         proposal_id = int(proposal.data["proposal_id"])
         async with isolated_db.session() as session:
-            current_run = await RepositoryFactory().create(session).runs.current(
-                conversation_id
+            current_run = (
+                await RepositoryFactory().create(session).runs.current(conversation_id)
             )
         assert current_run is not None
         assert current_run.status == "suspended"
@@ -1379,7 +1433,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         }
         assert any(event.event == "content_change.applied" for event in continued)
         assert not any(event.event.startswith("assistant.") for event in continued)
-        graph = runner._compiled(adapter)  # noqa: SLF001
+        graph = runner._compiled(adapter)
         snapshot = await graph.aget_state(
             {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
         )
@@ -1420,9 +1474,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
                 "resolution-1",
             )
         ]
-        assert [event.event for event in replayed_resolution] == [
-            "proposal.resolved"
-        ]
+        assert [event.event for event in replayed_resolution] == ["proposal.resolved"]
         assert replayed_resolution[0].data == {
             "proposal_id": proposal_id,
             "decision": "approve",
@@ -1435,8 +1487,8 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         ]
         assert any(event.event == "assistant.completed" for event in follow_up)
         async with isolated_db.session() as session:
-            delivered_call = await RepositoryFactory().create(session).tool_calls.get(
-                proposal_id
+            delivered_call = (
+                await RepositoryFactory().create(session).tool_calls.get(proposal_id)
             )
             assert delivered_call is not None
             assert delivered_call.delivery_status == "consumed"
@@ -1666,10 +1718,8 @@ async def test_recovery_rejects_incomplete_checkpoint_approval(
     )
     try:
         proposal_id = await _request_proposal(harness, "incomplete-approval-message")
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
+        graph = harness.runner._compiled(harness.adapter)
+        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
         await graph.aupdate_state(
             config,
             {
@@ -1708,10 +1758,8 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
     )
     try:
         proposal_id = await _request_proposal(harness, "different-approval-message")
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
+        graph = harness.runner._compiled(harness.adapter)
+        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
         await graph.aupdate_state(
             config,
             {
@@ -1846,10 +1894,8 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
     )
     try:
         proposal_id = await _request_proposal(harness, "suspended-conflict-message")
-        graph = harness.runner._compiled(harness.adapter)  # noqa: SLF001
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}
-        }
+        graph = harness.runner._compiled(harness.adapter)
+        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
         snapshot = await graph.aget_state(config)
         checkpoint_call = dict(snapshot.values["tool_call"])
         await graph.aupdate_state(

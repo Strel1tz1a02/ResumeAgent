@@ -19,7 +19,7 @@ EXPERIENCE_TARGET_KEYS = (
     "tags",
     "notes",
 )
-EVIDENCE_TARGET_KEYS = ("action", "result", "metrics")
+EVIDENCE_TARGET_KEYS = ("background", "action", "result")
 
 _SAVE_UNITS: dict[str, tuple[str, ...]] = {
     "identity": ("kind", "title"),
@@ -40,8 +40,6 @@ def save_unit_fields(target_key: str) -> tuple[str, ...]:
     for fields in _SAVE_UNITS.values():
         if target_key in fields:
             return fields
-    if target_key in EVIDENCE_TARGET_KEYS:
-        return EVIDENCE_TARGET_KEYS
     return (target_key,)
 
 

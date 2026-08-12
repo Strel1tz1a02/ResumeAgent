@@ -65,13 +65,14 @@ All paths below use the existing `/api/v1` base client. An experience is person-
 ```typescript
 // Query and CRUD
 listExperiences({ q?, kind?, status?, sort? }) → { items: ExperienceRead[]; total: number }
-importExperienceText(text) → ExperienceDetail
+previewExperienceText(text) → ExperienceGlobalSave
+saveExperience(payload) → ExperienceDetail
 createExperience(payload) → ExperienceDetail
 fetchExperience(experienceId) → ExperienceDetail
 patchExperience(experienceId, { ...editableFields, expected_field_revisions }) → ExperienceDetail
 
 // Evidence and lifecycle
-createEvidence(experienceId, { action, result?, metrics? }) → ExperienceDetail
+createEvidence(experienceId, { background?, action, result? }) → ExperienceDetail
 patchEvidence(experienceId, evidenceId, payload) → ExperienceDetail
 deleteEvidence(experienceId, evidenceId) → ExperienceDetail
 reorderEvidence(experienceId, evidenceIds) → ExperienceDetail
@@ -90,9 +91,10 @@ Backend endpoints:
 
 - `GET /experiences` — accepts `q`, `kind`, `status=active|draft|ready|archived`, and `sort=updated_at_desc|created_at_desc|created_at_asc`.
 - `POST /experiences` and `PATCH /experiences/{experience_id}` — create or update editable fields. The frontend's “New experience” action posts `{}` and immediately selects the returned blank draft. PATCH uses `expected_field_revisions` for field/save-unit concurrency; a stale target returns `409` without blocking independent fields. IDs, status, timestamps, evidence references, and completeness remain server-owned.
-- `POST /experiences/import-text` with `{ "text": string }` — stores the exact nonblank text (maximum 20,000 characters) as a draft before any AI call and returns `201` with expanded detail.
+- `POST /experiences/import-text/preview` with `{ "text": string }` — uses Instructor and Pydantic to parse at most 20,000 nonblank characters into an editable `ExperienceGlobalSave`. It does not create database rows.
+- `POST /experiences/save` — atomically upserts the whole aggregate. Missing `experience_id` creates the experience; an existing ID overwrites it with revision checks. Evidence follows the same rule per item: missing `evidence_id` creates it, while an existing ID overwrites it with `expected_revision` validation.
 - `GET /experiences/{experience_id}` — returns ordered `evidence_ids`, expanded `evidence_items`, persisted completeness, and natural-language derived questions in the configured content language. Missing-dimension keys remain stable machine-readable identifiers.
-- `POST /experiences/{experience_id}/evidence`, `PATCH|DELETE /experiences/{experience_id}/evidence/{evidence_id}`, and `PUT /experiences/{experience_id}/evidence-order` — keep action/result/metrics together. Reordering must be an exact, duplicate-free permutation of the currently owned IDs. Every mutation returns refreshed expanded detail.
+- `POST /experiences/{experience_id}/evidence`, `PATCH|DELETE /experiences/{experience_id}/evidence/{evidence_id}`, and `PUT /experiences/{experience_id}/evidence-order` — keep background/action/result together. Reordering must be an exact, duplicate-free permutation of the currently owned IDs. Every mutation returns refreshed expanded detail.
 - `POST /experiences/{experience_id}/mark-ready` — requires server completeness of at least 60; otherwise returns `409` with `{ completeness, missing_dimensions }`.
 - `POST /experiences/{experience_id}/archive` — the normal delete action. `POST /restore` returns an archived item to `draft`.
 - `GET /experiences/{experience_id}/deletion-impact` — currently returns empty arrays while preserving the future shape `affected_matches: Array<{ match_id, job_title }>` plus `affected_resumes`.

@@ -8,9 +8,9 @@ export type ExperienceSort = 'updated_at_desc' | 'created_at_desc' | 'created_at
 
 export interface EvidenceItem {
   id: number;
+  background: string | null;
   action: string;
   result: string | null;
-  metrics: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,9 +71,9 @@ export interface ExperienceUpdate extends ExperienceCreate {
 }
 
 export interface EvidenceCreate {
+  background?: string | null;
   action: string;
   result?: string | null;
-  metrics?: string | null;
 }
 
 export interface EvidenceCreateRequest extends EvidenceCreate {
@@ -81,40 +81,25 @@ export interface EvidenceCreateRequest extends EvidenceCreate {
 }
 
 export interface EvidenceUpdate {
+  background?: string | null;
   action?: string | null;
   result?: string | null;
-  metrics?: string | null;
   expected_revision: number;
 }
 
 export interface ExperienceEvidenceSave {
-  evidence_id: number;
+  evidence_id?: number | null;
+  background: string | null;
   action: string;
   result: string | null;
-  metrics: string | null;
-  expected_revision: number;
+  expected_revision?: number | null;
 }
 
 export interface ExperienceGlobalSave {
+  experience_id?: number | null;
   experience: ExperienceUpdate;
   evidence_items: ExperienceEvidenceSave[];
-  new_evidence: EvidenceCreate | null;
-  expected_collection_revision: number;
-}
-
-export interface ExperienceEvidenceSave {
-  evidence_id: number;
-  action: string;
-  result: string | null;
-  metrics: string | null;
-  expected_revision: number;
-}
-
-export interface ExperienceGlobalSave {
-  experience: ExperienceUpdate;
-  evidence_items: ExperienceEvidenceSave[];
-  new_evidence: EvidenceCreate | null;
-  expected_collection_revision: number;
+  expected_collection_revision?: number | null;
 }
 
 export interface ExperienceListQuery {
@@ -208,10 +193,10 @@ export async function listExperiences(
   );
 }
 
-export async function importExperienceText(text: string): Promise<ExperienceDetail> {
-  return parseResponse<ExperienceDetail>(
-    await apiPost('/experiences/import-text', { text }),
-    'Failed to import experience text'
+export async function previewExperienceText(text: string): Promise<ExperienceGlobalSave> {
+  return parseResponse<ExperienceGlobalSave>(
+    await apiPost('/experiences/import-text/preview', { text }),
+    'Failed to parse experience text'
   );
 }
 
@@ -242,12 +227,9 @@ export async function patchExperience(
   );
 }
 
-export async function saveExperience(
-  experienceId: number,
-  payload: ExperienceGlobalSave
-): Promise<ExperienceDetail> {
+export async function saveExperience(payload: ExperienceGlobalSave): Promise<ExperienceDetail> {
   return parseResponse<ExperienceDetail>(
-    await apiPut(`${experiencePath(experienceId)}/save`, payload),
+    await apiPost('/experiences/save', payload),
     'Failed to save experience'
   );
 }

@@ -109,7 +109,7 @@ function ExperienceLibraryContent() {
   const metadataSaveRef = useRef<ExperienceGlobalSave['experience'] | null>(null);
   const evidenceSaveRef = useRef<Pick<
     ExperienceGlobalSave,
-    'evidence_items' | 'new_evidence' | 'expected_collection_revision'
+    'evidence_items' | 'expected_collection_revision'
   > | null>(null);
   const metadataValidRef = useRef(false);
   const evidenceValidRef = useRef(false);
@@ -124,10 +124,7 @@ function ExperienceLibraryContent() {
   );
   const captureEvidenceDraft = useCallback(
     (
-      value: Pick<
-        ExperienceGlobalSave,
-        'evidence_items' | 'new_evidence' | 'expected_collection_revision'
-      >,
+      value: Pick<ExperienceGlobalSave, 'evidence_items' | 'expected_collection_revision'>,
       valid: boolean
     ) => {
       evidenceSaveRef.current = value;

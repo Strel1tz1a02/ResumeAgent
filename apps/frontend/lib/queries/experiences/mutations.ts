@@ -10,10 +10,10 @@ import {
   createExperience,
   deleteEvidence,
   deleteExperiencePermanently,
-  importExperienceText,
   markExperienceReady,
   patchEvidence,
   patchExperience,
+  previewExperienceText,
   reorderEvidence,
   saveExperience,
   restoreExperience,
@@ -32,6 +32,7 @@ export const EXPERIENCE_CREATION_SCOPE = 'experience-library:creation';
 export const experienceMutationKeys = {
   all: () => ['experiences', 'mutation'] as const,
   creation: () => ['experiences', 'mutation', 'creation'] as const,
+  importPreview: () => ['experiences', 'mutation', 'creation', 'import-preview'] as const,
   item: (experienceId: number, operation: string) =>
     ['experiences', 'mutation', experienceId, operation] as const,
 };
@@ -76,13 +77,11 @@ export function useCreateExperienceMutation() {
   });
 }
 
-export function useImportExperienceMutation() {
-  const client = useQueryClient();
+export function usePreviewExperienceImportMutation() {
   return useMutation({
-    mutationKey: experienceMutationKeys.creation(),
-    mutationFn: (text: string) => importExperienceText(text),
+    mutationKey: experienceMutationKeys.importPreview(),
+    mutationFn: (text: string) => previewExperienceText(text),
     scope: { id: EXPERIENCE_CREATION_SCOPE },
-    onSuccess: (detail) => storeCreatedDetail(client, detail),
   });
 }
 
@@ -96,13 +95,23 @@ export function usePatchExperienceMutation(experienceId: number) {
   });
 }
 
-export function useSaveExperienceMutation(experienceId: number) {
+export function useSaveExperienceMutation(experienceId?: number) {
   const client = useQueryClient();
   return useMutation({
-    mutationKey: experienceMutationKeys.item(experienceId, 'save'),
-    mutationFn: (payload: ExperienceGlobalSave) => saveExperience(experienceId, payload),
-    scope: experienceMutationScope(experienceId),
-    onSuccess: (detail) => storeAuthoritativeDetail(client, detail),
+    mutationKey:
+      experienceId === undefined
+        ? experienceMutationKeys.creation()
+        : experienceMutationKeys.item(experienceId, 'save'),
+    mutationFn: (payload: ExperienceGlobalSave) =>
+      saveExperience({ ...payload, experience_id: experienceId ?? payload.experience_id ?? null }),
+    scope:
+      experienceId === undefined
+        ? { id: EXPERIENCE_CREATION_SCOPE }
+        : experienceMutationScope(experienceId),
+    onSuccess: (detail) =>
+      experienceId === undefined
+        ? storeCreatedDetail(client, detail)
+        : storeAuthoritativeDetail(client, detail),
   });
 }
 

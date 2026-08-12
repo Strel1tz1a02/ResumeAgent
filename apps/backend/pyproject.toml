@@ -15,6 +15,7 @@ dependencies = [
     "arq==0.28.0",
     "cryptography==48.0.1",
     "litellm==1.86.2",
+    "instructor==1.15.4",
     "langgraph==1.2.10",
     "langgraph-checkpoint-sqlite==3.1.0",
     "markitdown[docx]==0.1.4",

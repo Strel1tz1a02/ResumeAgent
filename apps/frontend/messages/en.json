@@ -136,9 +136,14 @@
     "import": {
       "button": "Import Text",
       "title": "Import experience",
-      "description": "Paste experience text. Only parsed structured content will be saved.",
+      "description": "Paste experience text to create an editable structured preview.",
+      "previewDescription": "Review and edit the result. Nothing is saved until you confirm.",
       "text": "Experience text",
-      "submit": "Save import",
+      "preview": "Parse and preview",
+      "back": "Edit source text",
+      "save": "Save to library",
+      "addEvidence": "Add evidence",
+      "removeEvidence": "Remove evidence",
       "cancel": "Cancel",
       "error": "Could not import this experience"
     },
@@ -165,9 +170,9 @@
     "evidence": {
       "title": "Evidence",
       "card": "Evidence item",
+      "background": "Background",
       "action": "Action",
       "result": "Result",
-      "metrics": "Metrics",
       "add": "Add evidence",
       "save": "Save evidence",
       "moveUp": "Move up",
@@ -188,7 +193,7 @@
         "background": "Background",
         "action": "Action",
         "result": "Result",
-        "metrics": "Metrics"
+        "evidence_background": "Evidence background"
       }
     },
     "ready": {

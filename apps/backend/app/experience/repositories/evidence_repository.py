@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.experience.models import EvidenceItem, ExperienceEvidence
 
-_EVIDENCE_FIELDS = frozenset({"action", "result", "metrics"})
+_EVIDENCE_FIELDS = frozenset({"background", "action", "result"})
 
 
 def _updated_at() -> str:
@@ -54,7 +54,9 @@ class EvidenceRepository:
             )
         )
 
-    async def update_fields(self, evidence_id: int, fields: dict[str, Any]) -> EvidenceItem:
+    async def update_fields(
+        self, evidence_id: int, fields: dict[str, Any]
+    ) -> EvidenceItem:
         """将已知 ORM 字段应用到证据，但不自行提交。"""
         item = await self.get(evidence_id)
         if item is None:

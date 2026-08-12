@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config_cache import get_content_language
 from app.experience.models import EvidenceItem, ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
-from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
+from app.experience.repositories.experience_repository import (
+    ExperienceRepository,
+    ordered_evidence_ids,
+)
 from app.experience.schemas.evidence_items import EvidenceCreate
 from app.experience.schemas.experiences import ExperienceDetail, ExperienceUpdate
 from app.experience.services.experience_completeness_service import (
@@ -67,8 +70,12 @@ class ExperienceAiMutationService:
         if snapshot.revision != expected_revision:
             return self._immediate("invalidated")
         try:
-            request = ExperienceUpdate.model_validate({requested_field: suggested_content})
-            proposed = request.model_dump(mode="json", exclude_unset=True)[requested_field]
+            request = ExperienceUpdate.model_validate(
+                {requested_field: suggested_content}
+            )
+            proposed = request.model_dump(mode="json", exclude_unset=True)[
+                requested_field
+            ]
             ExperienceService._validate_merged_dates(item, {requested_field: proposed})
         except (ValidationError, ValueError):
             return self._immediate("invalid_value")
@@ -104,11 +111,7 @@ class ExperienceAiMutationService:
             return self._immediate("invalid_scope")
         item = await self._experiences.get(experience_id)
         evidence = await self._evidence.get_for_experience(experience_id, evidence_id)
-        if (
-            item is None
-            or item.status == "archived"
-            or evidence is None
-        ):
+        if item is None or item.status == "archived" or evidence is None:
             return self._immediate("invalidated")
         snapshot = await self._fields.snapshot(experience_id, "action", evidence_id)
         if expected_revision is None or snapshot.revision != expected_revision:
@@ -225,8 +228,7 @@ class ExperienceAiMutationService:
         snapshot = await self._fields.snapshot(experience_id, "action", evidence_id)
         current_value = self._evidence_value(evidence)
         if item.status == "archived" or (
-            snapshot.revision != expected_revision
-            or current_value != expected_value
+            snapshot.revision != expected_revision or current_value != expected_value
         ):
             return await self._invalidated_evidence(
                 item, evidence_id, current_value, snapshot.revision, snapshot.status
@@ -336,7 +338,10 @@ class ExperienceAiMutationService:
         updated = await self._experiences.set_completeness(
             item.experience_id, guidance.completeness
         )
-        if updated.status == "ready" and guidance.completeness < READY_COMPLETENESS_THRESHOLD:
+        if (
+            updated.status == "ready"
+            and guidance.completeness < READY_COMPLETENESS_THRESHOLD
+        ):
             updated = await self._experiences.set_status(item.experience_id, "draft")
         return updated
 
@@ -374,9 +379,9 @@ class ExperienceAiMutationService:
     def _evidence_value(item: EvidenceItem) -> dict[str, Any]:
         """返回一个 EvidenceItem 可用于比较和覆盖的完整内容。"""
         return {
+            "background": item.background,
             "action": item.action,
             "result": item.result,
-            "metrics": item.metrics,
         }
 
     @staticmethod

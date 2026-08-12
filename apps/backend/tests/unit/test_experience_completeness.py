@@ -2,8 +2,10 @@
 
 from types import SimpleNamespace
 
+from app.experience.services.experience_completeness_service import (
+    calculate_completeness,
+)
 from app.prompts.templates import get_language_name
-from app.experience.services.experience_completeness_service import calculate_completeness
 
 
 def test_complete_experience_scores_100() -> None:
@@ -20,9 +22,9 @@ def test_complete_experience_scores_100() -> None:
     )
     evidence = [
         SimpleNamespace(
+            background="Needed to unify recruiting data",
             action="Built APIs",
             result="Unified sources",
-            metrics="5 sources",
         )
     ]
 
@@ -57,10 +59,13 @@ def test_placeholder_title_and_missing_facts_do_not_score() -> None:
         "background",
         "action",
         "result",
-        "metrics",
+        "evidence_background",
     ]
-    assert result.suggested_questions[0] == "What concise title best describes this experience?"
-    assert result.suggested_questions[-1].startswith("What measurable result")
+    assert (
+        result.suggested_questions[0]
+        == "What concise title best describes this experience?"
+    )
+    assert result.suggested_questions[-1].startswith("What context")
 
 
 def test_suggested_questions_use_the_configured_content_language() -> None:
@@ -81,7 +86,10 @@ def test_suggested_questions_use_the_configured_content_language() -> None:
     unknown = calculate_completeness(experience, [], language="unknown")
 
     assert chinese.suggested_questions[0] == "这段经历对应哪个组织、团队或客户？"
-    assert english.suggested_questions[0] == "Which organization, team, or client was this experience with?"
+    assert (
+        english.suggested_questions[0]
+        == "Which organization, team, or client was this experience with?"
+    )
     assert unknown.suggested_questions == chinese.suggested_questions
     assert "organization" not in chinese.suggested_questions
 
@@ -99,7 +107,9 @@ def test_every_supported_language_has_natural_guidance() -> None:
     )
 
     questions = {
-        language: calculate_completeness(experience, [], language=language).suggested_questions[0]
+        language: calculate_completeness(
+            experience, [], language=language
+        ).suggested_questions[0]
         for language in ("zh", "en")
     }
 
@@ -124,8 +134,10 @@ def test_evidence_dimensions_can_be_satisfied_by_different_rows() -> None:
         background="Improve reliability",
     )
     evidence = [
-        SimpleNamespace(action="Implemented monitoring", result=None, metrics=None),
-        SimpleNamespace(action="", result="Reduced incidents", metrics="30% fewer"),
+        SimpleNamespace(background=None, action="Implemented monitoring", result=None),
+        SimpleNamespace(
+            background="Frequent incidents", action="", result="Reduced incidents"
+        ),
     ]
 
     result = calculate_completeness(experience, evidence)

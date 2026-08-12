@@ -48,6 +48,7 @@ def _normalize_labels(value: object) -> list[str]:
             seen.add(key)
     return normalized
 
+
 # BaseModel：Pydantic 提供的模型基类，用来定义带有类型检查、数据校验和转换能力的数据结构。
 class _ExperienceWritable(BaseModel):
     """创建与局部更新共用的可编辑字段。"""
@@ -89,7 +90,9 @@ class _ExperienceWritable(BaseModel):
 class ExperienceCreate(_ExperienceWritable):
     """客户端手动创建经历时提供的字段。"""
 
-    model_config = ConfigDict(extra="forbid") # model_config：Pydantic配置的固定名称，extra="forbid"：如果输入数据包含模型中没有定义的额外字段，就直接校验失败。
+    model_config = ConfigDict(
+        extra="forbid"
+    )  # model_config：Pydantic配置的固定名称，extra="forbid"：如果输入数据包含模型中没有定义的额外字段，就直接校验失败。
 
     kind: ExperienceKind = ExperienceKind.other
     title: str = ""
@@ -106,34 +109,47 @@ class ExperienceUpdate(_ExperienceWritable):
     expected_field_revisions: dict[str, int] = Field(default_factory=dict)
 
 
-class ExperienceEvidenceSave(BaseModel):
-    """全局保存中一个完整 Evidence 保存单元。"""
+class ExperienceEvidenceSave(EvidenceCreate):
+    """全局保存中的 Evidence；有 ID 更新，无 ID 创建。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    evidence_id: int = Field(gt=0)
-    action: str = Field(min_length=1)
-    result: str | None = None
-    metrics: str | None = None
-    expected_revision: int = Field(ge=0)
+    evidence_id: int | None = Field(default=None, gt=0)
+    expected_revision: int | None = Field(default=None, ge=0)
 
-    @field_validator("action")
-    @classmethod
-    def _action_must_not_be_blank(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("evidence action must not be blank")
-        return value
+    @model_validator(mode="after")
+    def _existing_evidence_requires_revision(self) -> "ExperienceEvidenceSave":
+        if (self.evidence_id is None) != (self.expected_revision is None):
+            raise ValueError(
+                "existing evidence requires both evidence_id and expected_revision"
+            )
+        return self
 
 
 class ExperienceGlobalSave(BaseModel):
-    """一次性保存经历主字段、全部 Evidence 草稿和一个待追加项。"""
+    """聚合保存：有 experience_id 覆盖，无 experience_id 创建。"""
 
     model_config = ConfigDict(extra="forbid")
 
+    experience_id: int | None = Field(default=None, gt=0)
     experience: ExperienceUpdate
     evidence_items: list[ExperienceEvidenceSave] = Field(default_factory=list)
-    new_evidence: EvidenceCreate | None = None
-    expected_collection_revision: int = Field(ge=0)
+    expected_collection_revision: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_create_or_update_contract(self) -> "ExperienceGlobalSave":
+        if self.experience_id is None:
+            if self.expected_collection_revision is not None:
+                raise ValueError(
+                    "new experience must not provide a collection revision"
+                )
+            if self.experience.expected_field_revisions:
+                raise ValueError("new experience must not provide field revisions")
+            if any(item.evidence_id is not None for item in self.evidence_items):
+                raise ValueError("new experience cannot reference existing evidence")
+        elif self.expected_collection_revision is None:
+            raise ValueError("existing experience requires a collection revision")
+        return self
 
 
 class ExperienceRead(BaseModel):
@@ -186,7 +202,9 @@ class ExperienceListQuery(BaseModel):
     q: str | None = None
     kind: ExperienceKind | None = None
     status: Literal["active", "draft", "ready", "archived"] = "active"
-    sort: Literal["updated_at_desc", "created_at_desc", "created_at_asc"] = "updated_at_desc"
+    sort: Literal["updated_at_desc", "created_at_desc", "created_at_asc"] = (
+        "updated_at_desc"
+    )
 
 
 class ExperienceListResponse(BaseModel):

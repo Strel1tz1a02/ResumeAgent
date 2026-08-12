@@ -13,22 +13,22 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models import Base
 from app.experience.models.common import utcnow_iso
+from app.models import Base
 
 if TYPE_CHECKING:
     from app.experience.models.experience import ExperienceItem
 
 
 class EvidenceItem(Base):
-    """一条由经历引用的有序行动、结果和指标事实。"""
+    """一条由经历引用的有序背景、行动和结果事实。"""
 
     __tablename__ = "evidence_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    background: Mapped[str | None] = mapped_column(Text, nullable=True)
     action: Mapped[str] = mapped_column(Text)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String, default=utcnow_iso)
 
@@ -56,7 +56,5 @@ class ExperienceEvidence(Base):
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    experience: Mapped["ExperienceItem"] = relationship(
-        back_populates="evidence_links"
-    )
+    experience: Mapped["ExperienceItem"] = relationship(back_populates="evidence_links")
     evidence: Mapped[EvidenceItem] = relationship(lazy="joined")

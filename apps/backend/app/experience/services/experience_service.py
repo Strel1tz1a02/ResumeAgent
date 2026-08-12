@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config_cache import get_content_language
 from app.experience.models import ExperienceItem
 from app.experience.repositories.evidence_repository import EvidenceRepository
-from app.experience.repositories.experience_repository import ExperienceRepository, ordered_evidence_ids
+from app.experience.repositories.experience_repository import (
+    ExperienceRepository,
+    ordered_evidence_ids,
+)
 from app.experience.schemas.evidence_items import EvidenceRead
 from app.experience.schemas.experiences import (
     DeletionImpactResponse,
@@ -110,12 +113,16 @@ class ExperienceService:
             total=len(rows),
         )
 
-    async def patch(self, experience_id: int, request: ExperienceUpdate) -> ExperienceDetail:
+    async def patch(
+        self, experience_id: int, request: ExperienceUpdate
+    ) -> ExperienceDetail:
         """更新可编辑字段，同时校验合并状态并刷新完整度。"""
         fields = request.model_dump(exclude_unset=True)
         expected_field_revisions = fields.pop("expected_field_revisions", {})
         if "kind" in fields and fields["kind"] is not None:
-            fields["kind"] = request.kind.value # model_dump()：默认使用 Python 模式，会保留 Enum 对象
+            fields["kind"] = (
+                request.kind.value
+            )  # model_dump()：默认使用 Python 模式，会保留 Enum 对象
 
         try:
             existing = await self._get_or_raise(experience_id)
@@ -127,7 +134,9 @@ class ExperienceService:
             await self._fields.claim_experience_units(
                 experience_id, expected_field_revisions, changed_keys
             )
-            updated = await self._experienceRepository.update_fields(experience_id, fields)
+            updated = await self._experienceRepository.update_fields(
+                experience_id, fields
+            )
             if changed_keys:
                 await self._fields.advance_experience_fields(updated, changed_keys)
             await self._recalculate_completeness(updated)
@@ -162,7 +171,9 @@ class ExperienceService:
                 raise ExperienceReadyConflictError(
                     guidance.completeness, guidance.missing_dimensions
                 )
-            updated = await self._experienceRepository.set_status(experience_id, "ready")
+            updated = await self._experienceRepository.set_status(
+                experience_id, "ready"
+            )
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
@@ -188,7 +199,9 @@ class ExperienceService:
                 raise ExperienceConflictError(
                     f"Experience {experience_id} must be archived before it can be restored"
                 )
-            updated = await self._experienceRepository.set_status(item.experience_id, "draft")
+            updated = await self._experienceRepository.set_status(
+                item.experience_id, "draft"
+            )
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
@@ -218,7 +231,9 @@ class ExperienceService:
             owned_evidence_ids = ordered_evidence_ids(item)
             deleted = await self._experienceRepository.delete(experience_id)
             if not deleted:
-                raise ExperienceNotFoundError(f"Experience {experience_id} was not found")
+                raise ExperienceNotFoundError(
+                    f"Experience {experience_id} was not found"
+                )
             for evidence_id in owned_evidence_ids:
                 await self._evidenceRepository.delete(evidence_id)
             await self._session.commit()
@@ -240,7 +255,9 @@ class ExperienceService:
         """串行执行生命周期写入，避免陈旧操作静默覆盖其他操作。"""
         try:
             await self._get_or_raise(experience_id)
-            updated = await self._experienceRepository.set_status(experience_id, target_status)
+            updated = await self._experienceRepository.set_status(
+                experience_id, target_status
+            )
             detail = await self._detail(updated)
             await self._session.commit()
             return detail
@@ -267,8 +284,13 @@ class ExperienceService:
         result = calculate_completeness(
             item, evidence_items, language=get_content_language()
         )
-        updated = await self._experienceRepository.set_completeness(item.experience_id, result.completeness)
-        if updated.status == "ready" and result.completeness < READY_COMPLETENESS_THRESHOLD:
+        updated = await self._experienceRepository.set_completeness(
+            item.experience_id, result.completeness
+        )
+        if (
+            updated.status == "ready"
+            and result.completeness < READY_COMPLETENESS_THRESHOLD
+        ):
             await self._experienceRepository.set_status(item.experience_id, "draft")
 
     async def _detail(self, item: ExperienceItem) -> ExperienceDetail:
@@ -286,7 +308,9 @@ class ExperienceService:
             )
         return ExperienceDetail(
             **self._read(item).model_dump(),
-            evidence_items=[self._evidence_read(evidence) for evidence in evidence_items],
+            evidence_items=[
+                self._evidence_read(evidence) for evidence in evidence_items
+            ],
             missing_dimensions=guidance.missing_dimensions,
             suggested_questions=guidance.suggested_questions,
             field_states=state_payloads,
@@ -311,13 +335,17 @@ class ExperienceService:
         is_current = fields.get("is_current", item.is_current)
         end_date = fields.get("end_date", item.end_date)
         if is_current and end_date is not None:
-            raise ExperienceValidationError("current experiences cannot have an end_date")
+            raise ExperienceValidationError(
+                "current experiences cannot have an end_date"
+            )
 
     @staticmethod
     def _reject_null_non_nullable_fields(fields: dict[str, Any]) -> None:
         "校验必填字段有没有给null"
         null_fields = sorted(
-            name for name in _NON_NULLABLE_UPDATE_FIELDS if name in fields and fields[name] is None
+            name
+            for name in _NON_NULLABLE_UPDATE_FIELDS
+            if name in fields and fields[name] is None
         )
         if null_fields:
             raise ExperienceValidationError(
@@ -352,9 +380,9 @@ class ExperienceService:
     def _evidence_read(item: Any) -> EvidenceRead:
         return EvidenceRead(
             id=item.id,
+            background=item.background,
             action=item.action,
             result=item.result,
-            metrics=item.metrics,
             created_at=item.created_at,
             updated_at=item.updated_at,
         )

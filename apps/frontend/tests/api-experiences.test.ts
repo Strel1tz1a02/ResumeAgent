@@ -7,11 +7,11 @@ import {
   deleteExperiencePermanently,
   fetchExperience,
   getDeletionImpact,
-  importExperienceText,
   listExperiences,
   markExperienceReady,
   patchEvidence,
   patchExperience,
+  previewExperienceText,
   saveExperience,
   restoreExperience,
   reorderEvidence,
@@ -104,31 +104,44 @@ describe('experience API client', () => {
     ).toEqual([true, true, true]);
   });
 
-  it('imports exact raw text through the central API path', async () => {
-    await expect(importExperienceText('Built an agent')).resolves.toEqual(experience);
+  it('previews text and saves the edited draft through the global save path', async () => {
+    const draft = {
+      experience: { kind: 'project' as const, title: 'Agent platform' },
+      evidence_items: [{ action: 'Built an agent' }],
+    };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(draft), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(experience), { status: 201 }));
 
-    const [url, options] = latestCall();
-    expect(url).toBe('/api/v1/experiences/import-text');
+    await expect(previewExperienceText('Built an agent')).resolves.toEqual(draft);
+    let [url, options] = latestCall();
+    expect(url).toBe('/api/v1/experiences/import-text/preview');
     expect(options.method).toBe('POST');
     expect(options.body).toBe(JSON.stringify({ text: 'Built an agent' }));
+
+    await expect(saveExperience(draft)).resolves.toEqual(experience);
+    [url, options] = latestCall();
+    expect(url).toBe('/api/v1/experiences/save');
+    expect(options.method).toBe('POST');
+    expect(options.body).toBe(JSON.stringify(draft));
   });
 
   it('uses typed CRUD and evidence request bodies', async () => {
     await createExperience({ kind: 'work', title: 'Developer', background: 'Worked' });
     await patchExperience(7, { title: 'Staff Developer' });
-    await saveExperience(7, {
+    await saveExperience({
+      experience_id: 7,
       experience: { title: 'Staff Developer', expected_field_revisions: { title: 2 } },
       evidence_items: [],
-      new_evidence: null,
       expected_collection_revision: 1,
     });
     await createEvidence(7, {
+      background: 'Needed an API',
       action: 'Built API',
-      result: 'Launched',
-      metrics: '20%',
+      result: 'Launched 20% faster',
       expected_collection_revision: 1,
     });
-    await patchEvidence(7, 3, { metrics: '30%', expected_revision: 2 });
+    await patchEvidence(7, 3, { background: 'Needed a faster API', expected_revision: 2 });
     await reorderEvidence(7, [3, 4], 3);
     await deleteEvidence(7, 3, 2, 4);
 
@@ -149,12 +162,12 @@ describe('experience API client', () => {
         body: JSON.stringify({ title: 'Staff Developer' }),
       },
       {
-        url: '/api/v1/experiences/7/save',
-        method: 'PUT',
+        url: '/api/v1/experiences/save',
+        method: 'POST',
         body: JSON.stringify({
+          experience_id: 7,
           experience: { title: 'Staff Developer', expected_field_revisions: { title: 2 } },
           evidence_items: [],
-          new_evidence: null,
           expected_collection_revision: 1,
         }),
       },
@@ -162,16 +175,16 @@ describe('experience API client', () => {
         url: '/api/v1/experiences/7/evidence',
         method: 'POST',
         body: JSON.stringify({
+          background: 'Needed an API',
           action: 'Built API',
-          result: 'Launched',
-          metrics: '20%',
+          result: 'Launched 20% faster',
           expected_collection_revision: 1,
         }),
       },
       {
         url: '/api/v1/experiences/7/evidence/3',
         method: 'PATCH',
-        body: JSON.stringify({ metrics: '30%', expected_revision: 2 }),
+        body: JSON.stringify({ background: 'Needed a faster API', expected_revision: 2 }),
       },
       {
         url: '/api/v1/experiences/7/evidence-order',
@@ -220,6 +233,6 @@ describe('experience API client', () => {
       new Response(JSON.stringify({ detail: [{ msg: 'text must not be blank' }] }), { status: 422 })
     );
 
-    await expect(importExperienceText('')).rejects.toThrow('text must not be blank');
+    await expect(previewExperienceText('')).rejects.toThrow('text must not be blank');
   });
 });

@@ -29,9 +29,7 @@ class _ChunkRouter:
         async def chunks():  # type: ignore[no-untyped-def]
             for content in self._contents:
                 yield {
-                    "choices": [
-                        {"delta": {"content": content}, "finish_reason": None}
-                    ]
+                    "choices": [{"delta": {"content": content}, "finish_reason": None}]
                 }
             yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
@@ -83,9 +81,7 @@ async def test_runtime_exposes_only_service_handlers_to_model(isolated_db) -> No
         model,
         tools,
         _PassthroughMemoryService(),  # type: ignore[arg-type]
-    ).bind_tools(
-        ExperienceAdapter().get_tool_handlers()
-    )
+    ).bind_tools(ExperienceAdapter().get_tool_handlers())
 
     _ = [
         event
@@ -158,14 +154,16 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
         '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="content_change">'
         '<｜｜DSML｜｜parameter name="scope" string="false">'
         '{"field":"technologies","evidence_id":null}'
-        '</｜｜DSML｜｜parameter>'
+        "</｜｜DSML｜｜parameter>"
         '<｜｜DSML｜｜parameter name="suggested_content" string="false">'
         '["Python","FastAPI"]'
-        '</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>'
+        "</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>"
     )
     router = _ChunkRouter([dsml[:19], dsml[19:77], dsml[77:]])
     config = SimpleNamespace(provider="deepseek", reasoning_effort=None)
-    monkeypatch.setattr("app.ai_chat.streaming.model.get_router", lambda: (router, config))
+    monkeypatch.setattr(
+        "app.ai_chat.streaming.model.get_router", lambda: (router, config)
+    )
 
     events = [
         event
@@ -195,9 +193,9 @@ def test_content_change_schema_uses_explicit_field_and_evidence_id() -> None:
         {
             "scope": {"field": "evidence", "evidence_id": 7},
             "suggested_content": {
+                "background": None,
                 "action": "优化召回链路",
                 "result": "相关度提升",
-                "metrics": None,
             },
         }
     )

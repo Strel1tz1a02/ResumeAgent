@@ -11,8 +11,8 @@ import {
   useCreateEvidenceMutation,
   useCreateExperienceMutation,
   useExperienceCreationPending,
-  useImportExperienceMutation,
   usePatchExperienceMutation,
+  useSaveExperienceMutation,
 } from '@/lib/queries/experiences/mutations';
 
 const api = vi.hoisted(() => ({
@@ -20,7 +20,7 @@ const api = vi.hoisted(() => ({
   patchExperience: vi.fn(),
   createEvidence: vi.fn(),
   createExperience: vi.fn(),
-  importExperienceText: vi.fn(),
+  saveExperience: vi.fn(),
 }));
 
 vi.mock('@/lib/api/experiences', async (importOriginal) => ({
@@ -29,7 +29,7 @@ vi.mock('@/lib/api/experiences', async (importOriginal) => ({
   patchExperience: api.patchExperience,
   createEvidence: api.createEvidence,
   createExperience: api.createExperience,
-  importExperienceText: api.importExperienceText,
+  saveExperience: api.saveExperience,
 }));
 
 const detail = (overrides: Partial<ExperienceDetail> = {}): ExperienceDetail => ({
@@ -325,14 +325,18 @@ describe('experience query cache', () => {
   it('shares one creation queue and pending state between manual create and text import', async () => {
     const manual = deferred<ExperienceDetail>();
     api.createExperience.mockReturnValue(manual.promise);
-    api.importExperienceText.mockResolvedValue(
+    api.saveExperience.mockResolvedValue(
       detail({ experience_id: 2, title: 'Imported', background: 'Imported text' })
     );
+    const importDraft = {
+      experience: { title: 'Imported', background: 'Imported text' },
+      evidence_items: [],
+    };
     const { wrapper } = queryWrapper();
     const { result } = renderHook(
       () => ({
         create: useCreateExperienceMutation(),
-        importText: useImportExperienceMutation(),
+        importText: useSaveExperienceMutation(),
         creationPending: useExperienceCreationPending(),
       }),
       { wrapper }
@@ -340,12 +344,17 @@ describe('experience query cache', () => {
 
     act(() => {
       result.current.create.mutate({});
-      result.current.importText.mutate('Imported text');
+      result.current.importText.mutate(importDraft);
     });
 
     await waitFor(() => expect(result.current.creationPending).toBe(true));
-    expect(api.importExperienceText).not.toHaveBeenCalled();
+    expect(api.saveExperience).not.toHaveBeenCalled();
     manual.resolve(detail());
-    await waitFor(() => expect(api.importExperienceText).toHaveBeenCalledWith('Imported text'));
+    await waitFor(() =>
+      expect(api.saveExperience).toHaveBeenCalledWith({
+        ...importDraft,
+        experience_id: null,
+      })
+    );
   });
 });

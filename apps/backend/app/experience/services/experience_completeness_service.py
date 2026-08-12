@@ -1,8 +1,8 @@
 """经历库记录的纯函数、确定性完整度评分。"""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
-
+from typing import Protocol
 
 READY_COMPLETENESS_THRESHOLD = 60
 
@@ -13,7 +13,7 @@ DATES_POINTS = 10
 BACKGROUND_POINTS = 15
 ACTION_POINTS = 20
 RESULT_POINTS = 15
-METRICS_POINTS = 10
+EVIDENCE_BACKGROUND_POINTS = 10
 
 _PLACEHOLDER_TITLES = {"", "untitled experience"}
 
@@ -26,7 +26,7 @@ _QUESTIONS: dict[str, dict[str, str]] = {
         "background": "What problem, context, or goal did this work address?",
         "action": "What specifically did you do?",
         "result": "What outcome resulted from your work?",
-        "metrics": "What measurable result can you confirm, such as a percentage, count, time, cost, or scale?",
+        "evidence_background": "What context, problem, or goal led to this specific action?",
     },
     "zh": {
         "identity": "哪一个简洁标题最能概括这段经历？",
@@ -36,7 +36,7 @@ _QUESTIONS: dict[str, dict[str, str]] = {
         "background": "这项工作要解决什么问题，背景或目标是什么？",
         "action": "你具体采取了哪些行动？",
         "result": "你的行动产生了什么结果？",
-        "metrics": "可以用比例、数量、时间、成本或规模确认哪些量化结果？",
+        "evidence_background": "这项具体行动对应什么背景、问题或目标？",
     },
 }
 
@@ -57,9 +57,9 @@ class ExperienceLike(Protocol):
 class EvidenceLike(Protocol):
     """完整度评分使用的证据字段。"""
 
+    background: str | None
     action: str
     result: str | None
-    metrics: str | None
 
 
 @dataclass(frozen=True)
@@ -101,9 +101,21 @@ def calculate_completeness(
             and (_has_text(experience.end_date) or experience.is_current),
         ),
         ("background", BACKGROUND_POINTS, _has_text(experience.background)),
-        ("action", ACTION_POINTS, any(_has_text(item.action) for item in evidence_items)),
-        ("result", RESULT_POINTS, any(_has_text(item.result) for item in evidence_items)),
-        ("metrics", METRICS_POINTS, any(_has_text(item.metrics) for item in evidence_items)),
+        (
+            "action",
+            ACTION_POINTS,
+            any(_has_text(item.action) for item in evidence_items),
+        ),
+        (
+            "result",
+            RESULT_POINTS,
+            any(_has_text(item.result) for item in evidence_items),
+        ),
+        (
+            "evidence_background",
+            EVIDENCE_BACKGROUND_POINTS,
+            any(_has_text(item.background) for item in evidence_items),
+        ),
     )
     missing_dimensions = [name for name, _, satisfied in dimensions if not satisfied]
     completeness = sum(points for _, points, satisfied in dimensions if satisfied)

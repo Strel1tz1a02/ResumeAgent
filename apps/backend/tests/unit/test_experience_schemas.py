@@ -1,20 +1,24 @@
 """Boundary-contract tests for experience-library schemas and ORM metadata."""
 
 import pytest
-from pydantic import ValidationError
-
-from app.experience.schemas.evidence_items import EvidenceCreate, EvidenceReorder, EvidenceUpdate
+from app.experience.schemas.evidence_items import (
+    EvidenceCreate,
+    EvidenceReorder,
+    EvidenceUpdate,
+)
 from app.experience.schemas.experiences import (
     DeletionImpactResponse,
     ExperienceCompleteness,
     ExperienceCreate,
     ExperienceDetail,
+    ExperienceGlobalSave,
     ExperienceKind,
     ExperienceRead,
     ExperienceStatus,
     ExperienceUpdate,
     ReadyConflictResponse,
 )
+from pydantic import ValidationError
 
 
 def test_experience_kind_and_status_accept_only_stable_values() -> None:
@@ -95,6 +99,54 @@ def test_evidence_reorder_rejects_duplicate_identifiers() -> None:
         EvidenceReorder(evidence_ids=[7, 7])
 
 
+def test_global_save_uses_ids_to_distinguish_create_from_overwrite() -> None:
+    created = ExperienceGlobalSave.model_validate(
+        {
+            "experience": {"title": "New"},
+            "evidence_items": [{"action": "First"}, {"action": "Second"}],
+        }
+    )
+    updated = ExperienceGlobalSave.model_validate(
+        {
+            "experience_id": 7,
+            "experience": {
+                "title": "Updated",
+                "expected_field_revisions": {"title": 2},
+            },
+            "evidence_items": [
+                {"evidence_id": 3, "action": "Changed", "expected_revision": 4},
+                {"action": "Appended"},
+            ],
+            "expected_collection_revision": 5,
+        }
+    )
+
+    assert created.experience_id is None
+    assert [item.evidence_id for item in created.evidence_items] == [None, None]
+    assert updated.experience_id == 7
+    assert [item.evidence_id for item in updated.evidence_items] == [3, None]
+
+
+def test_global_save_rejects_incomplete_revision_pairs() -> None:
+    with pytest.raises(ValidationError):
+        ExperienceGlobalSave.model_validate(
+            {
+                "experience_id": 7,
+                "experience": {"title": "Updated"},
+                "evidence_items": [],
+            }
+        )
+    with pytest.raises(ValidationError):
+        ExperienceGlobalSave.model_validate(
+            {
+                "experience_id": 7,
+                "experience": {"title": "Updated"},
+                "evidence_items": [{"evidence_id": 3, "action": "Changed"}],
+                "expected_collection_revision": 1,
+            }
+        )
+
+
 def test_detail_and_conflict_responses_expose_derived_aggregates() -> None:
     """Omitting derived fields would leave clients unable to render authoritative guidance."""
     record = ExperienceRead(
@@ -117,17 +169,22 @@ def test_detail_and_conflict_responses_expose_derived_aggregates() -> None:
                 "updated_at": "2026-07-01T00:00:00+00:00",
             }
         ],
-        missing_dimensions=["metrics"],
-        suggested_questions=["metrics"],
+        missing_dimensions=["evidence_background"],
+        suggested_questions=["evidence background"],
     )
 
     assert detail.evidence_items[0].action == "Built API"
     assert ExperienceCompleteness(
         completeness=65,
-        missing_dimensions=["metrics"],
-        suggested_questions=["metrics"],
-    ).missing_dimensions == ["metrics"]
-    assert ReadyConflictResponse(completeness=65, missing_dimensions=["metrics"]).completeness == 65
+        missing_dimensions=["evidence_background"],
+        suggested_questions=["evidence background"],
+    ).missing_dimensions == ["evidence_background"]
+    assert (
+        ReadyConflictResponse(
+            completeness=65, missing_dimensions=["evidence_background"]
+        ).completeness
+        == 65
+    )
     assert DeletionImpactResponse().affected_matches == []
 
 

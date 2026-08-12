@@ -136,9 +136,14 @@
     "import": {
       "button": "文本导入",
       "title": "导入经历",
-      "description": "粘贴经历文本，系统解析后只保存结构化内容。",
+      "description": "粘贴经历文本，系统会先解析为可编辑的结构化预览。",
+      "previewDescription": "检查并修改解析结果；只有点击保存后才会写入经历库。",
       "text": "经历文本",
-      "submit": "保存导入",
+      "preview": "解析并预览",
+      "back": "返回修改原文",
+      "save": "保存到经历库",
+      "addEvidence": "添加证据",
+      "removeEvidence": "删除证据",
       "cancel": "取消",
       "error": "无法导入此经历"
     },
@@ -165,9 +170,9 @@
     "evidence": {
       "title": "证据",
       "card": "证据项目",
+      "background": "背景",
       "action": "行动",
       "result": "结果",
-      "metrics": "指标",
       "add": "添加证据",
       "save": "保存证据",
       "moveUp": "上移",
@@ -188,7 +193,7 @@
         "background": "背景",
         "action": "行动",
         "result": "结果",
-        "metrics": "量化指标"
+        "evidence_background": "证据背景"
       }
     },
     "ready": {

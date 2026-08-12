@@ -7,12 +7,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai_chat.errors import ToolProtocolError
+from app.ai_chat.tools.handler import ToolHandler
+from app.ai_chat.tools.security import ToolSecurity
 from app.ai_chat.tools.types import (
     ToolContext,
     ToolResult,
 )
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import ToolSecurity
 from app.ai_chat.types import JsonObject
 from app.experience.adapters.tool_context import (
     evidence_generation_revision,
@@ -55,9 +55,9 @@ class EvidenceContent(BaseModel):
     # 不允许出现参数模式未定义的额外字段。
     model_config = ConfigDict(extra="forbid")
 
+    background: str | None
     action: str
     result: str | None
-    metrics: str | None
 
 
 class ContentChangeArguments(BaseModel):
@@ -78,7 +78,7 @@ class ContentChangeHandler(ToolHandler):
         "当前会话目标已经形成有事实依据、可直接保存的明确内容时，申请修改该内容。"
         "普通经历字段的 scope.field 必须等于会话范围且 evidence_id 为空。"
         "Evidence 会话中 scope.field 必须为 evidence：修改已有 EvidenceItem 时必须提交其 evidence_id，"
-        "suggested_content 必须包含该 Item 完整的 action、result、metrics；创建时 evidence_id 为空，"
+        "suggested_content 必须包含该 Item 完整的 background、action、result；创建时 evidence_id 为空，"
         "新 Item 会追加到列表末尾。一次只能修改或创建一个 EvidenceItem，其他 Item 不会变化。"
         "事实不明确时继续询问；每轮最多调用一次；不要在正文中重复建议内容。"
     )
@@ -93,7 +93,9 @@ class ContentChangeHandler(ToolHandler):
         try:
             values = ContentChangeArguments.model_validate(arguments)
         except ValidationError as exc:
-            raise ToolProtocolError("Invalid arguments for tool content_change") from exc
+            raise ToolProtocolError(
+                "Invalid arguments for tool content_change"
+            ) from exc
         session = context.session
         if session is None:
             raise RuntimeError("tool validation requires a shared transaction")

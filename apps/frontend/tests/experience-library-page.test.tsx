@@ -5,7 +5,7 @@ import type { ExperienceDetail, ExperienceRead } from '@/lib/api/experiences';
 const api = vi.hoisted(() => ({
   listExperiences: vi.fn(),
   fetchExperience: vi.fn(),
-  importExperienceText: vi.fn(),
+  previewExperienceText: vi.fn(),
   createExperience: vi.fn(),
   patchExperience: vi.fn(),
   saveExperience: vi.fn(),
@@ -47,7 +47,12 @@ const translate = vi.hoisted(
       'experiences.import.title': 'Import experience',
       'experiences.import.description': 'Paste your experience notes.',
       'experiences.import.text': 'Experience text',
-      'experiences.import.submit': 'Save import',
+      'experiences.import.previewDescription': 'Review parsed content.',
+      'experiences.import.preview': 'Parse and preview',
+      'experiences.import.back': 'Edit source text',
+      'experiences.import.save': 'Save to library',
+      'experiences.import.addEvidence': 'Add evidence',
+      'experiences.import.removeEvidence': 'Remove evidence',
       'experiences.import.cancel': 'Cancel',
       'experiences.loading': 'Loading experiences',
       'experiences.empty': 'No experiences',
@@ -64,15 +69,15 @@ const translate = vi.hoisted(
       'experiences.editor.save': 'Save experience',
       'experiences.editor.saveField': 'Save field',
       'experiences.completeness.score': '72% complete',
-      'experiences.completeness.dimension.metrics': 'metrics',
+      'experiences.completeness.dimension.evidence_background': 'evidence background',
       'experiences.active': 'Active',
       'experiences.archive': 'Recycle bin',
       'experiences.lifecycle.archive': 'Archive experience',
       'experiences.lifecycle.restore': 'Restore experience',
       'experiences.lifecycle.permanent': 'Delete permanently',
+      'experiences.evidence.background': 'Background',
       'experiences.evidence.action': 'Action',
       'experiences.evidence.result': 'Result',
-      'experiences.evidence.metrics': 'Metrics',
       'experiences.evidence.add': 'Add evidence',
       'experiences.evidence.save': 'Save evidence',
       'experiences.evidence.moveUp': 'Move evidence up',
@@ -152,6 +157,24 @@ const imported: ExperienceDetail = {
   suggested_questions: ['What changed?'],
 };
 
+const importedDraft = {
+  experience: {
+    kind: imported.kind,
+    title: imported.title,
+    organization: imported.organization,
+    role: imported.role,
+    location: imported.location,
+    start_date: imported.start_date,
+    end_date: imported.end_date,
+    is_current: imported.is_current,
+    background: imported.background,
+    technologies: imported.technologies,
+    tags: imported.tags,
+    notes: imported.notes,
+  },
+  evidence_items: [],
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -173,8 +196,8 @@ describe('ExperienceLibraryPage', () => {
       suggested_questions: ['What changed?'],
     });
     api.saveExperience.mockImplementation(
-      (experienceId: number, payload: { experience: Record<string, unknown> }) =>
-        api.patchExperience(experienceId, payload.experience)
+      (payload: { experience_id?: number; experience: Record<string, unknown> }) =>
+        api.patchExperience(payload.experience_id, payload.experience)
     );
     chatApi.createExperienceConversation.mockResolvedValue({
       conversation_id: 12,
@@ -238,17 +261,17 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 7,
+          background: null,
           action: 'First action',
           result: 'First result',
-          metrics: null,
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-01T00:00:00Z',
         },
         {
           id: 8,
+          background: null,
           action: 'Second action',
           result: 'Second result',
-          metrics: null,
           created_at: '2025-01-02T00:00:00Z',
           updated_at: '2025-01-02T00:00:00Z',
         },
@@ -256,12 +279,12 @@ describe('ExperienceLibraryPage', () => {
       missing_dimensions: [],
       suggested_questions: [],
       field_states: [
+        { key: 'background', ref_id: 7, status: 'incomplete', revision: 1 },
         { key: 'action', ref_id: 7, status: 'complete', revision: 1 },
         { key: 'result', ref_id: 7, status: 'complete', revision: 1 },
-        { key: 'metrics', ref_id: 7, status: 'incomplete', revision: 1 },
+        { key: 'background', ref_id: 8, status: 'incomplete', revision: 2 },
         { key: 'action', ref_id: 8, status: 'complete', revision: 2 },
         { key: 'result', ref_id: 8, status: 'complete', revision: 2 },
-        { key: 'metrics', ref_id: 8, status: 'incomplete', revision: 2 },
         { key: 'evidence_new', ref_id: null, status: 'complete', revision: 2 },
       ],
     };
@@ -436,14 +459,17 @@ describe('ExperienceLibraryPage', () => {
   it('keeps an imported draft when an older initial list request resolves later', async () => {
     const initialList = deferred<{ items: ExperienceRead[]; total: number }>();
     api.listExperiences.mockReturnValueOnce(initialList.promise);
-    api.importExperienceText.mockResolvedValue(imported);
+    api.previewExperienceText.mockResolvedValue(importedDraft);
+    api.saveExperience.mockResolvedValue(imported);
     render(<ExperienceLibraryPage />);
 
     fireEvent.click(screen.getByRole('button', { name: 'Import Text' }));
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Parse and preview' }));
+    await screen.findByDisplayValue('Imported experience');
+    fireEvent.click(screen.getByRole('button', { name: 'Save to library' }));
     await screen.findByRole('heading', { name: 'Imported experience' });
 
     initialList.resolve({ items: [listItem], total: 1 });
@@ -470,7 +496,8 @@ describe('ExperienceLibraryPage', () => {
   });
 
   it('clears incompatible filters and opens the imported draft detail pane', async () => {
-    api.importExperienceText.mockResolvedValue(imported);
+    api.previewExperienceText.mockResolvedValue(importedDraft);
+    api.saveExperience.mockResolvedValue(imported);
     render(<ExperienceLibraryPage />);
     await screen.findByRole('button', { name: /Searchable project/ });
     fireEvent.change(screen.getByRole('textbox', { name: 'Search experiences' }), {
@@ -481,7 +508,9 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Parse and preview' }));
+    await screen.findByDisplayValue('Imported experience');
+    fireEvent.click(screen.getByRole('button', { name: 'Save to library' }));
 
     expect(await screen.findByRole('heading', { name: 'Imported experience' })).toBeInTheDocument();
     expect(screen.getByTestId('experience-detail-pane')).toHaveClass('block');
@@ -527,8 +556,9 @@ describe('ExperienceLibraryPage', () => {
     expect(importButton).toHaveFocus();
   });
 
-  it('persists exact pasted text, selects the returned draft, and does not start questions', async () => {
-    api.importExperienceText.mockResolvedValue(imported);
+  it('previews without saving and forwards user edits only after confirmation', async () => {
+    api.previewExperienceText.mockResolvedValue(importedDraft);
+    api.saveExperience.mockResolvedValue(imported);
     render(<ExperienceLibraryPage />);
     await screen.findByRole('button', { name: /Searchable project/ });
 
@@ -536,10 +566,19 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Parse and preview' }));
+    const title = await screen.findByDisplayValue('Imported experience');
+    expect(api.saveExperience).not.toHaveBeenCalled();
+    fireEvent.change(title, { target: { value: 'Reviewed import' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save to library' }));
 
     await waitFor(() => {
-      expect(api.importExperienceText).toHaveBeenCalledWith('Exactly this valid text');
+      expect(api.previewExperienceText).toHaveBeenCalledWith('Exactly this valid text');
+      expect(api.saveExperience).toHaveBeenCalledWith({
+        ...importedDraft,
+        experience: { ...importedDraft.experience, title: 'Reviewed import' },
+        experience_id: null,
+      });
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getAllByText('Imported experience')).toHaveLength(2);
@@ -547,7 +586,8 @@ describe('ExperienceLibraryPage', () => {
   });
 
   it('keeps the persisted import selected when a later reload fails', async () => {
-    api.importExperienceText.mockResolvedValue(imported);
+    api.previewExperienceText.mockResolvedValue(importedDraft);
+    api.saveExperience.mockResolvedValue(imported);
     api.listExperiences
       .mockResolvedValueOnce({ items: [listItem], total: 1 })
       .mockRejectedValueOnce(new Error('offline'));
@@ -558,7 +598,9 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.change(screen.getByRole('textbox', { name: 'Experience text' }), {
       target: { value: 'Exactly this valid text' },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Save import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Parse and preview' }));
+    await screen.findByDisplayValue('Imported experience');
+    fireEvent.click(screen.getByRole('button', { name: 'Save to library' }));
     await screen.findAllByText('Imported experience');
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -600,7 +642,7 @@ describe('ExperienceLibraryPage', () => {
     expect(screen.getByText('72% complete')).toBeInTheDocument();
   });
 
-  it('keeps action, result, and metrics together when adding an evidence card', async () => {
+  it('keeps background, action, and result together when adding an evidence card', async () => {
     const withEvidence = {
       ...listItem,
       completeness: 60,
@@ -608,9 +650,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 4,
+          background: 'Reviews were slow',
           action: 'Automated imports',
-          result: 'Faster review',
-          metrics: '40%',
+          result: '40% faster review',
           created_at: '2025-01-01',
           updated_at: '2025-01-01',
         },
@@ -623,26 +665,30 @@ describe('ExperienceLibraryPage', () => {
 
     const action = await screen.findByLabelText('Action new');
     expect(action.tagName).toBe('TEXTAREA');
+    expect(screen.getByLabelText('Background new').tagName).toBe('TEXTAREA');
     expect(screen.getByLabelText('Result new').tagName).toBe('TEXTAREA');
-    expect(screen.getByLabelText('Metrics new').tagName).toBe('TEXTAREA');
+    fireEvent.change(screen.getByLabelText('Background new'), {
+      target: { value: 'Reviews were slow' },
+    });
     fireEvent.change(screen.getByLabelText('Action new'), {
       target: { value: 'Automated imports' },
     });
-    fireEvent.change(screen.getByLabelText('Result new'), { target: { value: 'Faster review' } });
-    fireEvent.change(screen.getByLabelText('Metrics new'), { target: { value: '40%' } });
+    fireEvent.change(screen.getByLabelText('Result new'), {
+      target: { value: '40% faster review' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Add evidence' }));
 
     await waitFor(() =>
       expect(api.createEvidence).toHaveBeenCalledWith(1, {
+        background: 'Reviews were slow',
         action: 'Automated imports',
-        result: 'Faster review',
-        metrics: '40%',
+        result: '40% faster review',
         expected_collection_revision: 0,
       })
     );
+    expect(screen.getByLabelText('Background 4')).toHaveValue('Reviews were slow');
     expect(screen.getByLabelText('Action 4')).toHaveValue('Automated imports');
-    expect(screen.getByLabelText('Result 4')).toHaveValue('Faster review');
-    expect(screen.getByLabelText('Metrics 4')).toHaveValue('40%');
+    expect(screen.getByLabelText('Result 4')).toHaveValue('40% faster review');
   });
 
   it('globally saves metadata, existing evidence, and appended evidence together', async () => {
@@ -652,9 +698,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 7,
+          background: null,
           action: 'Original action',
           result: null,
-          metrics: null,
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-01T00:00:00Z',
         },
@@ -663,9 +709,9 @@ describe('ExperienceLibraryPage', () => {
       suggested_questions: [],
       field_states: [
         { key: 'title', ref_id: null, status: 'complete', revision: 2 },
+        { key: 'background', ref_id: 7, status: 'incomplete', revision: 3 },
         { key: 'action', ref_id: 7, status: 'complete', revision: 3 },
         { key: 'result', ref_id: 7, status: 'incomplete', revision: 3 },
-        { key: 'metrics', ref_id: 7, status: 'incomplete', revision: 3 },
         { key: 'evidence_new', ref_id: null, status: 'complete', revision: 4 },
       ],
     };
@@ -677,9 +723,9 @@ describe('ExperienceLibraryPage', () => {
         { ...detail.evidence_items[0], action: 'Updated action' },
         {
           id: 8,
+          background: null,
           action: 'Appended action',
           result: null,
-          metrics: null,
           created_at: '2025-01-02T00:00:00Z',
           updated_at: '2025-01-02T00:00:00Z',
         },
@@ -700,8 +746,8 @@ describe('ExperienceLibraryPage', () => {
 
     await waitFor(() =>
       expect(api.saveExperience).toHaveBeenCalledWith(
-        1,
         expect.objectContaining({
+          experience_id: 1,
           experience: expect.objectContaining({
             title: 'Saved together',
             expected_field_revisions: expect.objectContaining({ title: 2 }),
@@ -709,13 +755,13 @@ describe('ExperienceLibraryPage', () => {
           evidence_items: [
             {
               evidence_id: 7,
+              background: null,
               action: 'Updated action',
               result: null,
-              metrics: null,
               expected_revision: 3,
             },
+            { background: null, action: 'Appended action', result: null },
           ],
-          new_evidence: { action: 'Appended action', result: null, metrics: null },
           expected_collection_revision: 4,
         })
       )
@@ -730,9 +776,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 4,
+          background: null,
           action: 'Added evidence',
           result: null,
-          metrics: null,
           created_at: '2025-01-03T00:00:00Z',
           updated_at: '2025-01-03T00:00:00Z',
         },
@@ -789,14 +835,14 @@ describe('ExperienceLibraryPage', () => {
       suggested_questions: [],
     });
     api.markExperienceReady.mockRejectedValue({
-      conflict: { completeness: 44, missing_dimensions: ['metrics'] },
+      conflict: { completeness: 44, missing_dimensions: ['evidence_background'] },
     });
     render(<ExperienceLibraryPage />);
 
     await screen.findByRole('button', { name: 'Mark ready' });
     fireEvent.click(screen.getByRole('button', { name: 'Mark ready' }));
 
-    expect(await screen.findByText('metrics')).toBeInTheDocument();
+    expect(await screen.findByText('evidence background')).toBeInTheDocument();
     expect(screen.getByText('Not ready')).toBeInTheDocument();
   });
 
@@ -836,6 +882,7 @@ describe('ExperienceLibraryPage', () => {
       expect(screen.queryByRole('button', { name: /Searchable project/ })).not.toBeInTheDocument()
     );
     fireEvent.click(screen.getByRole('tab', { name: 'Recycle bin' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Searchable project/ }));
     await screen.findByRole('button', { name: 'Restore experience' });
     fireEvent.click(screen.getByRole('button', { name: 'Restore experience' }));
     await waitFor(() => expect(api.restoreExperience).toHaveBeenCalledWith(1));
@@ -1133,10 +1180,12 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Mark ready' }));
     fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
     await screen.findByRole('heading', { name: 'Second experience' });
-    pendingReady.reject({ conflict: { completeness: 44, missing_dimensions: ['metrics'] } });
+    pendingReady.reject({
+      conflict: { completeness: 44, missing_dimensions: ['evidence_background'] },
+    });
 
     await waitFor(() => expect(screen.queryByText('Not ready')).not.toBeInTheDocument());
-    expect(screen.queryByText('metrics')).not.toBeInTheDocument();
+    expect(screen.queryByText('evidence background')).not.toBeInTheDocument();
   });
 
   it('does not clear B when a late archive for A completes and prevents double archive submits', async () => {
@@ -1181,9 +1230,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 7,
+          background: null,
           action: 'Original action',
           result: 'Original result',
-          metrics: null,
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-01T00:00:00Z',
         },
@@ -1228,9 +1277,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 7,
+          background: null,
           action: 'Original action',
           result: null,
-          metrics: null,
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-01T00:00:00Z',
         },
@@ -1274,9 +1323,9 @@ describe('ExperienceLibraryPage', () => {
       evidence_items: [
         {
           id: 7,
+          background: null,
           action: 'Original action',
           result: 'Original result',
-          metrics: null,
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-01T00:00:00Z',
         },
@@ -1323,10 +1372,12 @@ describe('ExperienceLibraryPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Mark ready' }));
     fireEvent.click(screen.getByRole('button', { name: /Second experience/ }));
     await screen.findByRole('heading', { name: 'Second experience' });
-    pendingReady.reject({ conflict: { completeness: 44, missing_dimensions: ['metrics'] } });
+    pendingReady.reject({
+      conflict: { completeness: 44, missing_dimensions: ['evidence_background'] },
+    });
 
     await waitFor(() => expect(screen.queryByText('Could not mark ready')).not.toBeInTheDocument());
-    expect(screen.queryByText('metrics')).not.toBeInTheDocument();
+    expect(screen.queryByText('evidence background')).not.toBeInTheDocument();
   });
 
   it('clears an A ready error when selecting B', async () => {

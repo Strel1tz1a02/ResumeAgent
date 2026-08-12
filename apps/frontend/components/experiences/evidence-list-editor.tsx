@@ -21,28 +21,27 @@ interface EvidenceListEditorProps {
   resetSignal: number;
   globalSaving: boolean;
   onGlobalDraftChange: (
-    value: Pick<
-      ExperienceGlobalSave,
-      'evidence_items' | 'new_evidence' | 'expected_collection_revision'
-    >,
+    value: Pick<ExperienceGlobalSave, 'evidence_items' | 'expected_collection_revision'>,
     valid: boolean
   ) => void;
 }
 
-type EvidenceDraft = { action: string; result: string; metrics: string };
+type EvidenceDraft = { background: string; action: string; result: string };
 type EvidenceEditorState = {
   drafts: Record<number, EvidenceDraft>;
   baseline: Record<number, EvidenceDraft>;
 };
 
 const toDraft = (item: ExperienceDetail['evidence_items'][number]): EvidenceDraft => ({
+  background: item.background ?? '',
   action: item.action,
   result: item.result ?? '',
-  metrics: item.metrics ?? '',
 });
 
 const sameDraft = (left: EvidenceDraft, right: EvidenceDraft) =>
-  left.action === right.action && left.result === right.result && left.metrics === right.metrics;
+  left.background === right.background &&
+  left.action === right.action &&
+  left.result === right.result;
 
 const evidenceChatScope = { field: 'evidence' } as const;
 
@@ -61,9 +60,9 @@ export function EvidenceListEditor({
   });
   const { drafts, baseline } = editorState;
   const [newEvidence, setNewEvidence] = useState<EvidenceDraft>({
+    background: '',
     action: '',
     result: '',
-    metrics: '',
   });
   const createMutation = useCreateEvidenceMutation(experience.experience_id);
   const patchMutation = usePatchEvidenceMutation(experience.experience_id);
@@ -113,7 +112,7 @@ export function EvidenceListEditor({
           continue;
         }
         const merged = { ...localDraft };
-        for (const key of ['action', 'result', 'metrics'] as const) {
+        for (const key of ['background', 'action', 'result'] as const) {
           if (
             localDraft[key] === previousBaseline[key] ||
             (appliedScope?.evidence_id === item.id &&
@@ -127,21 +126,21 @@ export function EvidenceListEditor({
       return { drafts: next, baseline: serverBaseline };
     });
     if (fullReset) {
-      setNewEvidence({ action: '', result: '', metrics: '' });
+      setNewEvidence({ background: '', action: '', result: '' });
     } else if (
       chat.lastBusinessEvent?.data.created === true &&
       (chat.lastBusinessEvent.data.scope as { field?: string } | undefined)?.field === 'evidence'
     ) {
-      setNewEvidence({ action: '', result: '', metrics: '' });
+      setNewEvidence({ background: '', action: '', result: '' });
     }
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
   }, [chat.lastBusinessEvent, experience.experience_id, experience.evidence_items, resetSignal]);
 
   const dirty =
+    newEvidence.background !== '' ||
     newEvidence.action !== '' ||
     newEvidence.result !== '' ||
-    newEvidence.metrics !== '' ||
     experience.evidence_items.some((item) => {
       const draft = drafts[item.id];
       const baselineDraft = baseline[item.id] ?? toDraft(item);
@@ -153,29 +152,35 @@ export function EvidenceListEditor({
   }, [dirty, onDirtyChange]);
 
   useEffect(() => {
-    const hasNewEvidence = Boolean(newEvidence.action || newEvidence.result || newEvidence.metrics);
+    const hasNewEvidence = Boolean(
+      newEvidence.background || newEvidence.action || newEvidence.result
+    );
     onGlobalDraftChange(
       {
-        evidence_items: experience.evidence_items.map((item) => {
-          const draft = drafts[item.id] ?? toDraft(item);
-          return {
-            evidence_id: item.id,
-            action: draft.action.trim(),
-            result: draft.result.trim() || null,
-            metrics: draft.metrics.trim() || null,
-            expected_revision:
-              (experience.field_states ?? []).find(
-                (state) => state.key === 'action' && state.ref_id === item.id
-              )?.revision ?? 0,
-          };
-        }),
-        new_evidence: hasNewEvidence
-          ? {
-              action: newEvidence.action.trim(),
-              result: newEvidence.result.trim() || null,
-              metrics: newEvidence.metrics.trim() || null,
-            }
-          : null,
+        evidence_items: [
+          ...experience.evidence_items.map((item) => {
+            const draft = drafts[item.id] ?? toDraft(item);
+            return {
+              evidence_id: item.id,
+              background: draft.background.trim() || null,
+              action: draft.action.trim(),
+              result: draft.result.trim() || null,
+              expected_revision:
+                (experience.field_states ?? []).find(
+                  (state) => state.key === 'action' && state.ref_id === item.id
+                )?.revision ?? 0,
+            };
+          }),
+          ...(hasNewEvidence
+            ? [
+                {
+                  background: newEvidence.background.trim() || null,
+                  action: newEvidence.action.trim(),
+                  result: newEvidence.result.trim() || null,
+                },
+              ]
+            : []),
+        ],
         expected_collection_revision:
           (experience.field_states ?? []).find(
             (state) => state.key === 'evidence_new' && state.ref_id === null
@@ -205,12 +210,12 @@ export function EvidenceListEditor({
     if (submitting || !newEvidence.action.trim()) return;
     createMutation.mutate(
       {
+        background: newEvidence.background.trim() || null,
         action: newEvidence.action.trim(),
         result: newEvidence.result.trim() || null,
-        metrics: newEvidence.metrics.trim() || null,
         expected_collection_revision: collectionRevision,
       },
-      { onSuccess: () => setNewEvidence({ action: '', result: '', metrics: '' }) }
+      { onSuccess: () => setNewEvidence({ background: '', action: '', result: '' }) }
     );
   };
 
@@ -220,9 +225,9 @@ export function EvidenceListEditor({
     patchMutation.mutate({
       evidenceId: id,
       payload: {
+        background: draft.background.trim() || null,
         action: draft.action.trim(),
         result: draft.result.trim() || null,
-        metrics: draft.metrics.trim() || null,
         expected_revision: evidenceRevision(id),
       },
     });
@@ -257,7 +262,7 @@ export function EvidenceListEditor({
     onSave?: () => void
   ) => (
     <div className="space-y-4">
-      {(['action', 'result', 'metrics'] as const).map((key) => {
+      {(['background', 'action', 'result'] as const).map((key) => {
         const itemScope = { field: 'evidence', evidence_id: evidenceId };
         return (
           <FieldAiEntry
@@ -280,7 +285,7 @@ export function EvidenceListEditor({
               value={draft[key]}
               onChange={(event) => change(key, event.target.value)}
               disabled={archived || submitting || globalSaving || chat.isScopeLocked(itemScope)}
-              minRows={key === 'action' ? 4 : key === 'result' ? 3 : 2}
+              minRows={key === 'background' ? 3 : key === 'action' ? 4 : 3}
             />
           </FieldAiEntry>
         );
@@ -354,7 +359,7 @@ export function EvidenceListEditor({
               (key, value) => setNewEvidence((current) => ({ ...current, [key]: value })),
               'new',
               null,
-              Boolean(newEvidence.action || newEvidence.result || newEvidence.metrics)
+              Boolean(newEvidence.background || newEvidence.action || newEvidence.result)
             )}
             <Button
               className="mt-3"

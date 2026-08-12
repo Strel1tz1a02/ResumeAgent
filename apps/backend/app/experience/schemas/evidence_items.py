@@ -8,9 +8,9 @@ class EvidenceCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    background: str | None = None
     action: str = Field(min_length=1)
     result: str | None = None
-    metrics: str | None = None
 
     @field_validator("action")
     @classmethod
@@ -32,9 +32,9 @@ class EvidenceUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    background: str | None = None
     action: str | None = None
     result: str | None = None
-    metrics: str | None = None
     expected_revision: int = Field(ge=0)
 
     @field_validator("action")
@@ -52,9 +52,9 @@ class EvidenceRead(BaseModel):
     """返回给客户端的已持久化证据记录。"""
 
     id: int
+    background: str | None = None
     action: str
     result: str | None = None
-    metrics: str | None = None
     created_at: str
     updated_at: str
 

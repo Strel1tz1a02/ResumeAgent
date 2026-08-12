@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.models import Base
 
-__all__ = ["Base", "make_async_engine", "make_sync_engine", "init_models_sync"]
+__all__ = ["Base", "init_models_sync", "make_async_engine", "make_sync_engine"]
 
 
 def _apply_sqlite_pragmas(dbapi_connection: Any, _connection_record: Any) -> None:
@@ -60,19 +60,14 @@ def make_sync_engine(path: Path) -> Engine:
 def init_models_sync(engine: Engine) -> None:
     """使用同步引擎连接幂等创建全部数据表。"""
     # 模块 ORM 共享同一个声明式 Base；create_all 前必须显式注册。
+    import app.ai_chat.models
+    import app.background_jobs.models
     import app.experience.models  # noqa: F401
-    import app.ai_chat.models  # noqa: F401
-    import app.background_jobs.models  # noqa: F401
-
-    from app.scripts.migrate_experience_field_states import migrate
-    from app.scripts.migrate_experience_evidence_items import (
-        migrate as migrate_experience_evidence_items,
+    from app.scripts.migrate_ai_chat_conversation_scope import (
+        migrate as migrate_ai_chat_conversation_scope,
     )
-    from app.scripts.migrate_experience_revisions import (
-        migrate as migrate_experience_revisions,
-    )
-    from app.scripts.migrate_unified_experience_revision_units import (
-        migrate as migrate_unified_experience_revision_units,
+    from app.scripts.migrate_ai_chat_memory_background import (
+        migrate as migrate_ai_chat_memory_background,
     )
     from app.scripts.migrate_ai_chat_tool_call_index import (
         migrate as migrate_ai_chat_tool_call_index,
@@ -80,18 +75,26 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_ai_chat_tool_call_state import (
         migrate as migrate_ai_chat_tool_call_state,
     )
-    from app.scripts.migrate_ai_chat_conversation_scope import (
-        migrate as migrate_ai_chat_conversation_scope,
+    from app.scripts.migrate_evidence_background import (
+        migrate as migrate_evidence_background,
     )
     from app.scripts.migrate_experience_chat_scope_field import (
         migrate as migrate_experience_chat_scope_field,
     )
-    from app.scripts.migrate_ai_chat_memory_background import (
-        migrate as migrate_ai_chat_memory_background,
+    from app.scripts.migrate_experience_evidence_items import (
+        migrate as migrate_experience_evidence_items,
+    )
+    from app.scripts.migrate_experience_field_states import migrate
+    from app.scripts.migrate_experience_revisions import (
+        migrate as migrate_experience_revisions,
+    )
+    from app.scripts.migrate_unified_experience_revision_units import (
+        migrate as migrate_unified_experience_revision_units,
     )
 
     migrate(engine)
     migrate_experience_evidence_items(engine)
+    migrate_evidence_background(engine)
     migrate_experience_revisions(engine)
     migrate_unified_experience_revision_units(engine)
     migrate_ai_chat_tool_call_index(engine)
