@@ -11,10 +11,15 @@ from langgraph.types import interrupt
 from app.ai_chat.errors import ProposalStateError, ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import tool_result_event
-from app.ai_chat.streaming.model import TextDelta, ToolCallsCompleted
+from app.ai_chat.streaming.model import (
+    TextDelta,
+    ToolCallsCompleted,
+    build_model_tools,
+)
 from app.ai_chat.tools.security import ToolSecurity, guard_tool
 from app.ai_chat.tools.types import ApprovalDecision, ToolCall, ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
+from app.experience.graph.context import prepare_request_messages
 from app.experience.graph.state import ExperienceState
 
 
@@ -109,12 +114,20 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
     async def llm(state: ExperienceState) -> JsonObject:
         """流式执行模型，并在结束后暴露原始工具调用字符串。"""
         calls: tuple[str, ...] = ()
-        async for event in runtime.stream_model(
+        tools_enabled = state["tools_enabled"] and state["run_kind"] != "opening"
+        handlers = runtime.tools.model_handlers
+        tool_definitions = (
+            build_model_tools(handlers) if tools_enabled and handlers else None
+        )
+        request_messages = await prepare_request_messages(
             run_id=state["run_id"],
             messages=state["model_messages"],
-            tools_enabled=(
-                state["tools_enabled"] and state["run_kind"] != "opening"
-            ),
+            memory=runtime.memory,
+            tools=tool_definitions,
+        )
+        async for event in runtime.stream_model(
+            messages=request_messages,
+            tools_enabled=tools_enabled,
         ):
             if isinstance(event, TextDelta):
                 _emit("assistant.delta", {"text": event.text})

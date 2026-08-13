@@ -87,10 +87,8 @@ class _UnusedModel:
 
 
 class _PassthroughMemoryService:
-    async def prepare_request_messages(  # type: ignore[no-untyped-def]
-        self, _run_id, messages, *, tools=None
-    ):
-        return messages
+    async def get_history_prompt(self, _run_id, _occupied_token):  # type: ignore[no-untyped-def]
+        return '{"memory":{},"runs":[]}'
 
 
 class _ConversationModel:

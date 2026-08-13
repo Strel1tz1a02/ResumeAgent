@@ -6,11 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.ai_chat.streaming.model import (
-    AiChatModel,
-    ModelStreamEvent,
-    build_model_tools,
-)
+from app.ai_chat.streaming.model import AiChatModel, ModelStreamEvent
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.types import JsonObject
 
@@ -41,25 +37,14 @@ class AiChatRuntime:
     async def stream_model(
         self,
         *,
-        run_id: int,
         messages: list[JsonObject],
         tools_enabled: bool,
         max_tokens: int = 4096,
     ) -> AsyncIterator[ModelStreamEvent]:
         """在执行本次工具策略的同时流式调用模型。"""
         handlers = self.tools.model_handlers
-        tool_definitions = (
-            build_model_tools(handlers)
-            if tools_enabled and handlers
-            else None
-        )
-        request_messages = await self.memory.prepare_request_messages(
-            run_id,
-            messages,
-            tools=tool_definitions,
-        )
         async for event in self.model.stream(
-            messages=request_messages,
+            messages=messages,
             handlers=handlers,
             tools_enabled=tools_enabled,
             max_tokens=max_tokens,

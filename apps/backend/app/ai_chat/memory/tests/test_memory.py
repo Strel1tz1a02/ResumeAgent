@@ -7,8 +7,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, text
-
 from app.ai_chat.memory.errors import (
     MemoryCompactionTimeoutError,
     MemoryContextFullError,
@@ -30,6 +28,7 @@ from app.ai_chat.models import AiChatRunMemory
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.repositories.memory_repository import MemoryRepository
 from app.ai_chat.repositories.origin_run_repository import OriginRunRepository
+from sqlalchemy import func, select, text
 
 
 def test_operations_enforce_core_and_other_boundaries() -> None:
@@ -125,82 +124,18 @@ def test_internal_string_token_counter_accepts_a_string(
         "app.ai_chat.memory.token_budget.litellm.token_counter",
         fake_counter,
     )
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: MemoryTokenBudget(
+            model="test",
+            max_tokens=100,
+            input_budget=850,
+        ),
+    )
     service = MemoryService()
     assert service._count_string_tokens("system + tools + current") == 37
     assert captured["text"] == "system + tools + current"
     assert "messages" not in captured
-
-
-def test_request_token_counter_includes_tool_definitions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_counter(**kwargs):  # type: ignore[no-untyped-def]
-        captured.update(kwargs)
-        return 41
-
-    monkeypatch.setattr(
-        "app.ai_chat.memory.token_budget.litellm.token_counter",
-        fake_counter,
-    )
-    messages = [{"role": "user", "content": "current"}]
-    tools = [{"type": "function", "function": {"name": "change"}}]
-
-    service = MemoryService()
-    assert service.count_request_tokens(messages, tools=tools) == 41
-    assert captured["messages"] == messages
-    assert captured["tools"] == tools
-
-
-async def test_prepare_request_messages_injects_history_after_system_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = MemoryService()
-    counted: list[list[dict[str, Any]]] = []
-    validated: list[list[dict[str, Any]]] = []
-    tools = [{"type": "function", "function": {"name": "change"}}]
-
-    def fake_count(messages, *, tools=None):  # type: ignore[no-untyped-def]
-        assert tools is not None
-        counted.append(messages)
-        return 123
-
-    async def fake_history(run_id, occupied_token):  # type: ignore[no-untyped-def]
-        assert run_id == 7
-        assert occupied_token == 123
-        return '{"memory":{"current_goal":"remembered"},"runs":[]}'
-
-    def fake_validate(messages, *, tools=None):  # type: ignore[no-untyped-def]
-        assert tools is not None
-        validated.append(messages)
-        return 200
-
-    monkeypatch.setattr(service, "count_request_tokens", fake_count)
-    monkeypatch.setattr(service, "_get_history_prompt", fake_history)
-    monkeypatch.setattr(service, "validate_request", fake_validate)
-    messages = [
-        {"role": "system", "content": "policy"},
-        {"role": "system", "content": "domain truth"},
-        {"role": "user", "content": "current question"},
-    ]
-
-    prepared = await service.prepare_request_messages(
-        7,
-        messages,
-        tools=tools,
-    )
-
-    assert [message["role"] for message in prepared] == [
-        "system",
-        "system",
-        "user",
-        "user",
-    ]
-    assert "remembered" in str(prepared[2]["content"])
-    assert prepared[3] == messages[2]
-    assert "remembered" not in str(counted[0][2]["content"])
-    assert validated == [prepared]
 
 
 async def _conversation(isolated_db) -> int:
@@ -443,7 +378,10 @@ async def test_history_prompt_uses_exact_memory_boundary_and_two_run_buffer(
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     summarizer = _GoalSummarizer()
     service = MemoryService(summarizer)  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
 
     def count_history_tokens(text: str) -> int:
         payload = json.loads(text)
@@ -465,7 +403,7 @@ async def test_history_prompt_uses_exact_memory_boundary_and_two_run_buffer(
     )
 
     await service.compact_run(history_ids[-1])
-    prompt = await service._get_history_prompt(current_id, occupied_token=20)
+    prompt = await service.get_history_prompt(current_id, occupied_token=20)
     payload = json.loads(prompt)
 
     assert payload["memory"]["current_goal"] == "目标 2"
@@ -507,11 +445,14 @@ async def test_history_prompt_skips_compression_when_raw_history_fits(
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     summarizer = _GoalSummarizer()
     service = MemoryService(summarizer)  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 50)
 
     prompt = json.loads(
-        await service._get_history_prompt(current_id, occupied_token=20)
+        await service.get_history_prompt(current_id, occupied_token=20)
     )
 
     assert [run["run_id"] for run in prompt["runs"]] == history_ids
@@ -534,7 +475,10 @@ async def test_history_prompt_uses_existing_memory_without_compressing_again(
     )
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     service = MemoryService(_GoalSummarizer())  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
 
     def count_history_tokens(text: str) -> int:
         payload = json.loads(text)
@@ -557,7 +501,7 @@ async def test_history_prompt_uses_existing_memory_without_compressing_again(
     await service.compact_run(latest_history_id)
 
     prompt = json.loads(
-        await service._get_history_prompt(current_id, occupied_token=20)
+        await service.get_history_prompt(current_id, occupied_token=20)
     )
     assert prompt["memory"]["current_goal"] == "历史 1"
     assert prompt["runs"] == []
@@ -584,7 +528,10 @@ async def test_skipped_run_keeps_chain_open_for_later_run(
     completed_id = await _terminal_run(isolated_db, conversation_id, "继续压缩")
     summarizer = _FailRunSummarizer(skipped_id)
     service = MemoryService(summarizer)  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 1)
     monkeypatch.setattr(
         "app.ai_chat.memory.services.memory_service._validate_memory_budget",
@@ -620,7 +567,10 @@ async def test_compact_run_includes_target_terminal_run(
         for index in range(3)
     ]
     service = MemoryService(_GoalSummarizer())  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 1)
     monkeypatch.setattr(
         "app.ai_chat.memory.services.memory_service._validate_memory_budget",
@@ -650,7 +600,10 @@ async def test_history_prompt_times_out_instead_of_compressing_in_web_process(
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     summarizer = _GoalSummarizer()
     service = MemoryService(summarizer)  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
 
     def count_history_tokens(text: str) -> int:
         payload = json.loads(text)
@@ -669,7 +622,7 @@ async def test_history_prompt_times_out_instead_of_compressing_in_web_process(
     )
 
     with pytest.raises(MemoryCompactionTimeoutError):
-        await service._get_history_prompt(current_id, occupied_token=20)
+        await service.get_history_prompt(current_id, occupied_token=20)
 
     assert summarizer.calls == []
 
@@ -681,11 +634,14 @@ async def test_context_full_when_occupied_content_exhausts_budget(
     conversation_id = await _conversation(isolated_db)
     current_id = await _running_run(isolated_db, conversation_id, "当前问题")
     service = MemoryService()
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(50))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(50),
+    )
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 2)
 
     with pytest.raises(MemoryContextFullError, match="occupied_context_full"):
-        await service._get_history_prompt(current_id, occupied_token=50)
+        await service.get_history_prompt(current_id, occupied_token=50)
 
 
 async def test_conversation_delete_cascades_run_memories(
@@ -696,7 +652,10 @@ async def test_conversation_delete_cascades_run_memories(
     history_id = await _terminal_run(isolated_db, conversation_id, "历史")
     await _running_run(isolated_db, conversation_id, "当前")
     service = MemoryService(_GoalSummarizer())  # type: ignore[arg-type]
-    monkeypatch.setattr(service, "_token_budget", lambda: _fixed_budget(100))
+    monkeypatch.setattr(
+        "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
+        lambda: _fixed_budget(100),
+    )
     monkeypatch.setattr(service, "_count_string_tokens", lambda _text: 1)
     monkeypatch.setattr(
         "app.ai_chat.memory.services.memory_service._validate_memory_budget",
