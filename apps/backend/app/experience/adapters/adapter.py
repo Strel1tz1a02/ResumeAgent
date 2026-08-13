@@ -10,20 +10,19 @@ from app import database as database_module
 from app.ai_chat.adapters.base import BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.graph.state import AdapterInput
-from app.ai_chat.types import ScopeRef, SubjectRef, ValidatedBinding
-from app.experience.graph.context import build_model_messages
+from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBinding
 from app.experience.graph import ExperienceState, build_experience_graph
+from app.experience.graph.context import build_model_messages
 from app.experience.prompts.ai_chat import system_prompt
-from app.experience.schemas.ai_chat import ExperienceChatScope
-from app.experience.tools import ContentChangeHandler
 from app.experience.repositories.experience_repository import ExperienceRepository
+from app.experience.schemas.ai_chat import ExperienceChatScope
 from app.experience.services.experience_field_service import ExperienceFieldService
 from app.experience.services.experience_fields import EXPERIENCE_TARGET_KEYS
 from app.experience.services.experience_service import ExperienceService
+from app.experience.tools import ContentChangeHandler
 
 
-class ExperienceAdapter(BaseAdapter):
+class ExperienceAdapter(BaseAdapter[ExperienceState]):
     """把通用会话绑定和输出翻译为经历领域语义。"""
 
     def __init__(self) -> None:
@@ -31,10 +30,10 @@ class ExperienceAdapter(BaseAdapter):
         handlers: tuple[ToolHandler, ...] = (ContentChangeHandler(),)
         self._handlers = {handler.name: handler for handler in handlers}
 
-    async def validate_binding(
+    async def validate_request(
         self, subject: SubjectRef, scope: ScopeRef
     ) -> ValidatedBinding:
-        """校验能否创建一个绑定到指定业务对象和目标字段的会话"""
+        """检查指定经历及字段当前是否允许启用会话。"""
         if subject.type != "experience":
             raise ValueError("ExperienceAdapter only accepts experience subjects")
         try:
@@ -53,10 +52,6 @@ class ExperienceAdapter(BaseAdapter):
             field = experience_scope.field
             if field not in EXPERIENCE_TARGET_KEYS and field != "evidence":
                 raise ValueError("unsupported experience scope")
-            snapshot_key = "evidence_new" if field == "evidence" else field
-            await ExperienceFieldService(session).snapshot(
-                experience_id, snapshot_key, None
-            )
 
         return ValidatedBinding(
             subject=SubjectRef(type="experience", id=str(experience_id)),

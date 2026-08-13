@@ -1,4 +1,4 @@
-"""ORM models for source JDs and their structured analysis."""
+"""ORM models for source JDs and their structured import data."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class JDOrigin(Base):
 
 
 class JDInformation(Base):
-    """One editable structured analysis for one source JD."""
+    """One editable structured import result for one source JD."""
 
     __tablename__ = "jd_information"
     __table_args__ = (

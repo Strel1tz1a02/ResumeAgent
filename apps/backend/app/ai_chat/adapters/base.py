@@ -2,32 +2,38 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from langgraph.graph import StateGraph
 
-from app.ai_chat.graph.state import AdapterInput, BaseState
-from app.ai_chat.types import ScopeRef, SubjectRef, ValidatedBinding
+from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBinding
 
 if TYPE_CHECKING:
     from app.ai_chat.graph.runtime import AiChatRuntime
     from app.ai_chat.tools.handler import ToolHandler
 
 
-class BaseAdapter(ABC): # ABC：要求子类必须实现父类要求的方法
+StateT = TypeVar("StateT")
+
+
+class BaseAdapter(ABC, Generic[StateT]):
     """将通用对话输入转换为无状态业务图。"""
 
-    @classmethod # @classmethod：这个方法属于“类”
-    def adapter_name(cls) -> str: # cls：当前类
+    @classmethod
+    def adapter_name(cls) -> str:
         """返回持久化到会话和注册表中的稳定名称。"""
         return cls.__name__
 
-    @abstractmethod # @abstractmethod：子类必须实现这个方法
-    async def validate_binding(self, subject: SubjectRef, scope: ScopeRef) -> ValidatedBinding:
-        """在持久化前校验并规范化业务绑定。"""
+    @abstractmethod
+    async def validate_request(
+        self,
+        subject: SubjectRef,
+        scope: ScopeRef,
+    ) -> ValidatedBinding:
+        """检查指定业务位置是否允许启用会话，并返回规范化绑定。"""
 
     @abstractmethod
-    async def parse_input(self, value: AdapterInput) -> BaseState:
+    async def parse_input(self, value: AdapterInput) -> StateT:
         """把统一调用输入转换成具体业务 Graph 的完整状态。"""
 
     @abstractmethod

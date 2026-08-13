@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from typing import NotRequired
+from typing import NotRequired, TypedDict
 
-from app.ai_chat.graph.state import (
-    BaseState,
-)
 from app.ai_chat.tools.types import ApprovalDecision, ToolCall
 from app.ai_chat.types import (
     JsonObject,
@@ -14,9 +11,15 @@ from app.ai_chat.types import (
 )
 
 
-class ExperienceState(BaseState):
+class ExperienceState(TypedDict):
     """经历适配器构造并由经历图持久化的完整状态。"""
 
+    conversation_id: int
+    run_id: int
+    subject: JsonObject
+    scope: JsonObject
+    run_kind: str
+    tools_enabled: bool
     revision_snapshot: JsonObject
     model_messages: list[JsonObject]
     raw_tool_call: str | None

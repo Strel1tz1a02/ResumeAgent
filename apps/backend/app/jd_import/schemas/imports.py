@@ -1,4 +1,4 @@
-"""Validated HTTP contracts for the JD analysis module."""
+"""Validated HTTP contracts for the JD import module."""
 
 from typing import Literal
 
@@ -23,7 +23,7 @@ class JDRequirementDraft(BaseModel):
     _validate_content = field_validator("content")(_strip_required)
 
 
-class JDAnalysisCreate(BaseModel):
+class JDImportCreate(BaseModel):
     raw_text: str
     source_url: str | None = None
     company: str = ""
@@ -97,7 +97,7 @@ class JDRequirementResponse(BaseModel):
     revision: int
 
 
-class JDAnalysisResponse(BaseModel):
+class JDImportResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -112,6 +112,6 @@ class JDAnalysisResponse(BaseModel):
     requirements: list[JDRequirementResponse]
 
 
-class JDAnalysisListResponse(BaseModel):
-    items: list[JDAnalysisResponse]
+class JDImportListResponse(BaseModel):
+    items: list[JDImportResponse]
     total: int

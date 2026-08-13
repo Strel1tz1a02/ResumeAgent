@@ -1,4 +1,4 @@
-"""Persistence operations for a JD analysis aggregate."""
+"""Persistence operations for a JD import aggregate."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from typing import Any
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.jd_analysis.models import JDInformation, JDOrigin, JDRequirement
+from app.jd_import.models import JDInformation, JDOrigin, JDRequirement
 
 
-class JDAnalysisRepository:
+class JDImportRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 

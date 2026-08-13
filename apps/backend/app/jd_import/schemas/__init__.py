@@ -1,9 +1,9 @@
-"""JD analysis schema exports."""
+"""JD import schema exports."""
 
-from app.jd_analysis.schemas.analyses import (
-    JDAnalysisCreate,
-    JDAnalysisListResponse,
-    JDAnalysisResponse,
+from app.jd_import.schemas.imports import (
+    JDImportCreate,
+    JDImportListResponse,
+    JDImportResponse,
     JDInformationUpdate,
     JDRequirementCreate,
     JDRequirementDraft,
@@ -14,9 +14,9 @@ from app.jd_analysis.schemas.analyses import (
 )
 
 __all__ = [
-    "JDAnalysisCreate",
-    "JDAnalysisListResponse",
-    "JDAnalysisResponse",
+    "JDImportCreate",
+    "JDImportListResponse",
+    "JDImportResponse",
     "JDInformationUpdate",
     "JDRequirementCreate",
     "JDRequirementDraft",

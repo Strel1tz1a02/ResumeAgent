@@ -8,6 +8,7 @@ from typing import Literal
 from sqlalchemy.exc import IntegrityError
 
 from app import database as database_module
+from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.errors import (
     ConversationEndedError,
     ConversationNotFoundError,
@@ -18,12 +19,10 @@ from app.ai_chat.errors import (
 )
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.models import AiChatMessage
-from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
-from app.ai_chat.graph.state import AdapterInput
 from app.ai_chat.tools.types import ApprovalDecision
-from app.ai_chat.types import JsonObject, ScopeRef, SubjectRef
+from app.ai_chat.types import AdapterInput, JsonObject, ScopeRef, SubjectRef
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +74,7 @@ class AiChatService:
     ) -> int:
         """校验并持久化会话。"""
         adapter = self._registry.get(adapter_name)
-        binding = await adapter.validate_binding(
+        binding = await adapter.validate_request(
             SubjectRef.model_validate(subject),
             ScopeRef.model_validate(scope),
         )

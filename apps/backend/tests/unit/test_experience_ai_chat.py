@@ -620,7 +620,7 @@ async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> No
         if state.key == "action" and state.ref_id == evidence.id
     )
     adapter = ExperienceAdapter()
-    binding = await adapter.validate_binding(
+    binding = await adapter.validate_request(
         SubjectRef(type="experience", id=str(created.experience_id)),
         ScopeRef.model_validate({"field": "evidence"}),
     )

@@ -20,7 +20,7 @@ from app.database import db
 from app.experience import ExperienceAdapter
 from app.experience.routers import ai_chat_router as experience_ai_chat_router
 from app.experience.routers import experiences_router
-from app.jd_analysis import router as jd_analysis_router
+from app.jd_import import router as jd_import_router
 from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
@@ -119,7 +119,7 @@ app.include_router(applications_router, prefix="/api/v1")
 app.include_router(resume_wizard_router, prefix="/api/v1")
 app.include_router(experiences_router, prefix="/api/v1")
 app.include_router(experience_ai_chat_router, prefix="/api/v1")
-app.include_router(jd_analysis_router, prefix="/api/v1")
+app.include_router(jd_import_router, prefix="/api/v1")
 
 
 @app.get("/")

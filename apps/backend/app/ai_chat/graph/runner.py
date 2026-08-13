@@ -12,8 +12,8 @@ from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
 from app.ai_chat.errors import IdempotencyConflictError, ProposalStateError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
-from app.ai_chat.graph.state import AdapterInput
 from app.ai_chat.tools.types import ApprovalDecision
+from app.ai_chat.types import AdapterInput
 
 
 @dataclass(frozen=True)
