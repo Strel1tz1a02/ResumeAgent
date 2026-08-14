@@ -23,6 +23,8 @@
     "close": "Close",
     "ok": "OK",
     "search": "Search",
+    "add": "Add",
+    "refresh": "Refresh",
     "filter": "Filter",
     "reset": "Reset",
     "apply": "Apply",
@@ -45,7 +47,8 @@
     "settings": "Settings",
     "backToDashboard": "Back to Dashboard",
     "goToSettings": "Go to Settings",
-    "applicationTracker": "Application Tracker"
+    "applicationTracker": "Application Tracker",
+    "jdImports": "JD Import"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -92,6 +95,10 @@
     "experienceLibrary": {
       "title": "Experience library",
       "description": "Turn notes into reusable resume evidence."
+    },
+    "jdImports": {
+      "title": "JD Workspace",
+      "description": "Import job descriptions and manage saved JDs."
     },
     "uploadDialog": {
       "success": "Resume uploaded successfully.",
@@ -1158,6 +1165,80 @@
       "loadFailed": "Could not load applications.",
       "moveFailed": "Could not move the application.",
       "deleteFailed": "Could not delete the application(s)."
+    }
+  },
+  "jdImports": {
+    "kicker": "Job data workspace",
+    "title": "JD Import & Management",
+    "subtitle": "Paste job text or links, answer clarification questions when needed, and maintain structured saved JDs.",
+    "views": "JD workspace views",
+    "total": "{count} JDs total",
+    "tabs": {
+      "import": "Smart Import",
+      "library": "JD Library"
+    },
+    "status": {
+      "confirmed": "Confirmed",
+      "incomplete": "Needs work"
+    },
+    "priority": {
+      "required": "Required",
+      "preferred": "Preferred",
+      "normal": "Normal"
+    },
+    "fields": {
+      "source_url": "Source URL",
+      "company": "Company",
+      "job_name": "Job title",
+      "type": "Job type",
+      "location": "Location",
+      "status": "Status"
+    },
+    "import": {
+      "inputLabel": "Import content",
+      "statusLabel": "Import status",
+      "placeholder": "Paste one or more job descriptions, with job links if needed…",
+      "hint": "Supports text, URLs, and multiple roles in one import.",
+      "submit": "Start Import",
+      "processing": "Analyzing",
+      "processingHint": "Reading sources, extracting fields, and verifying evidence. This may take a moment.",
+      "idle": "Import progress and any questions that need your confirmation will appear here.",
+      "completed": "Import complete",
+      "completedCount": "Saved {count} JD(s). Open the JD Library to review and edit them.",
+      "questionRound": "Confirmation needed · Round {round}",
+      "answerPlaceholder": "Enter your answer",
+      "skip": "Skip for now",
+      "restoreAnswer": "Restore answer",
+      "submitAnswers": "Submit Answers",
+      "errors": {
+        "execution": "JD import failed. Check the input and model configuration, then retry."
+      }
+    },
+    "library": {
+      "search": "Search company or role",
+      "statusFilter": "Status filter",
+      "allStatuses": "All statuses",
+      "empty": "No matching JDs.",
+      "selectHint": "Select a JD on the left to view details",
+      "untitled": "Untitled role",
+      "unknownCompany": "Unknown company",
+      "requirementCount": "{count} requirements",
+      "saveMetadata": "Save Details",
+      "requirementsKicker": "Structured requirements",
+      "requirements": "Job Requirements",
+      "priority": "Priority",
+      "sortOrder": "Order",
+      "requirementContent": "Requirement content",
+      "addRequirement": "Add Requirement",
+      "requirementPlaceholder": "For example: Proficient in Python and FastAPI",
+      "deleteRequirement": "Delete requirement",
+      "deleteTitle": "Delete this JD?",
+      "deleteDescription": "“{title}” and all of its requirements will be permanently deleted.",
+      "errors": {
+        "load": "Unable to load the JD list.",
+        "save": "Save failed. If this record changed elsewhere, refresh and retry.",
+        "delete": "Unable to delete the JD."
+      }
     }
   },
   "interviewPrep": {

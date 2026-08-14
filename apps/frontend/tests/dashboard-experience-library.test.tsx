@@ -8,6 +8,8 @@ vi.mock('@/lib/i18n', () => ({
       ({
         'dashboard.experienceLibrary.title': 'Experience library',
         'dashboard.experienceLibrary.description': 'Turn notes into reusable resume evidence.',
+        'dashboard.jdImports.title': 'JD Workspace',
+        'dashboard.jdImports.description': 'Import and manage saved JDs.',
       })[key] ?? key,
     locale: 'en',
   }),
@@ -31,7 +33,7 @@ vi.mock('@/lib/api/resume', () => ({
 
 import DashboardPage from '@/app/(default)/dashboard/page';
 
-describe('DashboardPage experience library entry', () => {
+describe('DashboardPage library entries', () => {
   it('links the Swiss-grid experience card to the experience library', async () => {
     render(<DashboardPage />);
 
@@ -40,10 +42,18 @@ describe('DashboardPage experience library entry', () => {
     expect(screen.getByText('Turn notes into reusable resume evidence.')).toBeInTheDocument();
   });
 
+  it('links the JD workspace card to import and management', async () => {
+    render(<DashboardPage />);
+
+    const link = await screen.findByRole('link', { name: /JD Workspace/i });
+    expect(link).toHaveAttribute('href', '/jd-imports');
+    expect(screen.getByText('Import and manage saved JDs.')).toBeInTheDocument();
+  });
+
   it('keeps the initial grid filled to the next row with the experience card included', async () => {
     render(<DashboardPage />);
 
     expect(await screen.findByRole('link', { name: /Experience library/i })).toBeInTheDocument();
-    expect(screen.getAllByTestId('dashboard-filler')).toHaveLength(7);
+    expect(screen.getAllByTestId('dashboard-filler')).toHaveLength(6);
   });
 });

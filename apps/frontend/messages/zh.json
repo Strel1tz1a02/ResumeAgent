@@ -23,6 +23,8 @@
     "close": "关闭",
     "ok": "确定",
     "search": "搜索",
+    "add": "添加",
+    "refresh": "刷新",
     "filter": "筛选",
     "reset": "重置",
     "apply": "应用",
@@ -45,7 +47,8 @@
     "settings": "设置",
     "backToDashboard": "返回仪表板",
     "goToSettings": "前往设置",
-    "applicationTracker": "申请追踪"
+    "applicationTracker": "申请追踪",
+    "jdImports": "JD 导入"
   },
   "dashboard": {
     "title": "仪表板",
@@ -92,6 +95,10 @@
     "experienceLibrary": {
       "title": "经历库",
       "description": "将笔记整理为可复用的简历证据。"
+    },
+    "jdImports": {
+      "title": "JD 工作区",
+      "description": "批量导入职位描述并管理已入库 JD。"
     },
     "uploadDialog": {
       "success": "简历上传成功。",
@@ -1158,6 +1165,80 @@
       "loadFailed": "无法加载申请。",
       "moveFailed": "无法移动该申请。",
       "deleteFailed": "无法删除该申请。"
+    }
+  },
+  "jdImports": {
+    "kicker": "职位资料工作区",
+    "title": "JD 导入与管理",
+    "subtitle": "粘贴职位文本或链接，按需回答澄清问题，并维护已入库的结构化 JD。",
+    "views": "JD 工作区视图",
+    "total": "共 {count} 条 JD",
+    "tabs": {
+      "import": "智能导入",
+      "library": "JD 库"
+    },
+    "status": {
+      "confirmed": "已确认",
+      "incomplete": "待完善"
+    },
+    "priority": {
+      "required": "必需",
+      "preferred": "优先",
+      "normal": "一般"
+    },
+    "fields": {
+      "source_url": "来源链接",
+      "company": "公司",
+      "job_name": "岗位名称",
+      "type": "岗位类型",
+      "location": "工作地点",
+      "status": "状态"
+    },
+    "import": {
+      "inputLabel": "导入内容",
+      "statusLabel": "导入状态",
+      "placeholder": "粘贴一份或多份 JD 文本，也可以混合粘贴职位链接……",
+      "hint": "支持纯文本、URL，以及一次输入多个岗位。",
+      "submit": "开始导入",
+      "processing": "正在分析",
+      "processingHint": "系统正在读取来源、提取字段并核验依据，请稍候。",
+      "idle": "导入后，处理进度和需要您确认的问题会显示在这里。",
+      "completed": "导入完成",
+      "completedCount": "本次已入库 {count} 条 JD，可前往 JD 库检查和编辑。",
+      "questionRound": "需要确认 · 第 {round} 轮",
+      "answerPlaceholder": "输入您的答案",
+      "skip": "暂不回答",
+      "restoreAnswer": "恢复回答",
+      "submitAnswers": "提交本轮答案",
+      "errors": {
+        "execution": "JD 导入失败，请检查输入和模型配置后重试。"
+      }
+    },
+    "library": {
+      "search": "搜索公司或岗位",
+      "statusFilter": "状态筛选",
+      "allStatuses": "全部状态",
+      "empty": "没有符合条件的 JD。",
+      "selectHint": "从左侧选择一条 JD 查看详情",
+      "untitled": "未命名岗位",
+      "unknownCompany": "未知公司",
+      "requirementCount": "{count} 条要求",
+      "saveMetadata": "保存基本信息",
+      "requirementsKicker": "结构化要求",
+      "requirements": "岗位要求",
+      "priority": "优先级",
+      "sortOrder": "排序",
+      "requirementContent": "要求内容",
+      "addRequirement": "新增岗位要求",
+      "requirementPlaceholder": "例如：熟悉 Python 与 FastAPI",
+      "deleteRequirement": "删除岗位要求",
+      "deleteTitle": "删除这条 JD？",
+      "deleteDescription": "“{title}”及其全部岗位要求将被永久删除。",
+      "errors": {
+        "load": "无法加载 JD 列表。",
+        "save": "保存失败；如果记录已被更新，请刷新后重试。",
+        "delete": "删除 JD 失败。"
+      }
     }
   },
   "interviewPrep": {
