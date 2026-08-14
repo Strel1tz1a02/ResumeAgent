@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
 
@@ -62,9 +63,33 @@ def _register_business_adapters() -> None:
 
 
 def _configure_application_logging() -> None:
-    """Set application log level from configuration."""
+    """配置应用日志级别，并把后端日志滚动写入 data/logs。"""
     numeric_level = getattr(logging, settings.log_level, logging.INFO)
-    logging.getLogger("app").setLevel(numeric_level)
+    app_logger = logging.getLogger("app")
+    app_logger.setLevel(numeric_level)
+
+    if any(
+        getattr(handler, "_resume_matcher_file_handler", False)
+        for handler in app_logger.handlers
+    ):
+        return
+
+    logs_dir = settings.data_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        logs_dir / "backend.log",
+        maxBytes=20 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(numeric_level)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s"
+        )
+    )
+    file_handler._resume_matcher_file_handler = True  # type: ignore[attr-defined]
+    app_logger.addHandler(file_handler)
 
 
 _configure_application_logging()

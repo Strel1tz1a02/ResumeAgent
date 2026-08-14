@@ -45,6 +45,9 @@ uv.lock
 coverage.xml
 htmlcov/
 
+# Runtime logs
+**/data/logs/
+
 # Local instance or config files specific to backend
 instance/
 .env # Backend specific environment variables
