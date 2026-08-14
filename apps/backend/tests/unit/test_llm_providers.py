@@ -12,7 +12,6 @@ live, and they pin behavior we recently shipped:
 """
 
 import pytest
-
 from app.llm import (
     LLMConfig,
     _effective_api_key,
@@ -95,6 +94,16 @@ class TestNormalizeApiBase:
         assert (
             _normalize_api_base("openai_compatible", "http://localhost:8080/v1")
             == "http://localhost:8080/v1"
+        )
+
+    def test_deepseek_defaults_to_standard_v4_endpoint(self):
+        assert _normalize_api_base("deepseek", None) == "https://api.deepseek.com"
+        assert _normalize_api_base("deepseek", "") == "https://api.deepseek.com"
+
+    def test_deepseek_preserves_explicit_endpoint(self):
+        assert (
+            _normalize_api_base("deepseek", "https://proxy.example.com/v1/")
+            == "https://proxy.example.com/v1"
         )
 
     def test_openai_strips_only_trailing_slash(self):

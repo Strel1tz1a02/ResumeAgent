@@ -102,7 +102,9 @@ async def test_extractor_retries_invalid_pydantic_output_with_real_instructor() 
     assert calls == 2
     assert log_info.call_count == 2
     assert sum("原始回答" in call.args[0] for call in log_info.call_args_list) == 2
-    assert any("Agent" in call.args[4] for call in log_info.call_args_list)
+    assert all(call.args[4] == 8_192 for call in log_info.call_args_list)
+    assert all(call.args[5] is None for call in log_info.call_args_list)
+    assert any("Agent" in call.args[6] for call in log_info.call_args_list)
 
 
 async def test_extractor_logs_last_raw_completion_on_failure() -> None:
@@ -116,7 +118,7 @@ async def test_extractor_logs_last_raw_completion_on_failure() -> None:
     instructor_client = SimpleNamespace(create=create)
     router = SimpleNamespace(acompletion=AsyncMock())
     config = SimpleNamespace(
-        provider="deepseek", model="deepseek-chat", reasoning_effort=None
+        provider="deepseek", model="deepseek-chat", reasoning_effort="minimal"
     )
 
     with (
@@ -137,11 +139,15 @@ async def test_extractor_logs_last_raw_completion_on_failure() -> None:
 
     assert create.await_args.kwargs["max_tokens"] == 32_768
     assert create.await_args.kwargs["timeout"] == 1_440
+    assert create.await_args.kwargs["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in create.await_args.kwargs
     log_exception.assert_called_once_with(
         "经历文本解析失败：request_id=%s provider=%s model=primary "
-        "error_type=%s model_answer=%s last_completion=%s",
+        "requested_max_tokens=%s error_type=%s model_answer=%s "
+        "last_completion=%s",
         ANY,
         "deepseek",
+        32_768,
         "RuntimeError",
         '"raw output"',
         '{"choices":[{"message":{"content":"raw output"}}]}',

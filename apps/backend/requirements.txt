@@ -8,7 +8,7 @@ sqlalchemy[asyncio]==2.0.36
 aiosqlite==0.20.0
 arq==0.28.0
 cryptography==48.0.1
-litellm==1.86.2
+litellm==1.96.2
 instructor==1.15.4
 langgraph==1.2.10
 langgraph-checkpoint-sqlite==3.1.0

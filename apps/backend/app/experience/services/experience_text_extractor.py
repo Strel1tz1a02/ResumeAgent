@@ -80,10 +80,13 @@ def _logged_completion(
         response = await completion(**kwargs)
         logger.info(
             "经历导入模型原始回答：request_id=%s attempt=%s provider=%s "
-            "model_answer=%s raw_response=%s",
+            "requested_max_tokens=%s request_thinking=%s model_answer=%s "
+            "raw_response=%s",
             request_id,
             current_attempt,
             provider,
+            kwargs.get("max_tokens"),
+            kwargs.get("thinking"),
             _model_answer_for_log(response),
             _completion_for_log(response),
         )
@@ -105,8 +108,8 @@ class ExperienceTextExtractor:
         router, config = get_router()
         request_id = uuid4().hex
         model_name = get_model_name(config)
-        # LiteLLM 1.86.2 的内置注册表仍把 deepseek-chat 限制为 8192，
-        # 但当前 DeepSeek API 会将该兼容名称路由到 V4 Flash。导入长经历时
+        # LiteLLM 的内置注册表仍把 DeepSeek V4 Flash 输出限制标为 8192，
+        # 但当前 DeepSeek API 支持更长输出。导入长经历时
         # 使用官方集成建议的 32K 默认输出额度，避免在正文生成前耗尽推理 token。
         max_tokens = (
             DEEPSEEK_IMPORT_MAX_TOKENS
@@ -134,7 +137,11 @@ class ExperienceTextExtractor:
             "max_tokens": max_tokens,
             "timeout": _calculate_timeout("json", max_tokens, config.provider),
         }
-        if config.reasoning_effort:
+        if config.provider == "deepseek":
+            # DeepSeek V4 的思考模式无法单独设置推理预算；长经历会在正文
+            # 生成前耗尽约 8K 推理 token。结构化导入关闭思考以保证输出 JSON。
+            kwargs["thinking"] = {"type": "disabled"}
+        elif config.reasoning_effort:
             kwargs["reasoning_effort"] = config.reasoning_effort
         try:
             return await client.create(**kwargs)
@@ -143,9 +150,11 @@ class ExperienceTextExtractor:
             raw_completion = _completion_for_log(last_completion)
             logger.exception(
                 "经历文本解析失败：request_id=%s provider=%s model=primary "
-                "error_type=%s model_answer=%s last_completion=%s",
+                "requested_max_tokens=%s error_type=%s model_answer=%s "
+                "last_completion=%s",
                 request_id,
                 config.provider,
+                max_tokens,
                 type(error).__name__,
                 _model_answer_for_log(last_completion),
                 raw_completion,

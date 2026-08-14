@@ -74,6 +74,12 @@ def _normalize_api_base(provider: str, api_base: str | None) -> str | None:
     that OpenAI-compatible endpoints like llama.cpp (http://localhost:8080/v1)
     round-trip intact. See issue #751.
     """
+    # LiteLLM currently defaults DeepSeek chat requests to the legacy /beta
+    # endpoint when no base URL is supplied. Use the standard V4 endpoint so
+    # current model limits and request semantics apply.
+    if provider == "deepseek" and not api_base:
+        return "https://api.deepseek.com"
+
     if not api_base:
         return None
 
