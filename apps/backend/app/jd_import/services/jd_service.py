@@ -40,11 +40,8 @@ class JDImportService:
     async def create(self, request: JDImportCreate) -> JDImportResponse:
         try:
             information = await self._repository.create(
-                origin_fields={
-                    "raw_text": request.raw_text,
-                    "source_url": request.source_url,
-                },
                 information_fields={
+                    "source_url": request.source_url,
                     "company": request.company,
                     "job_name": request.job_name,
                     "type": request.type,
@@ -73,15 +70,11 @@ class JDImportService:
     async def patch(
         self, information_id: int, request: JDInformationUpdate
     ) -> JDImportResponse:
-        information = await self._require(information_id)
+        await self._require(information_id)
         fields = request.model_dump(exclude={"expected_revision"}, exclude_unset=True)
         fields = {key: ("" if value is None else value) for key, value in fields.items()}
         if not fields:
             raise JDImportValidationError("no fields to update")
-        if information.status == "confirmed" and fields != {"status": "analysing"}:
-            raise JDImportConflictError(
-                "confirmed import must be reopened before editing"
-            )
         try:
             changed = await self._repository.update_information(
                 information_id, request.expected_revision, fields

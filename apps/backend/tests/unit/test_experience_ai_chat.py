@@ -7,6 +7,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NotRequired, get_origin, get_type_hints
 
 import pytest
@@ -240,17 +241,29 @@ async def _request_proposal(harness: _GraphHarness, message_id: str) -> int:
 class _ResultOnlyResumeRunner:
     """模拟业务 Graph 在审批恢复后只发出工具结果。"""
 
-    async def resume(self, **kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["approval"]["decision"] == "reject"
-        assert kwargs["approval"]["client_resolution_id"] == "future-resolution"
+    proposal_id: int | None = None
+
+    async def resume_value(self, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["value"]["decision"] == "reject"
+        assert kwargs["value"]["client_resolution_id"] == "future-resolution"
         yield AiChatEvent(
             "proposal.resolved",
-            {"proposal_id": kwargs["approval"]["tool_call_id"], "decision": "reject"},
+            {"proposal_id": kwargs["value"]["tool_call_id"], "decision": "reject"},
         )
         yield AiChatEvent("content_change.rejected", {"outcome": "rejected"})
 
-    async def ensure_interrupted(self, **kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["approval"]["decision"] == "reject"
+    async def get_state(self, **kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            values={
+                "tool_call": {
+                    "tool_call_id": self.proposal_id,
+                    "status": "awaiting_approval",
+                },
+                "approval": None,
+            }
+        )
+
+    async def advance_to_boundary(self, **kwargs):  # type: ignore[no-untyped-def]
         return GraphRecovery(interrupted=True)
 
 
@@ -888,9 +901,10 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
     registry = AdapterRegistry()
     registry.register(adapter)
     repositories = RepositoryFactory()
+    runner = _ResultOnlyResumeRunner()
     service = AiChatService(
         registry,
-        _ResultOnlyResumeRunner(),  # type: ignore[arg-type]
+        runner,  # type: ignore[arg-type]
         repositories,
     )
     conversation_id = await service.create_conversation(
@@ -929,6 +943,7 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
         assert await repos.tool_calls.claim_approval_request(call.id)
         await session.commit()
         proposal_id = call.id
+        runner.proposal_id = proposal_id
 
     events = [
         event
@@ -1193,9 +1208,12 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(
         "2026_08_08_ai_chat_tool_call_state",
         "2026_08_08_ai_chat_conversation_scope",
         "2026_08_08_experience_chat_scope_field",
-        "2026_08_10_ai_chat_memory_background",
-        "2026_08_12_evidence_background",
-    }
+            "2026_08_10_ai_chat_memory_background",
+            "2026_08_12_evidence_background",
+            "2026_08_14_remove_ai_chat_run_result",
+            "2026_08_13_jd_import_origin",
+            "2026_08_14_ai_chat_tool_input_state",
+        }
     assert evidence_field_keys == {"background", "action", "result"}
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
     assert {
@@ -1728,11 +1746,14 @@ async def test_recovery_rejects_incomplete_checkpoint_approval(
             },
             as_node="executor",
         )
+        snapshot = await harness.runner.get_state(
+            adapter_name=harness.adapter.adapter_name(),
+            conversation_id=harness.conversation_id,
+        )
         with pytest.raises(IdempotencyConflictError):
-            await harness.runner.ensure_interrupted(
-                adapter_name=harness.adapter.adapter_name(),
-                conversation_id=harness.conversation_id,
-                approval={
+            harness.service._validate_approval_checkpoint(
+                snapshot,
+                {
                     "tool_call_id": proposal_id,
                     "decision": "approve",
                     "client_resolution_id": "r1",
@@ -1769,11 +1790,14 @@ async def test_recovery_rejects_different_checkpoint_approval_before_executor(
             },
             as_node="executor",
         )
+        snapshot = await harness.runner.get_state(
+            adapter_name=harness.adapter.adapter_name(),
+            conversation_id=harness.conversation_id,
+        )
         with pytest.raises(IdempotencyConflictError):
-            await harness.runner.ensure_interrupted(
-                adapter_name=harness.adapter.adapter_name(),
-                conversation_id=harness.conversation_id,
-                approval={
+            harness.service._validate_approval_checkpoint(
+                snapshot,
+                {
                     "tool_call_id": proposal_id,
                     "decision": "reject",
                     "client_resolution_id": "r2",
@@ -1821,17 +1845,18 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
 
         undelivered = [
             event
-            async for event in harness.runner.resume(
+            async for event in harness.runner.resume_value(
                 adapter_name=harness.adapter.adapter_name(),
                 conversation_id=harness.conversation_id,
-                approval=approval,
+                value=approval,
             )
         ]
         assert [event.event for event in undelivered] == [
+            "proposal.requested",
             "proposal.resolved",
             "content_change.applied",
         ]
-        assert undelivered[0].data == {
+        assert undelivered[1].data == {
             "proposal_id": proposal_id,
             "decision": "approve",
         }
@@ -1865,7 +1890,7 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
             "proposal_id": proposal_id,
             "decision": "approve",
         }
-        assert replayed[1].data == undelivered[1].data
+        assert replayed[1].data == undelivered[2].data
         assert replayed[1].data["tool_call_id"] == proposal_id
         assert replayed[1].data["outcome"] == "applied"
         assert handler.execute_count == 1
@@ -2069,7 +2094,7 @@ async def test_active_running_owner_blocks_second_resolution(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """B 不能把仍在 resume 前运行的 A 归一化后抢占。"""
+    """B 不能把仍在恢复前运行的 A 归一化后抢占。"""
     handler = _FailingContentChangeHandler(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -2080,7 +2105,7 @@ async def test_active_running_owner_blocks_second_resolution(
     release_a_resume = asyncio.Event()
     try:
         proposal_id = await _request_proposal(harness, "active-running-owner")
-        original_resume = harness.runner.resume
+        original_resume = harness.runner.resume_value
         a_before_resume = asyncio.Event()
 
         async def paused_resume(**kwargs):  # type: ignore[no-untyped-def]
@@ -2100,7 +2125,7 @@ async def test_active_running_owner_blocks_second_resolution(
                 )
             ]
 
-        monkeypatch.setattr(harness.runner, "resume", paused_resume)
+        monkeypatch.setattr(harness.runner, "resume_value", paused_resume)
         task_a = asyncio.create_task(resolve(), name="active-resolution-owner-a")
         await a_before_resume.wait()
 
@@ -2151,7 +2176,7 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         original_commit = AsyncSession.commit
         original_close = AsyncSession.close
         original_transition = RunRepository.transition
-        original_resume = harness.runner.resume
+        original_resume = harness.runner.resume_value
         a_commit_entered = asyncio.Event()
         a_session_closed = asyncio.Event()
         b_before_resume = asyncio.Event()
@@ -2217,7 +2242,7 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         monkeypatch.setattr(AsyncSession, "commit", controlled_commit)
         monkeypatch.setattr(AsyncSession, "close", tracked_close)
         monkeypatch.setattr(RunRepository, "transition", controlled_transition)
-        monkeypatch.setattr(harness.runner, "resume", paused_resume)
+        monkeypatch.setattr(harness.runner, "resume_value", paused_resume)
 
         task_a = asyncio.create_task(resolve(), name="cancelled-claim-owner-a")
         await a_commit_entered.wait()

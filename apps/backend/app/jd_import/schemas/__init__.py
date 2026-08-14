@@ -1,5 +1,10 @@
 """JD import schema exports."""
 
+from app.jd_import.schemas.agent import (
+    JDConversationResponse,
+    JDImportAgentRequest,
+    JDQuestionResolutionRequest,
+)
 from app.jd_import.schemas.imports import (
     JDImportCreate,
     JDImportListResponse,
@@ -14,10 +19,13 @@ from app.jd_import.schemas.imports import (
 )
 
 __all__ = [
+    "JDConversationResponse",
+    "JDImportAgentRequest",
     "JDImportCreate",
     "JDImportListResponse",
     "JDImportResponse",
     "JDInformationUpdate",
+    "JDQuestionResolutionRequest",
     "JDRequirementCreate",
     "JDRequirementDraft",
     "JDRequirementResponse",

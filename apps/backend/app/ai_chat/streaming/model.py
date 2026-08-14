@@ -4,9 +4,9 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.tools.buffer import ToolCallBuffer
 from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.types import JsonObject
 from app.llm import _calculate_timeout, get_router
 
@@ -73,6 +73,7 @@ def build_model_tools(
             },
         }
         for name, handler in handlers.items()
+        if handler.model_visible
     ]
 
 

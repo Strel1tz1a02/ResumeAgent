@@ -9,10 +9,8 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
-from app.ai_chat.errors import IdempotencyConflictError, ProposalStateError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import AiChatEvent
-from app.ai_chat.tools.types import ApprovalDecision
 from app.ai_chat.types import AdapterInput
 
 
@@ -75,34 +73,31 @@ class GraphRunner:
             if event is not None:
                 yield event
 
-    async def resume(
-        self,
-        *,
-        adapter_name: str,
-        conversation_id: int,
-        approval: ApprovalDecision,
+    async def resume_value(
+        self, *, adapter_name: str, conversation_id: int, value: dict[str, Any]
     ) -> AsyncIterator[AiChatEvent]:
-        """恢复同一会话的中断，只传入审批结果。"""
+        """使用可序列化为 JSON 的领域值恢复检查点。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
         config = {
             "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
         }
         async for part in graph.astream(
-            Command(resume=approval),
+            Command(resume=value),
             config=config,
             stream_mode=["updates", "custom"],
             version="v2",
         ):
             event = self._normalize(part)
             if event is not None:
-                if event.event == "proposal.requested":
-                    if event.data.get("proposal_id") != approval["tool_call_id"]:
-                        raise IdempotencyConflictError(
-                            approval["client_resolution_id"]
-                        )
-                    continue
                 yield event
+
+    async def get_state(self, *, adapter_name: str, conversation_id: int) -> Any:
+        adapter = self._registry.get(adapter_name)
+        graph = self._compiled(adapter)
+        return await graph.aget_state(
+            {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
+        )
 
     @staticmethod
     def _normalize(part: Any) -> AiChatEvent | None:
@@ -130,37 +125,19 @@ class GraphRunner:
         """删除一个会话的全部检查点。"""
         await self._checkpointer.adelete_thread(f"ai-chat:{conversation_id}")
 
-    async def ensure_interrupted(
+    async def advance_to_boundary(
         self,
         *,
         adapter_name: str,
         conversation_id: int,
-        approval: ApprovalDecision,
     ) -> GraphRecovery:
-        """把异常图推进到中断或完成边界，并保留业务事件。"""
+        """把图推进到中断或完成边界，并保留期间产生的事件。"""
         adapter = self._registry.get(adapter_name)
         graph = self._compiled(adapter)
         config = {
             "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
         }
         snapshot = await graph.aget_state(config)
-        values = snapshot.values if isinstance(snapshot.values, dict) else {}
-        checkpoint_call = values.get("tool_call")
-        checkpoint_identity = (
-            checkpoint_call.get("tool_call_id")
-            if isinstance(checkpoint_call, dict)
-            and isinstance(checkpoint_call.get("status"), str)
-            and isinstance(checkpoint_call.get("tool_call_id"), int)
-            else None
-        )
-        if checkpoint_identity is None:
-            raise ProposalStateError("Checkpoint has no Tool Call identity")
-        if checkpoint_identity != approval["tool_call_id"]:
-            raise IdempotencyConflictError(approval["client_resolution_id"])
-        checkpoint_approval = values.get("approval")
-        if checkpoint_approval is not None:
-            if not isinstance(checkpoint_approval, dict) or checkpoint_approval != approval:
-                raise IdempotencyConflictError(approval["client_resolution_id"])
         if any(getattr(task, "interrupts", ()) for task in snapshot.tasks):
             return GraphRecovery(interrupted=True)
         events: list[AiChatEvent] = []

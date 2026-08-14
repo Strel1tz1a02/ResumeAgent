@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-JDStatus = Literal["analysing", "confirmed"]
+JDStatus = Literal["incomplete", "confirmed"]
 RequirementPriority = Literal["required", "preferred", "normal"]
 
 
@@ -24,19 +24,16 @@ class JDRequirementDraft(BaseModel):
 
 
 class JDImportCreate(BaseModel):
-    raw_text: str
     source_url: str | None = None
     company: str = ""
     job_name: str = ""
     type: str = ""
     location: str = ""
-    status: JDStatus = "analysing"
+    status: JDStatus = "incomplete"
     requirements: list[JDRequirementDraft] = Field(default_factory=list)
 
-    _validate_raw_text = field_validator("raw_text")(_strip_required)
-
-
 class JDInformationUpdate(BaseModel):
+    source_url: str | None = None
     company: str | None = None
     job_name: str | None = None
     type: str | None = None
@@ -78,14 +75,6 @@ class JDRequirementUpdate(BaseModel):
         return value
 
 
-class JDOriginResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    raw_text: str
-    source_url: str | None
-
-
 class JDRequirementResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -101,14 +90,13 @@ class JDImportResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    jd_origin_id: int
+    source_url: str | None
     company: str
     job_name: str
     type: str
     location: str
     status: JDStatus
     revision: int
-    origin: JDOriginResponse
     requirements: list[JDRequirementResponse]
 
 

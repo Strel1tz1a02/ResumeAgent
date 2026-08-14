@@ -15,6 +15,7 @@ ToolCallStatus = Literal[
     "received",
     "validated",
     "awaiting_approval",
+    "awaiting_input",
     "approved",
     "executing",
     "resolved",

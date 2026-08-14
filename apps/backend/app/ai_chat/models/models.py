@@ -152,7 +152,7 @@ class AiChatToolCall(Base):
     __table_args__ = (
         # 工具调用只能处于状态机声明的状态中。
         CheckConstraint(
-            "status IN ('received', 'validated', 'awaiting_approval', "
+            "status IN ('received', 'validated', 'awaiting_approval', 'awaiting_input', "
             "'approved', 'executing', 'resolved')",
             name="ck_ai_chat_tool_status",
         ),

@@ -7,7 +7,6 @@ from typing import Any, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # Path to config file for API key persistence
 CONFIG_FILE_PATH = Path(__file__).parent.parent / "data" / "config.json"
 ALLOWED_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
@@ -242,6 +241,13 @@ class Settings(BaseSettings):
     reload: bool = False
     log_level: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "INFO"
     frontend_base_url: str = "http://localhost:3000"
+
+    # 只有同时配置此端点和部署级私网出口边界时才允许 URL 导入；
+    # 否则默认拒绝。Playwright MCP 的来源过滤无法保护重定向目标。
+    playwright_mcp_url: str | None = None
+    playwright_mcp_egress_secured: bool = False
+    playwright_mcp_timeout_seconds: float = 20.0
+    playwright_mcp_max_chars: int = 100_000
 
     # Hard timeout (seconds) for a single resume tailoring/improve request — the
     # backend wraps the improve flow in asyncio.wait_for(timeout=this). It MUST be

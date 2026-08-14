@@ -20,7 +20,11 @@ from app.database import db
 from app.experience import ExperienceAdapter
 from app.experience.routers import ai_chat_router as experience_ai_chat_router
 from app.experience.routers import experiences_router
+from app.jd_import import JDImportAdapter
 from app.jd_import import router as jd_import_router
+from app.jd_import.agent.model import LiteLLMJDImportModel
+from app.jd_import.graph import JDImportGraphDependencies
+from app.jd_import.sources import PlaywrightMCPSourceProvider, UrlPolicy
 from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
@@ -34,15 +38,27 @@ from app.routers import (
 
 logger = logging.getLogger(__name__)
 
-_experience_adapter_registered = False
+_business_adapters_registered = False
 
 
 def _register_business_adapters() -> None:
     """在聊天运行库启动前注册唯一的生产业务 Adapter。"""
-    global _experience_adapter_registered
-    if not _experience_adapter_registered:
+    global _business_adapters_registered
+    if not _business_adapters_registered:
         register_adapter(ExperienceAdapter())
-        _experience_adapter_registered = True
+        policy = UrlPolicy()
+        register_adapter(JDImportAdapter(JDImportGraphDependencies(
+            model=LiteLLMJDImportModel(),
+            page_sources=PlaywrightMCPSourceProvider(
+                settings.playwright_mcp_url,
+                egress_secured=settings.playwright_mcp_egress_secured,
+                policy=policy,
+                timeout_seconds=settings.playwright_mcp_timeout_seconds,
+                max_chars=settings.playwright_mcp_max_chars,
+            ),
+            url_policy=policy,
+        )))
+        _business_adapters_registered = True
 
 
 def _configure_application_logging() -> None:

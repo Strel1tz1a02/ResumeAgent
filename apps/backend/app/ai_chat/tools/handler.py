@@ -5,8 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.ai_chat.tools.types import ToolContext, ToolResult
 from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.tools.types import ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
 
 
@@ -17,6 +17,8 @@ class ToolHandler(ABC):
     description: str
     arguments_schema: type[BaseModel]
     security: ToolSecurity
+    model_visible: bool = True
+    deliver_result_to_model: bool = True
 
     @abstractmethod
     async def validation(

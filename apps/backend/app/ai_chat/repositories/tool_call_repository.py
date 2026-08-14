@@ -2,15 +2,15 @@
 
 from typing import Any, Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.errors import ToolProtocolError
+from app.ai_chat.errors import IdempotencyConflictError, ToolProtocolError
 from app.ai_chat.models import AiChatToolCall, utcnow_iso
 
 
-def _json_values_equal(left: Any, right: Any) -> bool:
+def json_values_equal(left: Any, right: Any) -> bool:
     """按 JSON 类型和值比较，避免 Python 把 bool 与 int 视为相等。"""
     if type(left) is not type(right):
         return False
@@ -18,12 +18,12 @@ def _json_values_equal(left: Any, right: Any) -> bool:
         if left.keys() != right.keys():
             return False
         return all(
-            _json_values_equal(value, right[key])
+            json_values_equal(value, right[key])
             for key, value in left.items()
         )
     if isinstance(left, list):
         return len(left) == len(right) and all(
-            _json_values_equal(left_value, right_value)
+            json_values_equal(left_value, right_value)
             for left_value, right_value in zip(left, right, strict=True)
         )
     return left == right
@@ -94,9 +94,47 @@ class ToolCallRepository:
             or (provider_row is not None and provider_row.id != row.id)
             or row.conversation_id != conversation_id
             or row.tool_name != tool_name
-            or not _json_values_equal(row.arguments, arguments)
+            or not json_values_equal(row.arguments, arguments)
         ):
             raise ToolProtocolError("Tool Call index was reused inconsistently")
+        return row
+
+    async def materialize_system(
+        self,
+        *,
+        conversation_id: int,
+        run_id: int,
+        identity: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> AiChatToolCall:
+        """使用 Run 内稳定身份固化服务端持有的调用。"""
+        next_index = (
+            select(func.coalesce(func.max(AiChatToolCall.tool_call_index), -1) + 1)
+            .where(AiChatToolCall.run_id == run_id)
+            .scalar_subquery()
+        )
+        statement = (
+            sqlite_insert(AiChatToolCall)
+            .values(
+                conversation_id=conversation_id,
+                run_id=run_id,
+                tool_call_index=next_index,
+                provider_tool_call_id=identity,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            .on_conflict_do_nothing()
+        )
+        await self._session.execute(statement)
+        row = await self.get_by_run_provider_id(run_id, identity)
+        if (
+            row is None
+            or row.conversation_id != conversation_id
+            or row.tool_name != tool_name
+            or not json_values_equal(row.arguments, arguments)
+        ):
+            raise IdempotencyConflictError(identity)
         return row
 
     async def get(self, tool_call_id: int) -> AiChatToolCall | None:
@@ -176,6 +214,59 @@ class ToolCallRepository:
         await self._session.flush()
         return result.rowcount == 1
 
+    async def claim_input_request(self, tool_call_id: int) -> bool:
+        """将已校验调用原子转为等待外部输入。"""
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "validated",
+            )
+            .values(status="awaiting_input", updated_at=utcnow_iso())
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
+    async def get_awaiting_input_for_run(self, run_id: int) -> AiChatToolCall | None:
+        result = await self._session.execute(
+            select(AiChatToolCall).where(
+                AiChatToolCall.run_id == run_id,
+                AiChatToolCall.status == "awaiting_input",
+            )
+        )
+        rows = list(result.scalars().all())
+        if len(rows) > 1:
+            raise ToolProtocolError("Run has multiple awaiting-input Tool Calls")
+        return rows[0] if rows else None
+
+    async def resolve_input(
+        self,
+        tool_call_id: int,
+        *,
+        client_resolution_id: str,
+        tool_result: dict[str, Any],
+        delivery_status: Literal["pending", "consumed"],
+    ) -> bool:
+        now = utcnow_iso()
+        result = await self._session.execute(
+            update(AiChatToolCall)
+            .where(
+                AiChatToolCall.id == tool_call_id,
+                AiChatToolCall.status == "awaiting_input",
+                AiChatToolCall.client_resolution_id.is_(None),
+            )
+            .values(
+                status="resolved",
+                tool_result=tool_result,
+                delivery_status=delivery_status,
+                client_resolution_id=client_resolution_id,
+                resolved_at=now,
+                updated_at=now,
+            )
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def approve(self, tool_call_id: int, client_resolution_id: str) -> bool:
         """原子地持久化批准决定，执行器只能领取已批准调用。"""
         result = await self._session.execute(
@@ -223,12 +314,13 @@ class ToolCallRepository:
         decision: str | None,
         tool_result: dict[str, Any],
         client_resolution_id: str | None = None,
+        delivery_status: Literal["pending", "consumed"] = "pending",
     ) -> None:
         """持久化不可变的不透明工具结果。"""
         row.status = "resolved"
         row.decision = decision
         row.tool_result = tool_result
-        row.delivery_status = "pending"
+        row.delivery_status = delivery_status
         row.client_resolution_id = client_resolution_id
         row.resolved_at = utcnow_iso()
         row.updated_at = row.resolved_at
@@ -239,6 +331,7 @@ class ToolCallRepository:
         tool_call_id: int,
         *,
         tool_result: dict[str, Any],
+        delivery_status: Literal["pending", "consumed"] = "pending",
     ) -> bool:
         """原子且仅一次地持久化校验阶段产生的终态结果。"""
         now = utcnow_iso()
@@ -252,7 +345,7 @@ class ToolCallRepository:
                 status="resolved",
                 decision=None,
                 tool_result=tool_result,
-                delivery_status="pending",
+                delivery_status=delivery_status,
                 client_resolution_id=None,
                 resolved_at=now,
                 updated_at=now,

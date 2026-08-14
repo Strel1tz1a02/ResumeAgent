@@ -9,10 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.exc import IntegrityError
-
 from app.ai_chat.errors import IdempotencyConflictError, ToolProtocolError
 from app.ai_chat.models import AiChatMessage, AiChatToolCall
 from app.ai_chat.repositories import (
@@ -21,14 +17,21 @@ from app.ai_chat.repositories import (
     ToolCallRepository,
 )
 from app.ai_chat.services.tool_call_service import ToolCallService
-from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
+from app.ai_chat.streaming.model import build_model_tools
 from app.ai_chat.tools.buffer import encode_tool_call
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
 from app.database import Database
 from app.scripts.migrate_ai_chat_tool_call_state import (
     migrate as migrate_ai_chat_tool_call_state,
 )
+from app.scripts.migrate_ai_chat_tool_input_state import (
+    migrate as migrate_ai_chat_tool_input_state,
+)
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.exc import IntegrityError
 
 
 class _DemoArguments(BaseModel):
@@ -73,6 +76,12 @@ class _DemoHandler(ToolHandler):
 class _FloatHandler(_DemoHandler):
     name = "float_demo"
     arguments_schema = _FloatArguments
+
+
+class _InternalHandler(_DemoHandler):
+    name = "internal"
+    model_visible = False
+    deliver_result_to_model = False
 
 
 class _NeverValidateHandler(_DemoHandler):
@@ -314,6 +323,116 @@ async def test_bind_handlers_returns_an_isolated_immutable_service(isolated_db) 
         service.model_handlers["other"] = handler  # type: ignore[index]
     with pytest.raises(TypeError):
         bound.model_handlers["other"] = handler  # type: ignore[index]
+
+
+async def test_external_input_call_resolves_once_and_replays(isolated_db) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    service = _tool_service(isolated_db, _DemoHandler())
+    call = await service.validate_call(
+        _tool_context(conversation_id, run_id),
+        _tool_call(value="question-batch"),
+    )
+    waiting = await service.request_input(call["tool_call_id"])
+    assert waiting["status"] == "awaiting_input"
+    assert (await service.find_awaiting_input(run_id))["tool_call_id"] == call[  # type: ignore[index]
+        "tool_call_id"
+    ]
+
+    first = await service.resolve_input(
+        call["tool_call_id"], "client-input-1", {"answers": [{"value": "Python"}]}
+    )
+    replay = await service.resolve_input(
+        call["tool_call_id"], "client-input-1", {"answers": [{"value": "Python"}]}
+    )
+    assert first.replayed is False
+    assert replay.replayed is True
+    assert replay.payload == {"answers": [{"value": "Python"}]}
+    assert await service.find_awaiting_input(run_id) is None
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.resolve_input(
+            call["tool_call_id"], "client-input-2", {"answers": [{"value": "Java"}]}
+        )
+    with pytest.raises(IdempotencyConflictError):
+        await service.resolve_input(
+            call["tool_call_id"], "client-input-1", {"answers": [{"value": True}]}
+        )
+
+
+async def test_system_call_uses_stable_identity_and_allocates_indexes(isolated_db) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    service = _tool_service(isolated_db, _DemoHandler())
+    context = _tool_context(conversation_id, run_id)
+    first = await service.validate_system_call(
+        context,
+        identity="jd-import:persist:jd-1",
+        name="demo",
+        arguments={"value": "one"},
+    )
+    replay = await service.validate_system_call(
+        context,
+        identity="jd-import:persist:jd-1",
+        name="demo",
+        arguments={"value": "one"},
+    )
+    second = await service.validate_system_call(
+        context,
+        identity="jd-import:persist:jd-2",
+        name="demo",
+        arguments={"value": "two"},
+    )
+    assert replay["tool_call_id"] == first["tool_call_id"]
+    assert replay["replayed"] is True
+    assert second["index"] == first["index"] + 1
+    with pytest.raises(IdempotencyConflictError):
+        await service.validate_system_call(
+            context,
+            identity="jd-import:persist:jd-1",
+            name="demo",
+            arguments={"value": "changed"},
+        )
+
+
+async def test_model_call_as_discards_model_identity(isolated_db) -> None:
+    conversation_id, run_id = await _create_conversation_run(isolated_db)
+    service = _tool_service(isolated_db, _DemoHandler())
+    call = await service.validate_model_call_as(
+        _tool_context(conversation_id, run_id),
+        encode_tool_call(
+            index=999,
+            provider_id="untrusted-provider-id",
+            name="demo",
+            arguments=json.dumps({"value": "question"}),
+        ),
+        identity="jd-import:questions:1",
+        expected_name="demo",
+    )
+    assert call["index"] == 0
+    assert call["provider_id"] == "jd-import:questions:1"
+
+
+def test_tool_input_state_migration_is_idempotent(tmp_path) -> None:
+    path = tmp_path / "tool-input-state.db"
+    database = Database(path)
+    database._ensure_initialized()
+    assert database._sync_engine is not None
+    migrate_ai_chat_tool_input_state(database._sync_engine)
+    migrate_ai_chat_tool_input_state(database._sync_engine)
+    with database._sync_engine.connect() as connection:
+        table_sql = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='ai_chat_tool_calls'"
+        ).scalar_one()
+    assert "'awaiting_input'" in table_sql
+
+
+def test_handler_capabilities_control_model_schema_and_delivery() -> None:
+    visible = _DemoHandler()
+    internal = _InternalHandler()
+    definitions = build_model_tools({visible.name: visible, internal.name: internal})
+    assert [item["function"]["name"] for item in definitions] == ["demo"]
+    assert visible.deliver_result_to_model is True
+    assert internal.deliver_result_to_model is False
 
 
 def test_tool_handler_requires_each_business_method() -> None:
@@ -872,14 +991,6 @@ async def test_validate_call_rejects_durable_decision_without_resolution_token(
             {"value": "input"},
             {"trusted": "input"},
             {"outcome": "early"},
-        ),
-        (
-            "resolved",
-            None,
-            "orphan-token",
-            {"value": "input"},
-            {"trusted": "input"},
-            {"outcome": "done"},
         ),
         ("resolved", "approve", "approval-1", None, None, {"outcome": "done"}),
     ],

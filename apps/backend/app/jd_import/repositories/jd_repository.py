@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.jd_import.models import JDInformation, JDOrigin, JDRequirement
+from app.jd_import.models import JDInformation, JDRequirement
 
 
 class JDImportRepository:
@@ -17,15 +17,12 @@ class JDImportRepository:
     async def create(
         self,
         *,
-        origin_fields: dict[str, Any],
         information_fields: dict[str, Any],
         requirements: list[dict[str, Any]],
     ) -> JDInformation:
-        origin = JDOrigin(**origin_fields)
         information = JDInformation(**information_fields)
         information.requirements = [JDRequirement(**item) for item in requirements]
-        origin.information = information
-        self._session.add(origin)
+        self._session.add(information)
         await self._session.flush()
         return information
 
@@ -58,7 +55,6 @@ class JDImportRepository:
             update(JDInformation)
             .where(
                 JDInformation.id == information_id,
-                JDInformation.status == "analysing",
                 JDInformation.revision == expected_revision,
             )
             .values(revision=JDInformation.revision + 1)
@@ -104,7 +100,5 @@ class JDImportRepository:
         return result.rowcount == 1
 
     async def delete(self, information: JDInformation) -> None:
-        await self._session.execute(
-            delete(JDOrigin).where(JDOrigin.id == information.jd_origin_id)
-        )
+        await self._session.delete(information)
         await self._session.flush()

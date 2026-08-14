@@ -20,6 +20,7 @@ from app.ai_chat.errors import (
 )
 from app.ai_chat.models import AiChatToolCall
 from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.repositories.tool_call_repository import json_values_equal
 from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.tools.types import (
     ApprovalAction,
@@ -146,16 +147,21 @@ class ToolCallService:
             )
         ):
             raise ToolProtocolError("Received Tool Call has unexpected state data")
-        if row.status in {"validated", "awaiting_approval", "approved"}:
-            if row.proposal_payload is None or row.guard_payload is None:
-                raise ToolProtocolError("Tool Call has no trusted payload")
-        if row.status in {"validated", "awaiting_approval"}:
-            if (
-                row.tool_result is not None
-                or row.decision is not None
-                or row.client_resolution_id is not None
-            ):
-                raise ToolProtocolError("Tool Call has unexpected resolution data")
+        if row.status in {
+            "validated",
+            "awaiting_approval",
+            "awaiting_input",
+            "approved",
+        } and (
+            row.proposal_payload is None or row.guard_payload is None
+        ):
+            raise ToolProtocolError("Tool Call has no trusted payload")
+        if row.status in {"validated", "awaiting_approval", "awaiting_input"} and (
+            row.tool_result is not None
+            or row.decision is not None
+            or row.client_resolution_id is not None
+        ):
+            raise ToolProtocolError("Tool Call has unexpected resolution data")
         if row.status == "approved":
             if row.tool_result is not None:
                 raise ToolProtocolError("Approved Tool Call already has a result")
@@ -170,8 +176,6 @@ class ToolCallService:
                 raise ToolProtocolError("Resolved Tool Call has no result")
             if row.decision not in (None, "approve", "reject"):
                 raise ToolProtocolError("Resolved Tool Call has an unsupported decision")
-            if row.decision is None and row.client_resolution_id is not None:
-                raise ToolProtocolError("Resolved Tool Call has an orphan resolution identity")
             if row.decision is not None:
                 if row.proposal_payload is None or row.guard_payload is None:
                     raise ToolProtocolError(
@@ -206,6 +210,7 @@ class ToolCallService:
         if row.status not in {
             "validated",
             "awaiting_approval",
+            "awaiting_input",
             "approved",
             "resolved",
         }:
@@ -309,6 +314,61 @@ class ToolCallService:
             await session.commit()
             tool_call_id = row.id
 
+        return await self._validate_materialized(context, tool_call_id, handler)
+
+    async def validate_system_call(
+        self,
+        context: ToolContext,
+        *,
+        identity: str,
+        name: str,
+        arguments: JsonObject,
+    ) -> ToolCall:
+        """校验具有 Run 内稳定身份的服务端调用。"""
+        if not identity.strip():
+            raise ToolProtocolError("Stable Tool Call identity must be non-empty")
+        handler = self._handler(name)
+        _ensure_finite_json(arguments, message="Tool Call contains a non-finite number")
+        async with self.session_factory() as session:
+            row = await self.repositories.create(session).tool_calls.materialize_system(
+                conversation_id=context.conversation_id,
+                run_id=context.run_id,
+                identity=identity,
+                tool_name=name,
+                arguments=dict(arguments),
+            )
+            await session.commit()
+            tool_call_id = row.id
+        return await self._validate_materialized(context, tool_call_id, handler)
+
+    async def validate_model_call_as(
+        self,
+        context: ToolContext,
+        raw_call: str,
+        *,
+        identity: str,
+        expected_name: str,
+    ) -> ToolCall:
+        """保留模型参数，但将调用身份替换为服务端身份。"""
+        _index, _provider_id, name, arguments = self._parse_model_call(raw_call)
+        if name != expected_name:
+            raise ToolProtocolError(f"Expected Tool Call {expected_name}, got {name}")
+        return await self.validate_system_call(
+            context,
+            identity=identity,
+            name=expected_name,
+            arguments=arguments,
+        )
+
+    async def _validate_materialized(
+        self,
+        context: ToolContext,
+        tool_call_id: int,
+        handler: ToolHandler,
+    ) -> ToolCall:
+        """为已持久化调用生成且仅生成一次可信载荷。"""
+        name = handler.name
+
         async with self.session_factory() as session:
             repository = self.repositories.create(session).tool_calls
             row = await repository.get(tool_call_id)
@@ -340,6 +400,9 @@ class ToolCallService:
                 saved = await repository.resolve_received(
                     tool_call_id,
                     tool_result=dict(validation.payload),
+                    delivery_status=(
+                        "pending" if handler.deliver_result_to_model else "consumed"
+                    ),
                 )
             elif (
                 isinstance(validation, tuple)
@@ -406,6 +469,115 @@ class ToolCallService:
         }:
             raise ToolProtocolError("Tool Call approval request was not persisted")
         return durable
+
+    async def request_input(self, tool_call_id: int) -> ToolCall:
+        """持久化已校验 Tool Call 正在等待外部输入的状态。"""
+        async with self.session_factory() as session:
+            repository = self.repositories.create(session).tool_calls
+            row = await repository.get(tool_call_id)
+            if row is None:
+                raise ToolCallNotFoundError(str(tool_call_id))
+            handler = self._handler(row.tool_name)
+            call = self._call_from_row(row, handler, replayed=True)
+            if call["status"] in {"awaiting_input", "resolved"}:
+                return call
+            if call["status"] != "validated":
+                raise ToolProtocolError("Tool Call cannot request input")
+            claimed = await repository.claim_input_request(tool_call_id)
+            if claimed:
+                await session.commit()
+            else:
+                await session.rollback()
+        return await self._reload_call(tool_call_id, handler, replayed=not claimed)
+
+    async def find_awaiting_input(self, run_id: int) -> ToolCall | None:
+        """返回指定 Run 中唯一等待外部输入的 Tool Call。"""
+        async with self.session_factory() as session:
+            repository = self.repositories.create(session).tool_calls
+            row = await repository.get_awaiting_input_for_run(run_id)
+            if row is None:
+                return None
+            return self._call_from_row(row, self._handler(row.tool_name), replayed=True)
+
+    async def get_call_by_run_identity(
+        self, run_id: int, identity: str
+    ) -> ToolCall:
+        """按稳定身份重新加载服务端持有的 Tool Call。"""
+        async with self.session_factory() as session:
+            row = await self.repositories.create(
+                session
+            ).tool_calls.get_by_run_provider_id(run_id, identity)
+            if row is None:
+                raise ToolCallNotFoundError(identity)
+            return self._call_from_row(row, self._handler(row.tool_name), replayed=True)
+
+    async def consume_result(self, tool_call_id: int) -> None:
+        """标记已被 Graph 消费的 Tool Result，避免再次投递。"""
+        async with self.session_factory() as session:
+            repository = self.repositories.create(session).tool_calls
+            row = await repository.get(tool_call_id)
+            if row is None:
+                raise ToolCallNotFoundError(str(tool_call_id))
+            if row.status != "resolved":
+                raise ToolProtocolError("Tool Call has no result to consume")
+            if row.delivery_status == "pending":
+                await repository.mark_consumed([row])
+                await session.commit()
+
+    async def resolve_input(
+        self,
+        tool_call_id: int,
+        client_resolution_id: str,
+        payload: JsonObject,
+    ) -> ToolResult:
+        """原子持久化外部输入结果，并校验重放一致性。"""
+        if not client_resolution_id.strip():
+            raise ToolProtocolError("Input resolution id must be non-empty")
+        _ensure_finite_json(payload, message="Tool input contains a non-finite number")
+        handler: ToolHandler
+        async with self.session_factory() as session:
+            repository = self.repositories.create(session).tool_calls
+            row = await repository.get(tool_call_id)
+            if row is None:
+                raise ToolCallNotFoundError(str(tool_call_id))
+            handler = self._handler(row.tool_name)
+            if row.status == "resolved":
+                if (
+                    row.client_resolution_id != client_resolution_id
+                    or not json_values_equal(row.tool_result, payload)
+                ):
+                    raise IdempotencyConflictError(client_resolution_id)
+                return self._result_from_row(row, replayed=True)
+            if row.status != "awaiting_input":
+                raise ToolProtocolError("Tool Call is not awaiting input")
+            try:
+                claimed = await repository.resolve_input(
+                    tool_call_id,
+                    client_resolution_id=client_resolution_id,
+                    tool_result=dict(payload),
+                    delivery_status=(
+                        "pending" if handler.deliver_result_to_model else "consumed"
+                    ),
+                )
+                if claimed:
+                    await session.commit()
+                else:
+                    await session.rollback()
+            except IntegrityError:
+                await session.rollback()
+                claimed = False
+        if claimed:
+            return await self._reload_result(tool_call_id, replayed=False)
+        resolved = await self._reload_result(tool_call_id, replayed=True)
+        async with self.session_factory() as session:
+            row = await self.repositories.create(session).tool_calls.get(tool_call_id)
+            if (
+                row is None
+                or row.client_resolution_id != client_resolution_id
+                or not json_values_equal(row.tool_result, payload)
+            ):
+                raise IdempotencyConflictError(client_resolution_id)
+        return resolved
 
     async def _reload_decision(self, approval: ApprovalDecision) -> ToolCall:
         """原子状态竞争失败后，只根据最新持久化快照映射审批结果。"""
@@ -560,6 +732,11 @@ class ToolCallService:
                         decision=decision,
                         tool_result=payload,
                         client_resolution_id=resolution_id,
+                        delivery_status=(
+                            "pending"
+                            if handler.deliver_result_to_model
+                            else "consumed"
+                        ),
                     )
                     await session.commit()
                     return ToolResult(

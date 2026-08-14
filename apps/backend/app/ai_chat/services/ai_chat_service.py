@@ -20,6 +20,7 @@ from app.ai_chat.errors import (
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.models import AiChatMessage
 from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.services.tool_call_service import ToolCallService
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
 from app.ai_chat.tools.types import ApprovalDecision
 from app.ai_chat.types import AdapterInput, JsonObject, ScopeRef, SubjectRef
@@ -37,7 +38,7 @@ async def _await_shielded_task(
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
             cancellation = cancellation or exc
-        except Exception:
+        except Exception:  # noqa: BLE001 - inspect task outcome after shielding
             break
     if task.cancelled():
         if cancellation is not None:
@@ -64,6 +65,37 @@ class AiChatService:
         self._registry = registry
         self._runner = runner
         self._repositories = repositories
+
+    def _tool_calls(self, adapter_name: str) -> ToolCallService:
+        adapter = self._registry.get(adapter_name)
+        return ToolCallService(
+            database_module.db.session, self._repositories
+        ).bind_handlers(adapter.get_tool_handlers())
+
+    @staticmethod
+    def _validate_approval_checkpoint(
+        snapshot: object, approval: ApprovalDecision
+    ) -> None:
+        """在服务层校验检查点中的审批身份和本次请求完全一致。"""
+        snapshot_values = getattr(snapshot, "values", None)
+        values = snapshot_values if isinstance(snapshot_values, dict) else {}
+        checkpoint_call = values.get("tool_call")
+        checkpoint_identity = (
+            checkpoint_call.get("tool_call_id")
+            if isinstance(checkpoint_call, dict)
+            and isinstance(checkpoint_call.get("status"), str)
+            and isinstance(checkpoint_call.get("tool_call_id"), int)
+            else None
+        )
+        if checkpoint_identity is None:
+            raise ProposalStateError("Checkpoint has no Tool Call identity")
+        if checkpoint_identity != approval["tool_call_id"]:
+            raise IdempotencyConflictError(approval["client_resolution_id"])
+        checkpoint_approval = values.get("approval")
+        if checkpoint_approval is not None and (
+            not isinstance(checkpoint_approval, dict) or checkpoint_approval != approval
+        ):
+            raise IdempotencyConflictError(approval["client_resolution_id"])
 
     async def create_conversation(
         self,
@@ -194,6 +226,7 @@ class AiChatService:
                 raise ConversationNotFoundError(str(conversation_id))
             current_message_rows = await repositories.messages.list_completed_for_run(run_id)
             pending_rows = await repositories.tool_calls.pending_results(conversation_id)
+            handlers = self._registry.get(conversation.adapter).get_tool_handlers()
             pending: list[JsonObject] = [
                 {
                     "tool_call_id": row.id,
@@ -203,6 +236,10 @@ class AiChatService:
                     "result": dict(row.tool_result or {}),
                 }
                 for row in pending_rows
+                if (
+                    row.tool_name not in handlers
+                    or handlers[row.tool_name].deliver_result_to_model
+                )
             ]
             value: AdapterInput = {
                 "conversation_id": conversation.id,
@@ -232,6 +269,7 @@ class AiChatService:
         text = ""
         suspended = False
         proposal_event: AiChatEvent | None = None
+        question_event: AiChatEvent | None = None
         try:
             async for event in self._runner.stream(adapter_name=adapter_name, value=value):
                 if event.event == "assistant.delta":
@@ -242,6 +280,9 @@ class AiChatService:
                     # 工具提案已经落库，但此时图可能尚未完成中断。
                     # 先暂存，等检查点和暂停状态都提交后再发给前端。
                     proposal_event = event
+                    continue
+                if event.event == "jd.questions.requested":
+                    question_event = event
                     continue
                 if event.event == "_graph.interrupted":
                     suspended = True
@@ -277,11 +318,25 @@ class AiChatService:
                 await repositories.tool_calls.mark_consumed(delivered_calls)
                 await session.commit()
             if suspended:
-                if proposal_event is None:
+                business_event = question_event or proposal_event
+                if business_event is None:
                     raise ProposalStateError(
-                        "proposal.requested must be emitted before graph interrupt"
+                        "business request must be emitted before graph interrupt"
                     )
-                yield proposal_event
+                if question_event is not None:
+                    waiting = await self._tool_calls(adapter_name).find_awaiting_input(
+                        value["run_id"]
+                    )
+                    proposal = waiting["proposal_payload"] if waiting else None
+                    if (
+                        waiting is None
+                        or not isinstance(proposal, dict)
+                        or proposal.get("batch_id") != question_event.data.get("batch_id")
+                    ):
+                        raise ProposalStateError(
+                            "question event has no durable awaiting-input Tool Call"
+                        )
+                yield business_event
             else:
                 yield AiChatEvent("assistant.completed", {"message_id": assistant_id, "content": text},)
         except asyncio.CancelledError:
@@ -301,6 +356,114 @@ class AiChatService:
             )
             if not silent_failure:
                 yield AiChatEvent("run.failed", {"code": code})
+
+    async def resolve_question_batch(
+        self, conversation_id: int, batch_id: str, answer: JsonObject
+    ) -> AsyncIterator[AiChatEvent]:
+        """领取并恢复一个完整 JD 问题批次，不创建新 Run。"""
+        from app.jd_import.agent.questions import validate_batch_answer
+        from app.jd_import.agent.types import QuestionBatch, QuestionBatchAnswer
+
+        parsed_answer = QuestionBatchAnswer.model_validate(answer)
+        async with database_module.db.session() as session:
+            repositories = self._repositories.create(session)
+            conversation = await repositories.conversations.get(conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError(str(conversation_id))
+            if conversation.adapter != "JDImportAdapter":
+                raise ProposalStateError(batch_id)
+        snapshot = await self._runner.get_state(
+            adapter_name="JDImportAdapter", conversation_id=conversation_id
+        )
+        values = snapshot.values if isinstance(snapshot.values, dict) else {}
+        run_id = values.get("run_id")
+        if not isinstance(run_id, int):
+            raise ProposalStateError(batch_id)
+        checkpoint_call_id = values.get("question_tool_call_id")
+        tools = self._tool_calls("JDImportAdapter")
+        if isinstance(checkpoint_call_id, int):
+            call = await tools.get_call(checkpoint_call_id)
+        else:
+            question_state = values.get("questions")
+            history = (
+                question_state.get("answers", [])
+                if isinstance(question_state, dict)
+                else []
+            )
+            matching_round = next(
+                (
+                    index
+                    for index, item in enumerate(history, start=1)
+                    if isinstance(item, dict) and item.get("batch_id") == batch_id
+                ),
+                None,
+            )
+            if matching_round is None:
+                raise ProposalStateError(batch_id)
+            call = await tools.get_call_by_run_identity(
+                run_id, f"jd-import:questions:{matching_round}"
+            )
+        batch = QuestionBatch.model_validate(call["proposal_payload"])
+        if batch.batch_id != batch_id:
+            raise ProposalStateError(batch_id)
+        validate_batch_answer(batch, parsed_answer)
+        resolution = await tools.resolve_input(
+            call["tool_call_id"],
+            parsed_answer.client_resolution_id,
+            parsed_answer.model_dump(mode="json"),
+        )
+        if checkpoint_call_id != call["tool_call_id"]:
+            yield AiChatEvent("message.replayed", {"batch_id": batch_id})
+            return
+
+        async with database_module.db.session() as session:
+            repositories = self._repositories.create(session)
+            run = await repositories.runs.get(run_id)
+            if run is None:
+                raise ProposalStateError(batch_id)
+            if run.status == "completed" and resolution.replayed:
+                yield AiChatEvent("message.replayed", {"batch_id": batch_id})
+                return
+            transitioned = await repositories.runs.transition(
+                run_id, from_statuses={"suspended"}, to_status="running"
+            )
+            if not transitioned:
+                raise RunInProgressError(str(run_id))
+            await session.commit()
+
+        requested: AiChatEvent | None = None
+        interrupted = False
+        try:
+            async for event in self._runner.resume_value(
+                adapter_name="JDImportAdapter",
+                conversation_id=conversation_id,
+                value={"tool_call_id": call["tool_call_id"]},
+            ):
+                if event.event == "jd.questions.requested":
+                    if event.data.get("batch_id") == batch_id:
+                        continue
+                    requested = event
+                    continue
+                if event.event == "_graph.interrupted":
+                    interrupted = True
+                    continue
+                yield event
+            async with database_module.db.session() as session:
+                repositories = self._repositories.create(session)
+                await repositories.runs.transition(
+                    run_id, from_statuses={"running"},
+                    to_status="suspended" if interrupted else "completed",
+                )
+                await session.commit()
+            if interrupted and requested is not None:
+                yield requested
+        except asyncio.CancelledError:
+            async with database_module.db.session() as session:
+                await self._repositories.create(session).runs.transition(
+                    run_id, from_statuses={"running"}, to_status="suspended"
+                )
+                await session.commit()
+            raise
 
     async def _finish_interrupted_run(
         self,
@@ -375,10 +538,14 @@ class AiChatService:
         }
         claimed_running = False
         try:
-            recovery = await self._runner.ensure_interrupted(
+            snapshot = await self._runner.get_state(
                 adapter_name=adapter_name,
                 conversation_id=conversation_id,
-                approval=approval,
+            )
+            self._validate_approval_checkpoint(snapshot, approval)
+            recovery = await self._runner.advance_to_boundary(
+                adapter_name=adapter_name,
+                conversation_id=conversation_id,
             )
             if not recovery.interrupted:
                 async with database_module.db.session() as session:
@@ -491,10 +658,10 @@ class AiChatService:
                 raise claim_cancellation
 
             resumed_events: list[AiChatEvent] = []
-            async for event in self._runner.resume(
+            async for event in self._runner.resume_value(
                 adapter_name=adapter_name,
                 conversation_id=conversation_id,
-                approval=approval,
+                value=approval,
             ):
                 if event.event == "_graph.interrupted":
                     raise ProposalStateError("proposal finalization interrupted again")
