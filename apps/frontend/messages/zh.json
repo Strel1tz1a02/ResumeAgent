@@ -100,6 +100,10 @@
       "title": "JD 工作区",
       "description": "批量导入职位描述并管理已入库 JD。"
     },
+    "resumeGeneration": {
+      "title": "智能简历生成",
+      "description": "从经历证据规划并生成面向 JD 的简历。"
+    },
     "uploadDialog": {
       "success": "简历上传成功。",
       "successMaster": "简历已上传并设为主简历。",
@@ -111,6 +115,35 @@
       "tryDifferentFile": "尝试其他文件",
       "parsingFailedKeepOpen": "AI 解析失败。请尝试其他文件，或关闭此对话框。"
     }
+  },
+  "resumeGeneration": {
+    "back": "返回仪表板",
+    "kicker": "经历组合规划",
+    "title": "智能简历生成",
+    "description": "分析 JD、召回经历证据、规划有限版面中的经历组合，并生成带来源追踪的简历。",
+    "configure": "生成配置",
+    "configureDescription": "选择目标 JD 和执行模式。",
+    "jd": "目标 JD",
+    "selectJD": "请选择已入库 JD",
+    "mode": "执行模式",
+    "modeAuto": "自动（LLM 失败时确定性降级）",
+    "modeLLM": "仅 LLM",
+    "modeDeterministic": "确定性基线",
+    "pages": "页数预算",
+    "generate": "生成规划与预览",
+    "generating": "正在分析和规划...",
+    "emptyTitle": "尚未生成计划",
+    "emptyDescription": "选择 JD 后开始，系统只会使用已就绪经历中的证据。",
+    "coverage": "加权覆盖率",
+    "selectedExperiences": "入选经历",
+    "searchRounds": "检索轮次",
+    "review": "审查结果",
+    "plan": "ResumePlan",
+    "promotedSkills": "由独特证据提升的技能",
+    "gaps": "未覆盖要求",
+    "preview": "简历预览",
+    "confirm": "确认并创建简历",
+    "confirming": "正在创建..."
   },
   "experiences": {
     "kicker": "证据工作区",

@@ -774,9 +774,11 @@ class Database:
             AiChatToolCall,
         )
         from app.background_jobs.models import BackgroundJobOutbox
+        from app.resume_generation.models import ResumeGenerationRun
 
         async with self._session() as session:
             await session.execute(delete(BackgroundJobOutbox))
+            await session.execute(delete(ResumeGenerationRun))
             await session.execute(delete(AiChatToolCall))
             await session.execute(delete(AiChatMessage))
             await session.execute(delete(AiChatRun))

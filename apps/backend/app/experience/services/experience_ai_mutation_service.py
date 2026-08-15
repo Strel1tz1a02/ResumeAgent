@@ -27,6 +27,7 @@ from app.experience.services.experience_fields import (
     normalize_field_value,
 )
 from app.experience.services.experience_service import ExperienceService
+from app.resume_generation.indexing import enqueue_experience_index_sync
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,7 @@ class ExperienceAiMutationService:
         await self._fields.advance_experience_fields(updated, {field})
         updated = await self._refresh_completeness(updated)
         detail = await ExperienceService(self._session)._detail(updated)
+        await enqueue_experience_index_sync(self._session, experience_id)
         current = await self._fields.snapshot(experience_id, field, None)
         return self._applied(current, detail)
 
@@ -249,6 +251,7 @@ class ExperienceAiMutationService:
         await self._fields.advance_evidence_fields(experience_id, evidence)
         updated = await self._refresh_completeness(item)
         detail = await ExperienceService(self._session)._detail(updated)
+        await enqueue_experience_index_sync(self._session, experience_id)
         current = await self._fields.snapshot(experience_id, "action", evidence_id)
         return {
             "outcome": "applied",
@@ -281,6 +284,7 @@ class ExperienceAiMutationService:
         await self._fields.advance_collection(updated)
         updated = await self._refresh_completeness(updated)
         detail = await ExperienceService(self._session)._detail(updated)
+        await enqueue_experience_index_sync(self._session, experience_id)
         collection = await self._fields.snapshot(experience_id, "evidence_new", None)
         return {
             "outcome": "applied",

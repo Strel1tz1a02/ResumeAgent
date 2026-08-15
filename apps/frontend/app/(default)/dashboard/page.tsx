@@ -20,6 +20,7 @@ import Settings from 'lucide-react/dist/esm/icons/settings';
 import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle';
 import BookOpenText from 'lucide-react/dist/esm/icons/book-open-text';
 import Briefcase from 'lucide-react/dist/esm/icons/briefcase';
+import Sparkles from 'lucide-react/dist/esm/icons/sparkles';
 
 import {
   fetchResume,
@@ -306,7 +307,7 @@ export default function DashboardPage() {
     return Math.abs(hash);
   };
 
-  const totalCards = 1 + tailoredResumes.length + 3;
+  const totalCards = 1 + tailoredResumes.length + 4;
   const fillerCount = Math.max(0, (5 - (totalCards % 5)) % 5);
   const extraFillerCount = 5;
   // Use Tailwind classes for fillers now that we have them in config or use specific hex if needed
@@ -567,7 +568,26 @@ export default function DashboardPage() {
           </Card>
         </Link>
 
-        {/* 5. Create Tailored Resume */}
+        {/* 5. Evidence-grounded Resume Generation */}
+        <Link href="/resume-generation" className="block h-full">
+          <Card variant="interactive" className="aspect-square h-full bg-blue-50">
+            <div className="flex h-full flex-1 flex-col justify-between">
+              <div className="flex h-14 w-14 items-center justify-center border-2 border-black bg-blue-700 text-white">
+                <Sparkles className="h-7 w-7" />
+              </div>
+              <div>
+                <CardTitle className="text-lg uppercase">
+                  {t('dashboard.resumeGeneration.title')}
+                </CardTitle>
+                <CardDescription className="mt-2 text-xs">
+                  {t('dashboard.resumeGeneration.description')}
+                </CardDescription>
+              </div>
+            </div>
+          </Card>
+        </Link>
+
+        {/* 6. Legacy Tailor */}
         <Card className="aspect-square h-full" variant="default">
           <div className="flex-1 flex flex-col items-center justify-center text-center h-full">
             <Button

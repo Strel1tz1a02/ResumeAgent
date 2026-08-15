@@ -107,7 +107,7 @@ describe('experience API client', () => {
   it('previews text and saves the edited draft through the global save path', async () => {
     const draft = {
       experience: { kind: 'project' as const, title: 'Agent platform' },
-      evidence_items: [{ action: 'Built an agent' }],
+      evidence_items: [{ background: null, action: 'Built an agent', result: null }],
     };
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify(draft), { status: 200 }))

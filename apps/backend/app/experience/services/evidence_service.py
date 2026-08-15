@@ -13,7 +13,11 @@ from app.experience.repositories.experience_repository import (
     ExperienceRepository,
     ordered_evidence_ids,
 )
-from app.experience.schemas.evidence_items import EvidenceCreateRequest, EvidenceReorder, EvidenceUpdate
+from app.experience.schemas.evidence_items import (
+    EvidenceCreateRequest,
+    EvidenceReorder,
+    EvidenceUpdate,
+)
 from app.experience.schemas.experiences import ExperienceDetail
 from app.experience.services.experience_completeness_service import (
     READY_COMPLETENESS_THRESHOLD,
@@ -29,6 +33,7 @@ from app.experience.services.experience_service import (
     ExperienceService,
     ExperienceValidationError,
 )
+from app.resume_generation.indexing import enqueue_experience_index_sync
 
 
 class EvidenceService:
@@ -159,6 +164,7 @@ class EvidenceService:
             updated = await mutation(item)
             updated = await self._recalculate_completeness(updated)
             detail = await self._detail(updated)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
             return detail
         except FieldRevisionConflictError as error:

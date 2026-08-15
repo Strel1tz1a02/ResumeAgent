@@ -31,6 +31,7 @@ from app.experience.services.experience_field_service import (
     ExperienceFieldService,
     FieldRevisionConflictError,
 )
+from app.resume_generation.indexing import enqueue_experience_index_sync
 
 _NON_NULLABLE_UPDATE_FIELDS = frozenset(
     {"kind", "title", "is_current", "technologies", "tags"}
@@ -86,6 +87,7 @@ class ExperienceService:
             await self._fields.initialize_experience(item)
             await self._recalculate_completeness(item)
             detail = await self._detail(item)
+            await enqueue_experience_index_sync(self._session, item.experience_id)
             await self._session.commit()
             return detail
         except Exception:
@@ -141,6 +143,7 @@ class ExperienceService:
                 await self._fields.advance_experience_fields(updated, changed_keys)
             await self._recalculate_completeness(updated)
             detail = await self._detail(updated)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
             return detail
         except FieldRevisionConflictError as error:
@@ -175,6 +178,7 @@ class ExperienceService:
                 experience_id, "ready"
             )
             detail = await self._detail(updated)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
             return detail
         except ExperienceDomainError:
@@ -203,6 +207,7 @@ class ExperienceService:
                 item.experience_id, "draft"
             )
             detail = await self._detail(updated)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
             return detail
         except ExperienceDomainError:
@@ -236,6 +241,7 @@ class ExperienceService:
                 )
             for evidence_id in owned_evidence_ids:
                 await self._evidenceRepository.delete(evidence_id)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
         except ExperienceDomainError:
             await self._session.rollback()
@@ -259,6 +265,7 @@ class ExperienceService:
                 experience_id, target_status
             )
             detail = await self._detail(updated)
+            await enqueue_experience_index_sync(self._session, experience_id)
             await self._session.commit()
             return detail
         except ExperienceDomainError:

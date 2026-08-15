@@ -3,6 +3,10 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+
+from app.background_jobs.models import BackgroundJobOutbox
 from app.experience.repositories import (
     evidence_repository as evidence_repository_module,
 )
@@ -21,7 +25,6 @@ from app.experience.services.experience_service import (
 )
 from app.main import app
 from app.models import Resume
-from httpx import ASGITransport, AsyncClient
 
 
 def _client() -> AsyncClient:
@@ -79,6 +82,16 @@ async def test_import_text_previews_without_writing_then_confirms(isolated_db) -
     assert len(payload["evidence_ids"]) == 2
     assert payload["evidence_items"][0]["action"] == "Built assistant"
     assert payload["evidence_items"][1]["action"] == "Added preview"
+
+    async with isolated_db.session() as session:
+        outbox = (
+            await session.scalars(
+                select(BackgroundJobOutbox).where(
+                    BackgroundJobOutbox.topic == "resume.evidence_index"
+                )
+            )
+        ).one()
+    assert outbox.payload == {"experience_id": payload["experience_id"]}
 
     async with _client() as client:
         stored = await client.get(f"/api/v1/experiences/{payload['experience_id']}")

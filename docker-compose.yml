@@ -30,6 +30,7 @@ services:
       # - LLM_API_BASE=http://host.docker.internal:11434
       - LLM_API_BASE=${LLM_API_BASE:-}
       - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
       # CORS origins (JSON array format). FRONTEND_BASE_URL is auto-included.
       #- CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
     restart: unless-stopped
@@ -62,9 +63,36 @@ services:
       retries: 3
     restart: unless-stopped
 
+  resume-index-worker:
+    image: ghcr.io/srbhr/resume-matcher
+    build: .
+    working_dir: /app/backend
+    command: ["arq", "app.resume_generation.index_worker.WorkerSettings"]
+    volumes:
+      - resume-data:/app/backend/data
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      resume-matcher:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "arq", "--check", "app.resume_generation.index_worker.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -72,6 +100,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
 #secrets:
@@ -82,4 +118,6 @@ volumes:
   resume-data:
     driver: local
   redis-data:
+    driver: local
+  qdrant-data:
     driver: local

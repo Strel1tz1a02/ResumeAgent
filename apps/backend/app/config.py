@@ -218,6 +218,14 @@ class Settings(BaseSettings):
     llm_api_base: str | None = None  # For Ollama or custom endpoints
     log_llm: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "WARNING"
 
+    # 简历生成召回：Qdrant 原生 dense + BM25 sparse + RRF。
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "resume_evidence"
+    qdrant_dense_model: str = "BAAI/bge-small-zh-v1.5"
+    qdrant_sparse_model: str = "Qdrant/bm25"
+    qdrant_timeout_seconds: int = 20
+
     @field_validator("llm_provider", mode="before")
     @classmethod
     def set_default_provider(cls, v: Any) -> str:

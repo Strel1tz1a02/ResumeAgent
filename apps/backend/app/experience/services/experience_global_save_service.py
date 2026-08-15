@@ -27,6 +27,7 @@ from app.experience.services.experience_service import (
     ExperienceService,
     ExperienceValidationError,
 )
+from app.resume_generation.indexing import enqueue_experience_index_sync
 
 
 class ExperienceGlobalSaveService:
@@ -46,6 +47,7 @@ class ExperienceGlobalSaveService:
                 detail = await self._create(request)
             else:
                 detail = await self._update(request)
+            await enqueue_experience_index_sync(self._session, detail.experience_id)
             await self._session.commit()
             return detail
         except FieldRevisionConflictError as error:

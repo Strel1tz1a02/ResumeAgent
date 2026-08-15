@@ -63,7 +63,8 @@ def init_models_sync(engine: Engine) -> None:
     import app.ai_chat.models
     import app.background_jobs.models
     import app.experience.models
-    import app.jd_import.models  # noqa: F401
+    import app.jd_import.models
+    import app.resume_generation.models  # noqa: F401
     from app.scripts.migrate_ai_chat_conversation_scope import (
         migrate as migrate_ai_chat_conversation_scope,
     )

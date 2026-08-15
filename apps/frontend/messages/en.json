@@ -100,6 +100,10 @@
       "title": "JD Workspace",
       "description": "Import job descriptions and manage saved JDs."
     },
+    "resumeGeneration": {
+      "title": "Smart Resume Generation",
+      "description": "Plan and generate a JD-specific resume from experience evidence."
+    },
     "uploadDialog": {
       "success": "Resume uploaded successfully.",
       "successMaster": "Resume uploaded and set as master.",
@@ -111,6 +115,35 @@
       "tryDifferentFile": "Try Different File",
       "parsingFailedKeepOpen": "AI parsing failed. Try a different file or close this dialog."
     }
+  },
+  "resumeGeneration": {
+    "back": "Back to dashboard",
+    "kicker": "Experience portfolio planning",
+    "title": "Smart Resume Generation",
+    "description": "Analyze a JD, retrieve experience evidence, plan a constrained portfolio, and generate a traceable resume.",
+    "configure": "Generation settings",
+    "configureDescription": "Choose the target JD and execution mode.",
+    "jd": "Target JD",
+    "selectJD": "Select a saved JD",
+    "mode": "Execution mode",
+    "modeAuto": "Auto (deterministic fallback on LLM failure)",
+    "modeLLM": "LLM only",
+    "modeDeterministic": "Deterministic baseline",
+    "pages": "Page budget",
+    "generate": "Generate plan and preview",
+    "generating": "Analyzing and planning...",
+    "emptyTitle": "No plan generated",
+    "emptyDescription": "Choose a JD to begin. Only evidence from ready experiences will be used.",
+    "coverage": "Weighted coverage",
+    "selectedExperiences": "Selected experiences",
+    "searchRounds": "Search rounds",
+    "review": "Review result",
+    "plan": "ResumePlan",
+    "promotedSkills": "Skills promoted from unique evidence",
+    "gaps": "Uncovered requirements",
+    "preview": "Resume preview",
+    "confirm": "Confirm and create resume",
+    "confirming": "Creating..."
   },
   "experiences": {
     "kicker": "Evidence workspace",
