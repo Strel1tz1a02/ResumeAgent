@@ -713,14 +713,14 @@ class AiChatRuntime:
         messages: list[JsonObject],
         tools_enabled: bool,
         max_tokens: int = 4096,
-    ) -> AsyncIterator[ModelStreamEvent]:
-        async for event in self.model.stream(
+    ) -> AsyncIterator[AIMessageChunk]:
+        async for chunk in self.model.stream(
             messages=messages,
             handlers=self.tools.model_handlers,
             tools_enabled=tools_enabled,
             max_tokens=max_tokens,
         ):
-            yield event
+            yield chunk
 ```
 
 `GraphRunner._compiled()` may keep calling `runtime.bind_tools(adapter.get_tool_handlers())`; binding now delegates to Service.

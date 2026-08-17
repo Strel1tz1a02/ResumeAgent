@@ -3,8 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.tools.operation import ToolOperation
 from app.ai_chat.tools.types import ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
 from app.jd_import.agent.questions import build_requested_question_batch
@@ -17,18 +16,15 @@ class AskJDQuestionsArguments(BaseModel):
     questions: list[QuestionDraft] = Field(min_length=1, max_length=12)
 
 
-class AskJDQuestionsHandler(ToolHandler):
+class AskJDQuestionsOperation(ToolOperation):
     name = "ask_jd_questions"
     description = "Ask one batch of questions to clarify the current JD candidates."
-    arguments_schema = AskJDQuestionsArguments
-    security = ToolSecurity.LOW
-    model_visible = True
-    deliver_result_to_model = True
+    args_schema = AskJDQuestionsArguments
 
-    async def validation(
+    async def prepare(
         self, context: ToolContext, arguments: JsonObject
-    ) -> tuple[JsonObject, JsonObject] | ToolResult:
-        values = self.arguments_schema.model_validate(arguments)
+    ) -> JsonObject | ToolResult:
+        values = self.args_schema.model_validate(arguments)
         adapter = context.adapter_context
         assessment = Assessment.model_validate(adapter.get("assessment"))
         asked_keys = adapter.get("asked_question_keys", [])
@@ -43,15 +39,11 @@ class AskJDQuestionsHandler(ToolHandler):
             run_id=context.run_id,
         )
         payload = batch.model_dump(mode="json")
-        return payload, {}
+        return payload
 
     async def execute(
         self,
         context: ToolContext,
-        proposal_payload: JsonObject,
-        guard_payload: JsonObject,
+        prepared_data: JsonObject,
     ) -> ToolResult:
         raise ToolProtocolError("Input Tool Calls resolve through resolve_input")
-
-    def show_result(self, payload: JsonObject) -> ToolResult:
-        return ToolResult(payload=dict(payload))

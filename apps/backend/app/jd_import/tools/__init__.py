@@ -1,6 +1,6 @@
-"""JD 导入 Tool 处理器。"""
+"""JD 导入工具操作。"""
 
-from app.jd_import.tools.ask_questions import AskJDQuestionsHandler
-from app.jd_import.tools.persist_jd import PersistJDHandler
+from app.jd_import.tools.ask_questions import AskJDQuestionsOperation
+from app.jd_import.tools.persist_jd import PersistJDOperation
 
-__all__ = ["AskJDQuestionsHandler", "PersistJDHandler"]
+__all__ = ["AskJDQuestionsOperation", "PersistJDOperation"]

@@ -32,10 +32,9 @@ from app.resume_generation.indexing import enqueue_experience_index_sync
 
 @dataclass(frozen=True)
 class PreparedExperienceChange:
-    """Service 校验后交给 Tool 层持久化的审批提案。"""
+    """Service 查询并校验后得到的修改准备数据。"""
 
-    proposal_payload: dict[str, Any]
-    guard_payload: dict[str, Any]
+    data: dict[str, Any]
 
 
 class ExperienceAiMutationService:
@@ -398,17 +397,14 @@ class ExperienceAiMutationService:
         revision: int,
         normalized_current_content: Any,
     ) -> PreparedExperienceChange:
-        """构造统一 content_change 提案和审批 guard。"""
+        """构造执行修改所需的统一查询结果。"""
         scope = {"field": field, "evidence_id": evidence_id}
         return PreparedExperienceChange(
-            proposal_payload={
+            data={
+                "experience_id": experience_id,
                 "scope": scope,
                 "current_content": current_content,
                 "suggested_content": suggested_content,
-            },
-            guard_payload={
-                "experience_id": experience_id,
-                "scope": scope,
                 "revision": revision,
                 "normalized_current_content": normalized_current_content,
             },

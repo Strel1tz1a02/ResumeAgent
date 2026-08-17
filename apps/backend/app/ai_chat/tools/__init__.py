@@ -1,4 +1,4 @@
-"""工具协议、风险和结果类型。"""
+"""LangChain 工具注册和工具调用数据类型。"""
 
 from app.ai_chat.tools.types import (
     ApprovalAction,
@@ -8,18 +8,16 @@ from app.ai_chat.tools.types import (
     ToolContext,
     ToolResult,
 )
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import GuardDecision, ToolSecurity, guard_tool
+from app.ai_chat.tools.operation import RegisteredTool, ToolExecution, ToolOperation
 
 __all__ = [
     "ApprovalAction",
     "ApprovalDecision",
-    "GuardDecision",
+    "RegisteredTool",
     "ToolCall",
     "ToolCallStatus",
     "ToolContext",
-    "ToolHandler",
+    "ToolExecution",
+    "ToolOperation",
     "ToolResult",
-    "ToolSecurity",
-    "guard_tool",
 ]

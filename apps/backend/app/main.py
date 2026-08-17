@@ -23,7 +23,7 @@ from app.experience.routers import ai_chat_router as experience_ai_chat_router
 from app.experience.routers import experiences_router
 from app.jd_import import JDImportAdapter
 from app.jd_import import router as jd_import_router
-from app.jd_import.agent.model import LiteLLMJDImportModel
+from app.jd_import.agent.model import LangChainJDImportModel
 from app.jd_import.graph import JDImportGraphDependencies
 from app.jd_import.sources import PlaywrightMCPSourceProvider, UrlPolicy
 from app.pdf import close_pdf_renderer
@@ -50,7 +50,7 @@ def _register_business_adapters() -> None:
         register_adapter(ExperienceAdapter())
         policy = UrlPolicy()
         register_adapter(JDImportAdapter(JDImportGraphDependencies(
-            model=LiteLLMJDImportModel(),
+            model=LangChainJDImportModel(),
             page_sources=PlaywrightMCPSourceProvider(
                 settings.playwright_mcp_url,
                 egress_secured=settings.playwright_mcp_egress_secured,

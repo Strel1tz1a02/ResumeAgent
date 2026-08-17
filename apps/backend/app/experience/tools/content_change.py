@@ -7,8 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.tools.operation import ToolOperation
 from app.ai_chat.tools.types import (
     ToolContext,
     ToolResult,
@@ -69,11 +68,10 @@ class ContentChangeArguments(BaseModel):
     suggested_content: str | bool | list[str] | EvidenceContent | None
 
 
-class ContentChangeHandler(ToolHandler):
+class ContentChangeOperation(ToolOperation):
     """解析统一参数，并按目标形态路由到经历领域服务。"""
 
     name = "content_change"
-    security = ToolSecurity.MEDIUM
     description = (
         "当前会话目标已经形成有事实依据、可直接保存的明确内容时，申请修改该内容。"
         "普通经历字段的 scope.field 必须等于会话范围且 evidence_id 为空。"
@@ -82,14 +80,14 @@ class ContentChangeHandler(ToolHandler):
         "新 Item 会追加到列表末尾。一次只能修改或创建一个 EvidenceItem，其他 Item 不会变化。"
         "事实不明确时继续询问；每轮最多调用一次；不要在正文中重复建议内容。"
     )
-    arguments_schema = ContentChangeArguments
+    args_schema = ContentChangeArguments
 
-    async def validation(
+    async def prepare(
         self,
         context: ToolContext,
         arguments: JsonObject,
-    ) -> tuple[JsonObject, JsonObject] | ToolResult:
-        """校验模型输入，并生成审批展示和可信的版本保护数据。"""
+    ) -> JsonObject | ToolResult:
+        """校验模型输入，并查询执行修改所需的当前数据。"""
         try:
             values = ContentChangeArguments.model_validate(arguments)
         except ValidationError as exc:
@@ -138,48 +136,43 @@ class ContentChangeHandler(ToolHandler):
                 expected_revision=start_revision,
             )
         if isinstance(prepared, PreparedExperienceChange):
-            return prepared.proposal_payload, prepared.guard_payload
-        return self.show_result(prepared)
+            return dict(prepared.data)
+        return ToolResult(dict(prepared))
 
     async def execute(
         self,
         context: ToolContext,
-        proposal_payload: JsonObject,
-        guard_payload: JsonObject,
+        prepared_data: JsonObject,
     ) -> ToolResult:
         """按已校验目标执行原子写入，并在内部整理结果。"""
-        scope = dict(guard_payload["scope"])
+        scope = dict(prepared_data["scope"])
         field = str(scope["field"])
         evidence_id = scope.get("evidence_id")
-        suggested = proposal_payload.get("suggested_content")
+        suggested = prepared_data.get("suggested_content")
         session = context.session
         if session is None:
             raise RuntimeError("tool execution requires a shared transaction")
         service = ExperienceAiMutationService(session)
         if field == "evidence" and evidence_id is None:
             payload = await service.append_evidence(
-                int(guard_payload["experience_id"]),
+                int(prepared_data["experience_id"]),
                 dict(suggested),
-                expected_revision=int(guard_payload["revision"]),
+                expected_revision=int(prepared_data["revision"]),
             )
         elif field == "evidence" and isinstance(evidence_id, int):
             payload = await service.apply_evidence(
-                int(guard_payload["experience_id"]),
+                int(prepared_data["experience_id"]),
                 evidence_id,
                 dict(suggested),
-                expected_revision=int(guard_payload["revision"]),
-                expected_value=guard_payload.get("normalized_current_content"),
+                expected_revision=int(prepared_data["revision"]),
+                expected_value=prepared_data.get("normalized_current_content"),
             )
         else:
             payload = await service.apply_field(
-                int(guard_payload["experience_id"]),
+                int(prepared_data["experience_id"]),
                 field,
                 suggested,
-                expected_revision=int(guard_payload["revision"]),
-                expected_value=guard_payload.get("normalized_current_content"),
+                expected_revision=int(prepared_data["revision"]),
+                expected_value=prepared_data.get("normalized_current_content"),
             )
-        return self.show_result(payload)
-
-    def show_result(self, payload: JsonObject) -> ToolResult:
-        """保留稳定结果标记，并统一封装经历工具结果。"""
         return ToolResult(dict(payload))

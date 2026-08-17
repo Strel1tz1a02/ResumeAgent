@@ -2,23 +2,14 @@
 
 These exercise the REAL request path in app/llm.py (``complete`` /
 ``complete_json`` / ``check_llm_health``) instead of mocking
-``router.acompletion``. We stand up a fake HTTP server with ``respx`` and let
-litellm's real client issue the request over the wire, so we finally have
+the model client. We stand up a fake HTTP server with ``respx`` and let
+LangChain's provider integration issue the request over the wire, providing
 regression coverage for the long-standing "Ollama doesn't work" reports and the
 local ``openai_compatible`` server path (issue #751).
 
-EVERY test in this module is a TRUE respx HTTP test: litellm's client actually
+EVERY test in this module is a TRUE respx HTTP test: the provider client actually
 serialises a request, sends it through httpx's transport, and parses the mocked
-HTTP response. No ``router.acompletion`` / ``litellm.acompletion`` boundary
-mocks are used.
-
-Why the autouse ``_litellm_httpx_transport`` fixture exists: litellm 1.86
-defaults to an aiohttp-based transport (``LiteLLMAiohttpTransport``) for its
-HTTP handler. respx hooks httpx's ``AsyncHTTPTransport``, so aiohttp requests
-sail straight past it to the real network. Setting
-``litellm.disable_aiohttp_transport = True`` forces litellm back onto httpx,
-which respx can intercept. We also flush litellm's in-memory client cache so a
-client built under the aiohttp transport in an earlier test can't be reused.
+HTTP response. No LangChain model boundary mocks are used.
 """
 
 import httpx
@@ -29,33 +20,11 @@ from app.llm import LLMConfig, check_llm_health, complete, complete_json
 
 
 @pytest.fixture(autouse=True)
-def _reset_router(monkeypatch):
-    """Reset the module-global Router cache between tests.
-
-    ``get_router`` caches ``_router`` / ``_router_config_key`` globally, so
-    without this an explicit config from one test would bleed into the next.
-    """
+def _reset_model_cache():
+    """Reset the LangChain model cache between transport tests."""
     import app.llm as llm
 
-    monkeypatch.setattr(llm, "_router", None)
-    monkeypatch.setattr(llm, "_router_config_key", "")
-
-
-@pytest.fixture(autouse=True)
-def _litellm_httpx_transport(monkeypatch):
-    """Force litellm onto httpx so respx can intercept the request.
-
-    See the module docstring for the aiohttp-vs-httpx rationale. ``monkeypatch``
-    restores the original flag after the test; the client-cache flush is a
-    harmless one-way reset.
-    """
-    import litellm
-
-    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True, raising=False)
-    try:
-        litellm.in_memory_llm_clients_cache.flush_cache()
-    except Exception:  # noqa: BLE001 - cache is best-effort; never fail setup on it
-        pass
+    llm._cached_chat_model.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -89,24 +58,6 @@ def _ollama_chat_response(content, model="llama3"):
         "message": {"role": "assistant", "content": content},
         "done": True,
         "done_reason": "stop",
-    }
-
-
-def _ollama_show_response():
-    """A minimal Ollama /api/show response.
-
-    litellm's ollama_chat path probes ``{default_host}/api/show`` to learn the
-    model's capabilities before the real completion. We stub it so the probe
-    doesn't reach a real daemon.
-    """
-    return {
-        "license": "",
-        "modelfile": "",
-        "parameters": "",
-        "template": "",
-        "details": {"family": "llama", "parameter_size": "8B"},
-        "model_info": {},
-        "capabilities": ["completion"],
     }
 
 
@@ -198,20 +149,11 @@ class TestOpenAICompatibleTransport:
 
 
 class TestOllamaTransport:
-    """complete() against a fake Ollama daemon over real HTTP.
-
-    litellm's ollama_chat path issues TWO requests: a capability probe to
-    ``{default_host}/api/show`` (always localhost:11434), then the real
-    completion to ``{configured_api_base}/api/chat``. Both are mocked.
-    """
+    """complete() against a fake Ollama daemon over real HTTP."""
 
     @respx.mock
     async def test_complete_happy_path(self):
         """Ollama returns content via /api/chat and complete() surfaces it."""
-        # Capability probe litellm fires before the completion (localhost host).
-        respx.post("http://localhost:11434/api/show").mock(
-            return_value=httpx.Response(200, json=_ollama_show_response())
-        )
         chat_route = respx.post("http://ollama.test:11434/api/chat").mock(
             return_value=httpx.Response(200, json=_ollama_chat_response("ollama says hi"))
         )
@@ -226,8 +168,7 @@ class TestOllamaTransport:
 
         assert out == "ollama says hi"
         assert chat_route.called
-        # The completion must target the user-configured host's /api/chat,
-        # not the localhost default used only for the capability probe.
+        # The completion must target the user-configured host's /api/chat.
         assert str(chat_route.calls.last.request.url) == (
             "http://ollama.test:11434/api/chat"
         )
@@ -235,9 +176,6 @@ class TestOllamaTransport:
     @respx.mock
     async def test_complete_json_over_the_wire(self):
         """complete_json works against Ollama's /api/chat wire format."""
-        respx.post("http://localhost:11434/api/show").mock(
-            return_value=httpx.Response(200, json=_ollama_show_response())
-        )
         body = '{"required_skills": ["Go"], "keywords": ["k8s"]}'
         chat_route = respx.post("http://ollama.test:11434/api/chat").mock(
             return_value=httpx.Response(200, json=_ollama_chat_response(body))
@@ -256,12 +194,12 @@ class TestOllamaTransport:
 
 
 # ---------------------------------------------------------------------------
-# check_llm_health — TRUE respx HTTP (calls litellm.acompletion directly)
+# check_llm_health — TRUE respx HTTP
 # ---------------------------------------------------------------------------
 
 
 class TestCheckHealthTransport:
-    """check_llm_health over real HTTP (bypasses the Router, hits litellm)."""
+    """check_llm_health through the real LangChain provider integration."""
 
     @respx.mock
     async def test_health_success(self):

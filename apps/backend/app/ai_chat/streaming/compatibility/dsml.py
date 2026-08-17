@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.ai_chat.tools.buffer import encode_tool_call
+from langchain_core.messages import ToolCallChunk
 
 _BARS = r"(?:\||｜)*"
 _START_RE = re.compile(rf"<{_BARS}DSML{_BARS}tool_calls>")
@@ -51,12 +51,12 @@ def _parameter_value(raw: str, is_string: bool | None) -> Any:
         raise
 
 
-def _parse_calls(value: str) -> tuple[list[str], str]:
+def _parse_calls(value: str) -> tuple[list[ToolCallChunk], str]:
     """解析完整 DSML 块，并返回块外仍应展示的正文。"""
     block = _BLOCK_RE.search(value)
     if block is None:
         return [], value
-    calls: list[str] = []
+    calls: list[ToolCallChunk] = []
     try:
         for index, invoke in enumerate(_INVOKE_RE.finditer(block.group("body"))):
             invoke_attrs = _attributes(invoke.group("attrs"))
@@ -79,11 +79,11 @@ def _parse_calls(value: str) -> tuple[list[str], str]:
                     parameter.group("value"), is_string
                 )
             calls.append(
-                encode_tool_call(
-                    index=index,
-                    provider_id=None,
+                ToolCallChunk(
                     name=name,
-                    arguments=json.dumps(arguments, ensure_ascii=False),
+                    args=json.dumps(arguments, ensure_ascii=False),
+                    id=None,
+                    index=index,
                 )
             )
     except (json.JSONDecodeError, ValueError):
@@ -121,7 +121,7 @@ class DsmlToolCallFallback:
         self._buffer = ""
         return visible
 
-    def finish(self) -> tuple[list[str], str]:
+    def finish(self) -> tuple[list[ToolCallChunk], str]:
         """流结束时解析已捕获协议；解析失败则原样作为正文返回。"""
         calls, visible = _parse_calls(self._buffer)
         self._buffer = ""

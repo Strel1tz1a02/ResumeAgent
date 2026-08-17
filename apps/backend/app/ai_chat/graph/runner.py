@@ -41,7 +41,10 @@ class GraphRunner:
         """在当前进程中仅编译一次适配器业务图。"""
         name = adapter.adapter_name()
         if name not in self._graphs:
-            runtime = self._runtime.bind_tools(adapter.get_tool_handlers())
+            runtime = self._runtime.bind_tools(
+                adapter.get_tools(),
+                adapter.get_tool_approval_policy(),
+            )
             self._graphs[name] = adapter.build_graph(runtime).compile(checkpointer=self._checkpointer)
         return self._graphs[name]
 

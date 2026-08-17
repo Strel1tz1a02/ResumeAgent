@@ -52,6 +52,7 @@ class ToolCallRepository:
             run_id=run_id,
             tool_call_index=tool_call_index,
             provider_tool_call_id=provider_tool_call_id,
+            requested_by_model=True,
             tool_name=tool_name,
             arguments=arguments,
         )
@@ -77,6 +78,7 @@ class ToolCallRepository:
                 run_id=run_id,
                 tool_call_index=tool_call_index,
                 provider_tool_call_id=provider_tool_call_id,
+                requested_by_model=True,
                 tool_name=tool_name,
                 arguments=arguments,
             )
@@ -93,6 +95,7 @@ class ToolCallRepository:
             row is None
             or (provider_row is not None and provider_row.id != row.id)
             or row.conversation_id != conversation_id
+            or row.requested_by_model is not True
             or row.tool_name != tool_name
             or not json_values_equal(row.arguments, arguments)
         ):
@@ -107,6 +110,7 @@ class ToolCallRepository:
         identity: str,
         tool_name: str,
         arguments: dict[str, Any],
+        requested_by_model: bool = False,
     ) -> AiChatToolCall:
         """使用 Run 内稳定身份固化服务端持有的调用。"""
         next_index = (
@@ -121,6 +125,7 @@ class ToolCallRepository:
                 run_id=run_id,
                 tool_call_index=next_index,
                 provider_tool_call_id=identity,
+                requested_by_model=requested_by_model,
                 tool_name=tool_name,
                 arguments=arguments,
             )
@@ -131,6 +136,7 @@ class ToolCallRepository:
         if (
             row is None
             or row.conversation_id != conversation_id
+            or row.requested_by_model is not requested_by_model
             or row.tool_name != tool_name
             or not json_values_equal(row.arguments, arguments)
         ):
@@ -184,7 +190,7 @@ class ToolCallRepository:
         proposal_payload: dict[str, Any],
         guard_payload: dict[str, Any],
     ) -> bool:
-        """保存 Handler 生成的可信执行依据，但不决定是否审批。"""
+        """保存业务准备步骤生成的可信执行依据，但不决定是否审批。"""
         result = await self._session.execute(
             update(AiChatToolCall)
             .where(
@@ -382,6 +388,7 @@ class ToolCallRepository:
             .where(
                 AiChatToolCall.conversation_id == conversation_id,
                 AiChatToolCall.status == "resolved",
+                AiChatToolCall.requested_by_model.is_(True),
                 AiChatToolCall.delivery_status == "pending",
             )
             .order_by(AiChatToolCall.id)

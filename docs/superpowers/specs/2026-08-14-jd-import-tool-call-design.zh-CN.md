@@ -191,3 +191,6 @@ POST /api/v1/jd-imports/conversations/{id}/question-batches/{batch_id}/resolve
 - Graph 重放不会重复创建 JD；
 - `AiChatRun` 不再含业务 JSON；
 - Experience AI Chat 的自动工具、审批工具、结果投递和恢复流程保持不变。
+> 历史设计说明：文中的 Handler/ToolCallService 命名已被当前
+> `RegisteredTool`、`ToolApprovalService`、`ToolCallStore`、`ToolService`
+> 架构替代；JD 导入行为与状态协议保持不变。

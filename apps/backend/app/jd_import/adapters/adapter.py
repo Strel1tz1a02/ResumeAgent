@@ -6,22 +6,26 @@ from langgraph.graph import StateGraph
 
 from app.ai_chat.adapters.base import BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.tools.handler import ToolHandler
+from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
+from app.ai_chat.tools.operation import RegisteredTool
 from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBinding
 from app.jd_import.agent.input_parser import parse_mixed_input
 from app.jd_import.agent.state import JDImportState, initial_state
 from app.jd_import.graph import JDImportGraphDependencies, build_jd_import_graph
-from app.jd_import.tools import AskJDQuestionsHandler, PersistJDHandler
+from app.jd_import.tools import AskJDQuestionsOperation, PersistJDOperation
 
 
 class JDImportAdapter(BaseAdapter[JDImportState]):
     def __init__(self, dependencies: JDImportGraphDependencies) -> None:
         self._dependencies = dependencies
-        handlers: tuple[ToolHandler, ...] = (
-            AskJDQuestionsHandler(),
-            PersistJDHandler(),
+        tools = (
+            RegisteredTool(AskJDQuestionsOperation()),
+            RegisteredTool(PersistJDOperation(),model_visible=False,),
         )
-        self._handlers = {handler.name: handler for handler in handlers}
+        self._tools = {tool.name: tool for tool in tools}
+        self._approval = ToolApprovalPolicy(
+            {tool.name: ToolRisk.LOW for tool in tools}
+        )
 
     async def validate_request(self, subject: SubjectRef, scope: ScopeRef) -> ValidatedBinding:
         if subject.type != "jd_import" or subject.id != "new":
@@ -42,5 +46,8 @@ class JDImportAdapter(BaseAdapter[JDImportState]):
     def build_graph(self, runtime: AiChatRuntime) -> StateGraph:
         return build_jd_import_graph(runtime, self._dependencies)
 
-    def get_tool_handlers(self) -> Mapping[str, ToolHandler]:
-        return self._handlers
+    def get_tools(self) -> Mapping[str, RegisteredTool]:
+        return self._tools
+
+    def get_tool_approval_policy(self) -> ToolApprovalPolicy:
+        return self._approval

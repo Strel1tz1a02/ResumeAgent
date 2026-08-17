@@ -542,7 +542,6 @@ apps/backend/app/
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── handler.py                    # ToolHandler 抽象协议
-│   │   ├── buffer.py                     # Tool 参数分片聚合
 │   │   ├── results.py                    # 校验、审批、执行和延迟投递类型
 │   │   └── security.py                   # Tool 风险声明和 guard 路由
 │   │
@@ -560,7 +559,7 @@ apps/backend/app/
 │   └── streaming/
 │       ├── __init__.py
 │       ├── events.py                     # 供业务 API 转换的内部事件
-│       └── model.py                      # LiteLLM 流式适配器
+│       └── model.py                      # LangChain 流式适配器
 │
 └── experience/                           # 完整经历业务模块
 │   ├── __init__.py
@@ -609,3 +608,6 @@ apps/backend/app/
 通用聊天是内部后端运行库，不提供通用 HTTP Router、SSE API 或前端 UI。具体业务的 Router/Service 取得 `AiChatService`，把内部 `AiChatEvent` 转换为该业务的 API 与 SSE 协议。业务前端也由具体业务模块负责，不在 `ai_chat/` 下建立通用前端目录。
 
 `experience/` 是完整的经历业务模块，包含经历库 HTTP 接口、应用服务、数据访问以及 AI Chat 业务适配层；通用 `ai_chat/` 不反向依赖它。
+> 更新说明：工具层现使用 LangChain `StructuredTool`；风险审批、幂等固化和
+> 生命周期编排分别由 `ToolApprovalService`、`ToolCallStore`、`ToolService`
+> 承担。下文保留早期 Handler 命名作为设计演进记录。

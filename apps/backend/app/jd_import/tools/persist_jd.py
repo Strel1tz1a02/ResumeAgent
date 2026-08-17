@@ -3,8 +3,7 @@
 from pydantic import BaseModel, ConfigDict
 
 from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.tools.operation import ToolOperation
 from app.ai_chat.tools.types import ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
 from app.jd_import.agent.types import CandidateJD
@@ -17,30 +16,26 @@ class PersistJDArguments(BaseModel):
     candidate: CandidateJD
 
 
-class PersistJDHandler(ToolHandler):
+class PersistJDOperation(ToolOperation):
     name = "persist_jd"
     description = "Persist one validated JD candidate."
-    arguments_schema = PersistJDArguments
-    security = ToolSecurity.LOW
-    model_visible = False
-    deliver_result_to_model = False
+    args_schema = PersistJDArguments
 
-    async def validation(
+    async def prepare(
         self, context: ToolContext, arguments: JsonObject
-    ) -> tuple[JsonObject, JsonObject] | ToolResult:
-        values = self.arguments_schema.model_validate(arguments)
+    ) -> JsonObject | ToolResult:
+        values = self.args_schema.model_validate(arguments)
         payload = values.model_dump(mode="json")
-        return payload, {}
+        return payload
 
     async def execute(
         self,
         context: ToolContext,
-        proposal_payload: JsonObject,
-        guard_payload: JsonObject,
+        prepared_data: JsonObject,
     ) -> ToolResult:
         if context.session is None:
             raise ToolProtocolError("persist_jd requires a transaction-bound session")
-        candidate = PersistJDArguments.model_validate(proposal_payload).candidate
+        candidate = PersistJDArguments.model_validate(prepared_data).candidate
         required_missing = {"company", "job_name", "requirements"}.intersection(
             candidate.missing_fields
         )
@@ -69,7 +64,4 @@ class PersistJDHandler(ToolHandler):
                 for item in candidate.requirements
             ],
         )
-        return self.show_result({"information_id": information.id})
-
-    def show_result(self, payload: JsonObject) -> ToolResult:
-        return ToolResult(payload=dict(payload))
+        return ToolResult(payload={"information_id": information.id})

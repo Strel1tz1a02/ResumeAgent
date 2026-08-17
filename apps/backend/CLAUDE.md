@@ -3,7 +3,7 @@
 > FastAPI backend for Resume Matcher. This file goes **deeper on the backend**.
 > For project-wide context see the root [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) and [`docs/agent/README.md`](../../docs/agent/README.md).
 
-Stack: FastAPI 0.128 · Python **3.13+** · Pydantic v2 / pydantic-settings · SQLAlchemy 2 (async) + SQLite (`aiosqlite`) · LiteLLM (multi-provider AI) · markitdown (DOCX/PDF→Markdown) · Playwright/Chromium (PDF). Managed with **uv** (`pyproject.toml`, version `1.2.0`).
+Stack: FastAPI 0.128 · Python **3.13+** · Pydantic v2 / pydantic-settings · SQLAlchemy 2 (async) + SQLite (`aiosqlite`) · LangChain (multi-provider AI) · markitdown (DOCX/PDF→Markdown) · Playwright/Chromium (PDF). Managed with **uv** (`pyproject.toml`, version `1.2.0`).
 
 ---
 
@@ -17,7 +17,7 @@ Stack: FastAPI 0.128 · Python **3.13+** · Pydantic v2 / pydantic-settings · S
 | Config cache | Shared, TTL-cached (5 min) read of `data/config.json`; `get_content_language()` | `app/config_cache.py` |
 | Database | Async SQLAlchemy/SQLite facade; tables `resumes`/`jobs`/`improvements`/`applications`/`api_keys`; returns plain dicts; global `db` singleton | `app/database.py`, `app/models.py`, `app/db_engine.py` |
 | Tracker | Kanban application-tracker endpoints | `app/routers/applications.py`, `app/schemas/applications.py` |
-| LLM | LiteLLM wrapper: Router, retries, JSON extraction, timeouts, provider quirks | `app/llm.py` |
+| LLM | LangChain chat-model factory, retries, JSON extraction, timeouts, provider quirks | `app/llm.py` |
 | PDF | Headless Chromium render of frontend `/print/*` pages; lazy browser init | `app/pdf.py` |
 | Routers | HTTP endpoints (see below) | `app/routers/*.py` |
 | Services | Business logic (parse, improve/diff, refine, cover-letter) | `app/services/*.py` |
@@ -78,14 +78,15 @@ Prompts are **plain Python string constants** — no Jinja, no external prompt f
 
 ## LLM Integration (`app/llm.py`)
 
-- **Provider abstraction:** LiteLLM. Providers: `openai`, `openai_compatible` (llama.cpp/vLLM/LM Studio), `anthropic`, `openrouter`, `gemini`, `deepseek`, `groq`, `ollama`. `get_model_name()` maps provider→LiteLLM prefix; `_normalize_api_base()` fixes `/v1/v1` duplication per provider.
-- **Router:** a cached `litellm.Router` (`get_router`) rebuilt only when a config fingerprint changes. `num_retries=3` with a `RetryPolicy` (auth/bad-request/content-policy = 0 retries; timeout/500 = 2; rate-limit = 3). Cooldowns disabled (single deployment). **Transport retries live in the Router; do not re-retry them in callers.**
+- **Provider abstraction:** LangChain `init_chat_model`. Providers: `openai`, `openai_compatible` (llama.cpp/vLLM/LM Studio), `anthropic`, `openrouter`, `gemini`, `deepseek`, `groq`, `ollama`. Each provider uses its official LangChain integration package; old prefixed model values remain readable for config compatibility.
+- **Prompt/messages/tools:** `ChatPromptTemplate` builds system/user messages; chat tools use `bind_tools()` and `astream()`; structured extraction uses `with_structured_output()`.
+- **Model cache and retries:** model instances are cached by immutable configuration. Transport retry count is passed to each LangChain provider model; callers only retain content-quality retries where malformed/truncated JSON needs a new generation.
 - **`complete()` / `complete_json()`:** `complete_json` adds app-level *content-quality* retries (malformed JSON, truncation) with temperature escalation and a JSON-mode→prompt-only fallback. JSON is parsed by the brace-balancing `_extract_json`; `_appears_truncated` is `schema_type`-aware (`resume`/`enrichment`/`diff`/`keywords`).
-- **Capabilities via registry, not hardcoded:** `_supports_json_mode`, `_supports_temperature`, `get_safe_max_tokens` query `litellm.get_model_info` (with Ollama/local fallbacks). `litellm.drop_params = True` lets unsupported params (e.g. `reasoning_effort`) be dropped silently.
+- **Capabilities:** `get_model_profile()` reads LangChain model profiles when the integration exposes one; local compatibility guards avoid sending unsupported temperature/reasoning arguments.
 - **Timeouts:** adaptive (`_calculate_timeout`): base 30s health / 120s completion / 180s JSON, scaled by token count and a provider factor (ollama 2x, openrouter 1.5x...).
 - **Reasoning models:** `<think>` tags stripped; `reasoning_content`/`thinking` used as content fallback. gpt-5 configs auto-migrate to `reasoning_effort="minimal"` once.
 - **Key resolution:** single source of truth is `resolve_api_key(stored, provider)`. `openai_compatible`/`ollama` deliberately **skip** the env-level `LLM_API_KEY` fallback so a paid key can't leak to a local server. Error text is scrubbed of key-like tokens (`_scrub_secrets`) before reaching clients.
-- API keys are passed directly to LiteLLM calls (never via `os.environ`) to avoid async races.
+- API keys are passed directly to LangChain model constructors (never via `os.environ`) to avoid async races.
 
 ---
 
@@ -120,7 +121,7 @@ Config via `.env` (see `.env.example`). Interactive API docs at `/docs`.
 ## Key Gotchas
 
 - **uv.lock is gitignored** (`.gitignore`), so dependency resolution isn't reproducible from VCS — rely on the exact pins in `pyproject.toml` / `requirements.txt`.
-- **litellm ↔ python-dotenv trap:** litellm `<1.84.0` hard-pinned `python-dotenv==1.0.1`, which used to fight other pins. Resolved at the current pins (`litellm==1.86.2`, `python-dotenv==1.2.2`); do **not** downgrade litellm below 1.84 without re-checking dotenv.
+- **Provider package pins:** keep the LangChain core and provider integration pins in `pyproject.toml` and `requirements.txt` synchronized.
 - **Keys vs non-secret config:** API **keys** live ONLY in the encrypted `api_keys` SQLite table (per-provider, via `_PROVIDER_KEY_MAP`); `load_config_file()` injects the decrypted keys into the returned dict and `save_config_file()` strips them, so secrets never round-trip to `config.json`. Non-secret provider/model/base/features stay in `config.json`. `PUT /config/llm-api-key` no longer writes any key; keys go through `PUT /config/api-keys`. `migrate_legacy_keys()` folds any legacy plaintext keys into the encrypted store (idempotent, non-clobbering). After any write to `config.json`, call `invalidate_config_cache()`.
 - **Master resume invariant:** exactly one resume has `is_master=True`. Concurrent uploads use `create_resume_atomic_master` (an `asyncio.Lock`, not threading) and auto-promote if the current master is stuck `failed`/`processing`.
 - **Dates lose months:** LLMs drop month precision; `restore_dates_from_markdown` + `_restore_original_dates` re-insert them. Preserve this when editing the parse/improve flow.
@@ -162,7 +163,7 @@ Layout (`apps/backend/tests/`):
 | `integration/` | endpoints via httpx `ASGITransport` | config/health/jobs/resume/upload, plus `test_llm_contract.py` (real `llm.py` over `respx`) and `test_pipeline_e2e.py` (upload→tailor→render, real routers + real temp DB) |
 | `evals/` | prompt quality | pure structural scorers (always run) + a gated LLM-judge (`@pytest.mark.eval`, uses the dev's own key; run with `uv run pytest -m eval`) |
 
-Key fixtures/tools: `conftest.py::isolated_db` swaps the global `db` singleton for a disposable temp-file SQLite database across **all** router modules (for real-DB endpoint/e2e tests); `respx` mocks the HTTP transport so `llm.py`'s real routing runs against a fake Ollama / OpenAI server (gotcha: litellm 1.86 needs `disable_aiohttp_transport=True` for respx to intercept). Keep every test **anti-theater** — it must fail when its target breaks.
+Key fixtures/tools: `conftest.py::isolated_db` swaps the global `db` singleton for a disposable temp-file SQLite database across **all** router modules (for real-DB endpoint/e2e tests); `respx` mocks provider HTTP transports so `llm.py`'s real LangChain routing runs against fake Ollama / OpenAI-compatible servers. Keep every test **anti-theater** — it must fail when its target breaks.
 
 **Local push gate:** `.githooks/pre-push` runs this suite + a locale-parity check and blocks red pushes (`git config core.hooksPath .githooks`; see [`.githooks/README.md`](../../.githooks/README.md)). We avoid a GitHub Actions PR gate (high external-PR volume).
 

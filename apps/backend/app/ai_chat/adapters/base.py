@@ -10,7 +10,8 @@ from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBindi
 
 if TYPE_CHECKING:
     from app.ai_chat.graph.runtime import AiChatRuntime
-    from app.ai_chat.tools.handler import ToolHandler
+    from app.ai_chat.tools.approval import ToolApprovalPolicy
+    from app.ai_chat.tools.operation import RegisteredTool
 
 
 StateT = TypeVar("StateT")
@@ -41,5 +42,9 @@ class BaseAdapter(ABC, Generic[StateT]):
         """返回尚未编译的业务图定义。"""
 
     @abstractmethod
-    def get_tool_handlers(self) -> Mapping[str, "ToolHandler"]:
-        """返回此业务可以使用的工具包。"""
+    def get_tools(self) -> Mapping[str, "RegisteredTool"]:
+        """返回此业务注册的 LangChain 工具。"""
+
+    @abstractmethod
+    def get_tool_approval_policy(self) -> "ToolApprovalPolicy":
+        """返回此业务的无状态工具审批策略。"""

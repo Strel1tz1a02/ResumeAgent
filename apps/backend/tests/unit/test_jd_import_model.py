@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from app.jd_import.agent.model import (
     ExtractionRequest,
-    LiteLLMJDImportModel,
+    LangChainJDImportModel,
     UrlCandidate,
     UrlSelectionRequest,
 )
@@ -22,7 +22,7 @@ async def test_url_selection_repairs_once_and_rejects_unknown_sources() -> None:
             {"selected_source_ids": ["source:url:0"], "reasons": {}},
         ]
     )
-    model = LiteLLMJDImportModel(completion=completion)
+    model = LangChainJDImportModel(completion=completion)
     request = UrlSelectionRequest(
         urls=[UrlCandidate(source_id="source:url:0", url="https://example.com/job")],
         existing_text="Backend role",
@@ -33,7 +33,7 @@ async def test_url_selection_repairs_once_and_rejects_unknown_sources() -> None:
     assert result.selected_source_ids == ["source:url:0"]
     assert completion.await_count == 2
 
-    bad_model = LiteLLMJDImportModel(
+    bad_model = LangChainJDImportModel(
         completion=AsyncMock(
             return_value={"selected_source_ids": ["source:url:9"], "reasons": {}}
         )
@@ -49,7 +49,7 @@ async def test_url_selection_caps_five_sources() -> None:
             for index in range(6)
         ]
     )
-    model = LiteLLMJDImportModel(
+    model = LangChainJDImportModel(
         completion=AsyncMock(
             return_value={
                 "selected_source_ids": [item.source_id for item in request.urls],
@@ -68,7 +68,7 @@ async def test_extraction_cannot_silently_remove_prior_jd_keys() -> None:
         sources=[source],
         prior_candidates=[CandidateJD(jd_key="jd-1")],
     )
-    model = LiteLLMJDImportModel(
+    model = LangChainJDImportModel(
         completion=AsyncMock(return_value={"candidates": [], "conflicts": []})
     )
 

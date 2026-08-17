@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ai_chat.memory.errors import MemoryCompactionError, MemoryContextFullError
@@ -16,7 +13,12 @@ from app.ai_chat.memory.token_budget import (
     build_memory_token_budget,
     count_request_tokens,
 )
-from app.llm import _calculate_timeout, get_router
+from app.llm import (
+    _calculate_timeout,
+    _extract_message_text,
+    get_chat_model,
+    get_llm_config,
+)
 
 
 class MemoryOperationsResult(BaseModel):
@@ -25,34 +27,6 @@ class MemoryOperationsResult(BaseModel):
 
 
 _MAX_CONTENT_ATTEMPTS = 2
-
-
-def _get(value: Any, key: str, default: Any = None) -> Any:
-    """统一读取映射或对象属性。"""
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
-
-
-def _response_text(response: Any) -> str:
-    """读取 LiteLLM 非流式响应中的正文。"""
-    choices = _get(response, "choices", []) or []
-    if not choices:
-        raise ValueError("memory summary returned no choices")
-    content = _get(_get(choices[0], "message", {}), "content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Sequence) and not isinstance(
-        content, (str, bytes, bytearray)
-    ):
-        parts = [
-            text
-            for item in content
-            if isinstance((text := _get(item, "text")), str)
-        ]
-        if parts:
-            return "".join(parts)
-    raise ValueError("memory summary returned no text")
 
 
 def _prompt(parent: Memory, origin_run: OriginRun) -> str:
@@ -139,7 +113,16 @@ class MemorySummarizer:
             configured_input_cap=memory_settings.ai_chat_summary_input_cap,
         )
         try:
-            router, config = get_router()
+            config = get_llm_config()
+            model, _ = get_chat_model(
+                config,
+                max_tokens=spec.max_tokens,
+                timeout=_calculate_timeout(
+                    "completion",
+                    spec.max_tokens,
+                    config.provider,
+                ),
+            )
             correction = ""
             for attempt in range(_MAX_CONTENT_ATTEMPTS):
                 attempt_prompt = prompt + correction
@@ -149,22 +132,14 @@ class MemorySummarizer:
                 )
                 if tokens > spec.input_budget:
                     raise MemoryContextFullError("summary_run_too_large")
-                kwargs: dict[str, Any] = {
-                    "model": "primary",
-                    "messages": [{"role": "user", "content": attempt_prompt}],
-                    "stream": False,
-                    "max_tokens": spec.max_tokens,
-                    "timeout": _calculate_timeout(
-                        "completion",
-                        spec.max_tokens,
-                        config.provider,
-                    ),
-                }
-                if config.reasoning_effort:
-                    kwargs["reasoning_effort"] = config.reasoning_effort
-                response = await router.acompletion(**kwargs)
+                response = await model.ainvoke(
+                    [{"role": "user", "content": attempt_prompt}]
+                )
                 try:
-                    result = json.loads(_response_text(response))
+                    content = _extract_message_text(response)
+                    if not content:
+                        raise ValueError("memory summary returned no text")
+                    result = json.loads(content)
                     return MemoryOperationsResult.model_validate(result).operations
                 except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                     if attempt + 1 >= _MAX_CONTENT_ATTEMPTS:

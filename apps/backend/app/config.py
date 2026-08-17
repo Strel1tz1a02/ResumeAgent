@@ -149,7 +149,7 @@ def migrate_legacy_keys() -> None:
 
 
 # Mirror of llm._PROVIDER_KEY_MAP, duplicated to avoid importing llm.py (which
-# pulls in litellm) at config import time.
+# pulls in provider SDKs) at config import time.
 _LEGACY_PROVIDER_KEY_MAP: dict[str, str] = {
     "openai": "openai",
     "openai_compatible": "openai_compatible",
@@ -237,7 +237,7 @@ class Settings(BaseSettings):
     @field_validator("log_llm", mode="before")
     @classmethod
     def normalize_log_llm_level(cls, v: Any) -> str:
-        """Normalize LiteLLM log level from environment values."""
+        """Normalize LangChain/provider log level from environment values."""
         value = "WARNING" if not v else str(v).strip().upper()
         if value not in ALLOWED_LOG_LEVELS:
             raise ValueError(f"Invalid LOG_LLM: {value}. Allowed: {ALLOWED_LOG_LEVELS}")
@@ -283,7 +283,7 @@ class Settings(BaseSettings):
 
     # Reasoning effort for models that support it (OpenAI gpt-5 family,
     # Anthropic Claude 3.7+, DeepSeek R1, etc.). None means "do not send the
-    # param" — the default for maximum compatibility. LiteLLM drops this
+    # param" — the default for maximum compatibility. Provider adapters drop this
     # parameter for providers that don't support it (via drop_params=True).
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
 

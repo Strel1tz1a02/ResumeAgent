@@ -63,7 +63,7 @@ Worker 按 Run 顺序保证 Snapshot 链完整。一个任务处理目标 Run �
 
 ## 6. 连续失败与 skipped
 
-压缩直接复用现有 MemorySummarizer/LiteLLM 重试，不叠加 ARQ 业务重试。摘要最终抛出压缩错误后：
+压缩直接复用现有 MemorySummarizer/LangChain 模型重试，不叠加 ARQ 业务重试。摘要最终抛出压缩错误后：
 
 1. 当前 Run 标记为 `skipped`；
 2. `core/other/token_count` 复制父 Snapshot；

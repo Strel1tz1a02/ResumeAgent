@@ -1,5 +1,5 @@
-"""经历业务唯一的内容修改 Tool Handler。"""
+"""经历业务工具操作。"""
 
-from app.experience.tools.content_change import ContentChangeHandler
+from app.experience.tools.content_change import ContentChangeOperation
 
-__all__ = ["ContentChangeHandler"]
+__all__ = ["ContentChangeOperation"]

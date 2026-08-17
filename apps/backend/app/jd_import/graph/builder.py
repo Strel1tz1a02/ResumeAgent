@@ -6,13 +6,14 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from langchain_core.messages import AIMessageChunk
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.streaming.model import ToolCallsCompleted
+from app.ai_chat.streaming.model import complete_tool_calls
 from app.ai_chat.tools.types import ToolContext
 from app.jd_import.agent.evidence import assess_candidates
 from app.jd_import.agent.input_parser import parse_mixed_input
@@ -82,10 +83,10 @@ def build_jd_import_graph(
     runtime: AiChatRuntime,
     deps: JDImportGraphDependencies,
 ) -> StateGraph:
-    question_handler = runtime.tools.model_handlers.get("ask_jd_questions")
-    if question_handler is None:
+    question_tool = runtime.tools.tools.get("ask_jd_questions")
+    if question_tool is None:
         raise ToolProtocolError("JD import runtime has no question Tool")
-    planning_runtime = runtime.bind_tools({question_handler.name: question_handler})
+    planning_runtime = runtime.bind_tools({question_tool.name: question_tool})
 
     async def parse_input(state: JDImportState) -> dict[str, Any]:
         parsed = parse_mixed_input(state["input"]["raw_input"])
@@ -178,17 +179,18 @@ def build_jd_import_graph(
             },
             {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
         ]
-        calls: tuple[str, ...] = ()
-        async for event in planning_runtime.stream_model(
+        response = AIMessageChunk(content="")
+        async for chunk in planning_runtime.stream_model(
             messages=messages, tools_enabled=True, max_tokens=4096
         ):
-            if isinstance(event, ToolCallsCompleted):
-                calls = event.calls
+            response += chunk
+        calls = complete_tool_calls(response)
         if not calls:
             return {"question_tool_call_id": None}
         if len(calls) != 1:
             raise ToolProtocolError("Question planning accepts at most one Tool Call")
         round_value = state["questions"]["round"] + 1
+        _call_index, model_call = calls[0]
         call = await planning_runtime.tools.validate_model_call_as(
             _tool_context(
                 state,
@@ -198,7 +200,7 @@ def build_jd_import_graph(
                     "round": state["questions"]["round"],
                 },
             ),
-            calls[0],
+            model_call,
             identity=f"jd-import:questions:{round_value}",
             expected_name="ask_jd_questions",
         )

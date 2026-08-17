@@ -1,39 +1,36 @@
-"""LiteLLM wrapper for multi-provider AI support."""
+"""基于 LangChain 的多供应商模型适配层。"""
 
 import json
 import logging
 import re
-import threading
+from functools import lru_cache
 from typing import Any, Literal
 
-import litellm
-from litellm import Router
-from litellm.router import RetryPolicy
+from langchain.chat_models import init_chat_model
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import convert_to_openai_messages
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from app.config import load_config_file, save_config_file, settings
 
-LITELLM_LOGGER_NAMES = ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")
+LANGCHAIN_LOGGER_NAMES = (
+    "langchain",
+    "langchain_core",
+    "langchain_openai",
+    "langchain_anthropic",
+    "langchain_google_genai",
+)
 
 
-def _configure_litellm_logging() -> None:
-    """Align LiteLLM logger levels with application settings."""
+def _configure_langchain_logging() -> None:
+    """让 LangChain 相关日志级别与应用配置保持一致。"""
     numeric_level = getattr(logging, settings.log_llm, logging.WARNING)
-    for logger_name in LITELLM_LOGGER_NAMES:
+    for logger_name in LANGCHAIN_LOGGER_NAMES:
         logging.getLogger(logger_name).setLevel(numeric_level)
 
 
-_configure_litellm_logging()
-
-# 让 LiteLLM 丢弃模型提供方不支持的参数，例如 reasoning_effort 和非默认
-# temperature，避免抛出 UnsupportedParamsError。这取代了此前按模型硬编码的
-# 兼容分支。
-litellm.drop_params = True
-
-# 必要时让 LiteLLM 自动从助手消息中移除 `thinking_blocks`，例如工具调用轮次
-# 缺少对应块时。当前没有代码路径发送 thinking，此设置用于增强 Router 的
-# 后续兼容性。
-litellm.modify_params = True
+_configure_langchain_logging()
 
 # LLM timeout configuration (seconds) - base values
 LLM_TIMEOUT_HEALTH_CHECK = 30
@@ -50,6 +47,11 @@ MAX_JSON_CONTENT_SIZE = 1024 * 1024  # 1MB
 # automatically clamped to the model's actual capacity.
 DEFAULT_JSON_MAX_TOKENS = 8192
 
+_USER_CHAT_PROMPT = ChatPromptTemplate.from_messages([("human", "{prompt}")])
+_SYSTEM_USER_CHAT_PROMPT = ChatPromptTemplate.from_messages(
+    [("system", "{system_prompt}"), ("human", "{prompt}")]
+)
+
 
 class LLMConfig(BaseModel):
     """LLM configuration model."""
@@ -61,22 +63,36 @@ class LLMConfig(BaseModel):
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
 
 
-def _normalize_api_base(provider: str, api_base: str | None) -> str | None:
-    """Normalize api_base for LiteLLM provider-specific expectations.
+def _build_messages(
+    prompt: str,
+    system_prompt: str | None = None,
+) -> list[dict[str, Any]]:
+    """使用 LangChain 模板构建统一消息。
 
-    When using proxies/aggregators, users often paste a base URL that already
-    includes a version segment (e.g., `/v1`). Some LiteLLM provider handlers
-    append those segments internally, which can lead to duplicated paths like
-    `/v1/v1/...` and cause 404s.
+    Args:
+        prompt: 用户提示词。
+        system_prompt: 可选的系统提示词；为空时不生成系统消息。
 
-    For the `openai` provider, LiteLLM uses the upstream OpenAI client which
-    handles `/v1` correctly — we MUST preserve whatever the user pasted so
-    that OpenAI-compatible endpoints like llama.cpp (http://localhost:8080/v1)
-    round-trip intact. See issue #751.
+    Returns:
+        LangChain 与业务图均可接受的 ``role``/``content`` 消息列表。
     """
-    # LiteLLM currently defaults DeepSeek chat requests to the legacy /beta
-    # endpoint when no base URL is supplied. Use the standard V4 endpoint so
-    # current model limits and request semantics apply.
+    if system_prompt:
+        messages = _SYSTEM_USER_CHAT_PROMPT.format_messages(
+            system_prompt=system_prompt,
+            prompt=prompt,
+        )
+    else:
+        messages = _USER_CHAT_PROMPT.format_messages(prompt=prompt)
+    return convert_to_openai_messages(messages)
+
+
+def _normalize_api_base(provider: str, api_base: str | None) -> str | None:
+    """按 LangChain 供应商集成的规则规范化 API 地址。
+
+    LangChain 的专用集成直接接收供应商 base URL，因此保留用户填写的版本
+    路径。Ollama 是例外：其客户端接收主机根地址，需移除常见 API 后缀。
+    """
+    # DeepSeek 使用标准 API 根地址，避免旧版 /beta 行为。
     if provider == "deepseek" and not api_base:
         return "https://api.deepseek.com"
 
@@ -89,24 +105,12 @@ def _normalize_api_base(provider: str, api_base: str | None) -> str | None:
 
     base = base.rstrip("/")
 
-    # OpenAI / OpenAI-compatible: preserve the URL as-is. The OpenAI client
-    # resolves paths correctly whether the base includes /v1 or not.
-    if provider in ("openai", "openai_compatible"):
-        return base or None
-
-    # Anthropic handler appends '/v1/messages'. If base already ends with '/v1',
-    # strip it to avoid '/v1/v1/messages'.
+    # Anthropic SDK 会自行追加 /v1/messages。
     if provider == "anthropic" and base.endswith("/v1"):
         base = base[: -len("/v1")].rstrip("/")
 
-    # Gemini handler appends '/v1/models/...'. If base already ends with '/v1',
-    # strip it to avoid '/v1/v1/models/...'.
+    # Google GenAI 客户端会自行追加版本路径。
     if provider == "gemini" and base.endswith("/v1"):
-        base = base[: -len("/v1")].rstrip("/")
-
-    # OpenRouter base is https://openrouter.ai/api/v1. LiteLLM appends /v1
-    # internally, so strip it to avoid /v1/v1.
-    if provider == "openrouter" and base.endswith("/v1"):
         base = base[: -len("/v1")].rstrip("/")
 
     # Ollama doesn't use /v1 paths. Strip common suffixes users might paste:
@@ -127,7 +131,7 @@ _OPENAI_COMPATIBLE_SENTINEL = "sk-no-key"
 
 
 def _effective_api_key(provider: str, api_key: str) -> str:
-    """Return the api_key to pass to LiteLLM.
+    """返回传给 LangChain 供应商集成的 API key。
 
     For openai_compatible with a blank key, substitute a sentinel so the
     OpenAI client accepts the call. Other providers pass through unchanged.
@@ -200,12 +204,11 @@ def _join_text_parts(parts: list[str]) -> str | None:
 
 
 def _extract_message_text(message: Any) -> str | None:
-    """Extract plain text from a LiteLLM message object across providers.
+    """从 LangChain 消息中提取跨供应商可见文本。
 
     Fallback order:
       1. message.content (standard OpenAI-compatible path)
-      2. message.reasoning_content (DeepSeek R1, OpenAI o1/o3 via LiteLLM
-         standardized field)
+      2. message.reasoning_content（DeepSeek/OpenAI 推理字段）
       3. message.thinking (Anthropic extended thinking)
 
     Reasoning-only responses are treated as valid content so thinking models
@@ -239,26 +242,12 @@ def _safe_get(obj: Any, key: str) -> Any:
         return getattr(obj, key)
     if isinstance(obj, dict):
         return obj.get(key)
-    return None
-
-
-def _extract_choice_text(choice: Any) -> str | None:
-    """Extract plain text from a LiteLLM choice object.
-
-    Tries message.content first, then choice.text, then choice.delta. Handles both
-    object attributes and dict keys.
-    """
-    content = _extract_message_text(_safe_get(choice, "message"))
-    if content:
-        return content
-
-    for field in ("text", "delta"):
-        value = _safe_get(choice, field)
-        if value is not None:
-            extracted = _join_text_parts(_extract_text_parts(value))
-            if extracted:
-                return extracted
-
+    additional = getattr(obj, "additional_kwargs", None)
+    if isinstance(additional, dict) and key in additional:
+        return additional.get(key)
+    metadata = getattr(obj, "response_metadata", None)
+    if isinstance(metadata, dict):
+        return metadata.get(key)
     return None
 
 
@@ -407,129 +396,110 @@ def get_llm_config() -> LLMConfig:
 
 
 def get_model_name(config: LLMConfig) -> str:
-    """Convert provider/model to LiteLLM format.
-
-    For most providers, adds the provider prefix if not already present.
-    For OpenRouter, always adds 'openrouter/' prefix since OpenRouter models
-    use nested prefixes like 'openrouter/anthropic/claude-3.5-sonnet'.
-    """
-    provider_prefixes = {
-        "openai": "",  # OpenAI models don't need prefix
-        # openai_compatible: route via LiteLLM's openai/ prefix so the OpenAI
-        # client handles the request; works for llama.cpp, vLLM, LM Studio,
-        # and any server exposing the OpenAI Chat Completions API shape.
-        "openai_compatible": "openai/",
-        "anthropic": "anthropic/",
-        "openrouter": "openrouter/",
-        "gemini": "gemini/",
-        "deepseek": "deepseek/",
-        "groq": "groq/",
-        "ollama": "ollama_chat/",  # ollama_chat/ routes to /api/chat (supports messages array)
+    """返回供应商实际接收的模型名，并兼容旧配置中的前缀。"""
+    prefixes = {
+        "openai": ("openai/",),
+        "openai_compatible": ("openai/",),
+        "anthropic": ("anthropic/",),
+        "openrouter": ("openrouter/",),
+        "gemini": ("gemini/", "google_genai/"),
+        "deepseek": ("deepseek/",),
+        "groq": ("groq/",),
+        "ollama": ("ollama_chat/", "ollama/"),
     }
-
-    prefix = provider_prefixes.get(config.provider, "")
-
-    # OpenRouter is special: always add openrouter/ prefix unless already present
-    # OpenRouter models use nested format: openrouter/anthropic/claude-3.5-sonnet
-    if config.provider == "openrouter":
-        if config.model.startswith("openrouter/"):
-            return config.model
-        return f"openrouter/{config.model}"
-
-    # For other providers, don't add prefix if model already has a known prefix
-    known_prefixes = [
-        "openrouter/",
-        "anthropic/",
-        "gemini/",
-        "deepseek/",
-        "groq/",
-        "ollama/",
-        "ollama_chat/",
-        "openai/",
-    ]
-    if any(config.model.startswith(p) for p in known_prefixes):
-        return config.model
-
-    # Add provider prefix for models that need it
-    return f"{prefix}{config.model}" if prefix else config.model
+    model = config.model
+    for prefix in prefixes.get(config.provider, ()):
+        if model.startswith(prefix):
+            return model[len(prefix) :]
+    return model
 
 
-# ---------------------------------------------------------------------------
-# Router — centralises transport retries, cooldowns, and error-type policies
-# ---------------------------------------------------------------------------
-
-_router: Router | None = None
-_router_config_key: str = ""
-_router_lock = threading.Lock()
-
-
-def _config_fingerprint(config: LLMConfig) -> str:
-    """Generate a fingerprint to detect config changes.
-
-    Uses Python's built-in ``hash()`` on the API key — stable within a
-    single process (which is the cache lifetime), collision-resistant,
-    and not a cryptographic function so it won't trigger CodeQL alerts.
-    The raw key is never stored in the fingerprint string.
-    """
-    key_hash = hash(config.api_key) if config.api_key else 0
-    return f"{config.provider}|{config.model}|{key_hash}|{config.api_base}"
+_LANGCHAIN_PROVIDERS = {
+    "openai": "openai",
+    "openai_compatible": "openai",
+    "anthropic": "anthropic",
+    "openrouter": "openrouter",
+    "gemini": "google_genai",
+    "deepseek": "deepseek",
+    "groq": "groq",
+    "ollama": "ollama",
+}
 
 
-def _build_router(config: LLMConfig) -> Router:
-    """Build a LiteLLM Router with error-type retry policies."""
-    model_name = get_model_name(config)
-
-    litellm_params: dict[str, Any] = {"model": model_name}
-    effective_key = _effective_api_key(config.provider, config.api_key)
-    if effective_key:
-        litellm_params["api_key"] = effective_key
-    api_base = _normalize_api_base(config.provider, config.api_base)
+@lru_cache(maxsize=64)
+def _cached_chat_model(
+    provider: str,
+    model_name: str,
+    api_key: str,
+    api_base: str | None,
+    reasoning_effort: str | None,
+    max_tokens: int | None,
+    temperature: float | None,
+    timeout: int,
+    max_retries: int,
+    disable_reasoning: bool,
+) -> BaseChatModel:
+    """创建并缓存参数完全相同的 LangChain ChatModel。"""
+    model_provider = _LANGCHAIN_PROVIDERS.get(provider)
+    if model_provider is None:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
+    kwargs: dict[str, Any] = {
+        "timeout": timeout,
+        "max_retries": max_retries,
+    }
+    effective_key = _effective_api_key(provider, api_key)
+    if provider != "ollama" and effective_key:
+        kwargs["api_key"] = effective_key
     if api_base:
-        litellm_params["api_base"] = api_base
-
-    return Router(
-        model_list=[
-            {
-                "model_name": "primary",
-                "litellm_params": litellm_params,
-            }
-        ],
-        num_retries=3,
-        retry_policy=RetryPolicy(
-            AuthenticationErrorRetries=0,
-            BadRequestErrorRetries=0,
-            TimeoutErrorRetries=2,
-            RateLimitErrorRetries=3,
-            ContentPolicyViolationErrorRetries=0,
-            InternalServerErrorRetries=2,
-        ),
-        # Cooldowns disabled: with a single deployment and no fallback,
-        # cooldowns would blackout the backend on transient failures.
-        # Re-enable when a fallback deployment is added.
-        disable_cooldowns=True,
+        kwargs["base_url"] = api_base
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if disable_reasoning and provider == "deepseek":
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    elif reasoning_effort:
+        if provider in {"openai", "openai_compatible", "deepseek", "groq"}:
+            kwargs["reasoning_effort"] = reasoning_effort
+        elif provider == "gemini":
+            kwargs["thinking_level"] = reasoning_effort
+        elif provider == "anthropic" and reasoning_effort != "minimal":
+            kwargs["effort"] = reasoning_effort
+        elif provider == "openrouter":
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+    return init_chat_model(
+        model=model_name,
+        model_provider=model_provider,
+        **kwargs,
     )
 
 
-def get_router(config: LLMConfig | None = None) -> tuple[Router, LLMConfig]:
-    """Get or rebuild the LiteLLM Router.
-
-    The Router is cached and only rebuilt when the underlying config changes.
-    Returns the Router and the config it was built from.
-    """
-    global _router, _router_config_key
-
-    if config is None:
-        config = get_llm_config()
-
-    key = _config_fingerprint(config)
-    with _router_lock:
-        if _router is None or _router_config_key != key:
-            _router = _build_router(config)
-            _router_config_key = key
-            logging.info("LiteLLM Router rebuilt for %s/%s", config.provider, config.model)
-        router = _router
-
-    return router, config
+def get_chat_model(
+    config: LLMConfig | None = None,
+    *,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    timeout: int | None = None,
+    max_retries: int = 3,
+    disable_reasoning: bool = False,
+) -> tuple[BaseChatModel, LLMConfig]:
+    """取得统一 LangChain ChatModel 及其应用配置。"""
+    resolved = config or get_llm_config()
+    model_name = get_model_name(resolved)
+    actual_temperature = (temperature if _supports_temperature(model_name, temperature) else None)
+    model = _cached_chat_model(
+        resolved.provider,
+        model_name,
+        resolved.api_key,
+        _normalize_api_base(resolved.provider, resolved.api_base),
+        resolved.reasoning_effort,
+        max_tokens,
+        actual_temperature,
+        timeout or _calculate_timeout("completion", max_tokens or 4096, resolved.provider),
+        max_retries,
+        disable_reasoning,
+    )
+    return model, resolved
 
 
 async def check_llm_health(
@@ -559,24 +529,22 @@ async def check_llm_health(
     prompt = test_prompt or "Hi"
 
     try:
-        # Make a minimal test call with timeout
-        # Pass API key directly to avoid race conditions with global os.environ
-        kwargs: dict[str, Any] = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 64,
-            "api_key": _effective_api_key(config.provider, config.api_key),
-            "api_base": _normalize_api_base(config.provider, config.api_base),
-            "timeout": LLM_TIMEOUT_HEALTH_CHECK,
-        }
-        if config.reasoning_effort:
-            kwargs["reasoning_effort"] = config.reasoning_effort
-
-        response = await litellm.acompletion(**kwargs)
-        content = _extract_choice_text(response.choices[0])
+        model, _ = get_chat_model(
+            config,
+            max_tokens=64,
+            timeout=LLM_TIMEOUT_HEALTH_CHECK,
+            max_retries=0,
+        )
+        response = await model.ainvoke(_build_messages(prompt))
+        content = _extract_message_text(response)
+        response_model = (
+            response.response_metadata.get("model_name")
+            or response.response_metadata.get("model")
+            or model_name
+        )
         if not content:
             # LLM-003: Empty response (even after reasoning_content / thinking
-            # fallbacks in _extract_choice_text) marks health as unhealthy.
+            # 推理字段回退后仍为空时，健康检查必须失败。
             logging.warning(
                 "LLM health check returned empty content",
                 extra={"provider": config.provider, "model": config.model},
@@ -585,7 +553,7 @@ async def check_llm_health(
                 "healthy": False,
                 "provider": config.provider,
                 "model": config.model,
-                "response_model": response.model if response else None,
+                "response_model": response_model,
                 "error_code": "empty_content",
                 "message": "LLM returned empty response",
             }
@@ -598,25 +566,28 @@ async def check_llm_health(
             "healthy": True,
             "provider": config.provider,
             "model": config.model,
-            "response_model": response.model if response else None,
+            "response_model": response_model,
         }
         if include_details:
             result["test_prompt"] = _to_code_block(prompt)
             result["model_output"] = _to_code_block(content)
             # Surface reasoning/thinking text separately ONLY when the model
             # also returned distinct primary content. If message.content was
-            # empty, _extract_choice_text already folded the reasoning text
+            # empty, _extract_message_text already folded the reasoning text
             # into `content` above — surfacing it here too would duplicate
             # identical text in "Model output" and "Model thinking".
-            msg = response.choices[0].message
             primary_content = _join_text_parts(
-                _extract_text_parts(_safe_get(msg, "content"))
+                _extract_text_parts(_safe_get(response, "content"))
             )
             reasoning_text = None
             if primary_content:
                 reasoning_text = (
-                    _join_text_parts(_extract_text_parts(_safe_get(msg, "reasoning_content")))
-                    or _join_text_parts(_extract_text_parts(_safe_get(msg, "thinking")))
+                    _join_text_parts(
+                        _extract_text_parts(_safe_get(response, "reasoning_content"))
+                    )
+                    or _join_text_parts(
+                        _extract_text_parts(_safe_get(response, "thinking"))
+                    )
                 )
             result["reasoning_content"] = (
                 _to_code_block(reasoning_text) if reasoning_text else None
@@ -661,33 +632,21 @@ async def complete(
     max_tokens: int = 4096,
     temperature: float = 0.7,
 ) -> str:
-    """Make a completion request to the LLM.
+    """通过 LangChain ChatModel 完成一次文本生成。"""
+    resolved = config or get_llm_config()
+    model, resolved = get_chat_model(
+        resolved,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=_calculate_timeout("completion", max_tokens, resolved.provider),
+    )
+    model_name = get_model_name(resolved)
 
-    Transport retries (429, 500, timeout) are handled by the Router.
-    """
-    router, config = get_router(config)
-    model_name = get_model_name(config)
-
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
+    messages = _build_messages(prompt, system_prompt)
 
     try:
-        kwargs: dict[str, Any] = {
-            "model": "primary",
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "timeout": _calculate_timeout("completion", max_tokens, config.provider),
-        }
-        if _supports_temperature(model_name, temperature):
-            kwargs["temperature"] = temperature
-        if config.reasoning_effort:
-            kwargs["reasoning_effort"] = config.reasoning_effort
-
-        response = await router.acompletion(**kwargs)
-
-        content = _extract_choice_text(response.choices[0])
+        response = await model.ainvoke(messages)
+        content = _extract_message_text(response)
         if not content:
             raise ValueError("Empty response from LLM")
         # Strip thinking tags from reasoning models (deepseek-r1, qwq, etc.)
@@ -706,42 +665,16 @@ async def complete(
 
 
 def _supports_json_mode(model_name: str) -> bool:
-    """Check if the model supports JSON mode via LiteLLM's model registry.
-
-    Queries LiteLLM's model info for every provider (including openai,
-    anthropic, etc.) so that capability is always determined from the
-    registry rather than a hardcoded provider list.
-
-    Ollama models support JSON mode natively (format="json") but are
-    often not in LiteLLM's registry (custom/local models), so we
-    always return True for ollama.
-
-    Args:
-        model_name: LiteLLM-formatted model name (from get_model_name).
-    """
-    # Ollama supports JSON mode natively via format="json" even when
-    # models aren't in LiteLLM's registry (custom, quantized, etc.)
-    if model_name.startswith(("ollama/", "ollama_chat/")):
-        return True
-
-    try:
-        info = litellm.get_model_info(model=model_name)
-        supported_params = info.get("supported_openai_params", [])
-        return "response_format" in supported_params
-    except Exception:
-        # Model not in LiteLLM's registry — fall back to prompt-only JSON
-        # mode (the system prompt already instructs "respond with valid JSON
-        # only"). This avoids sending response_format to models that may
-        # reject it.
-        logging.debug("Model %s not in LiteLLM registry, skipping JSON mode", model_name)
-        return False
+    """判断模型是否应尝试原生 JSON 模式。"""
+    lowered = model_name.lower()
+    return not lowered.startswith("claude-")
 
 
 def _is_response_format_unsupported(error: Exception) -> bool:
     """Return True if a 400 indicates the server rejected ``response_format``.
 
-    Some OpenAI-compatible servers (e.g. LM Studio, older llama.cpp builds) are
-    reported as supporting ``response_format`` by LiteLLM's registry but reject
+    Some OpenAI-compatible servers (e.g. LM Studio, older llama.cpp builds)
+    reject
     the ``{"type": "json_object"}`` we send for JSON mode, returning a 400 such
     as ``'response_format.type' must be 'json_schema' or 'text'`` (issue #857).
 
@@ -765,18 +698,21 @@ def _is_response_format_unsupported(error: Exception) -> bool:
 
 FALLBACK_MAX_TOKENS = 4096
 
+
+def get_model_profile(config: LLMConfig | None = None) -> dict[str, Any]:
+    """读取 LangChain 供应商集成附带的模型能力资料。"""
+    try:
+        model, _ = get_chat_model(config, max_retries=0)
+    except Exception:
+        return {}
+    return dict(model.profile or {})
+
+
 def get_safe_max_tokens(model_name: str, requested: int = DEFAULT_JSON_MAX_TOKENS) -> int:
-    """Return a token count safe for the given model, clamped to its output limit.
-
-    Queries LiteLLM's model registry for ``max_output_tokens`` and returns
-    ``min(requested, model_limit)`` so callers never send a value that exceeds
-    what the backend actually supports.
-
-    If the model is not in the registry (e.g. custom Ollama models), it falls
-    back to a safe conservative limit (FALLBACK_MAX_TOKENS).
+    """按 LangChain 模型资料限制输出 token；未知模型保留调用方预算。
 
     Args:
-        model_name: LiteLLM-formatted model name (from get_model_name).
+        model_name: 供应商实际接收的模型名。
         requested: Desired token budget; defaults to DEFAULT_JSON_MAX_TOKENS.
 
     Returns:
@@ -784,30 +720,12 @@ def get_safe_max_tokens(model_name: str, requested: int = DEFAULT_JSON_MAX_TOKEN
     """
     safe_requested = max(1, requested)
 
-    try:
-        info = litellm.get_model_info(model=model_name)
-        model_limit = info.get("max_output_tokens") or info.get("max_tokens")
-        if model_limit and isinstance(model_limit, int) and model_limit > 0:
-            safe = min(safe_requested, model_limit)
-            if safe < safe_requested:
-                logging.debug(
-                    "max_tokens clamped %d → %d for model %s (model limit)",
-                    safe_requested,
-                    safe,
-                    model_name,
-                )
-            return safe
-    except Exception:
-        pass  # Model not in registry, drop down to fallback logic
-
-    safe = min(safe_requested, FALLBACK_MAX_TOKENS)
-    logging.debug(
-        "Model %s not in LiteLLM registry, clamping requested max_tokens %d → %d constraint",
-        model_name,
-        safe_requested,
-        safe,
-    )
-    return safe
+    config = get_llm_config()
+    profile = get_model_profile(config) if get_model_name(config) == model_name else {}
+    model_limit = profile.get("max_output_tokens")
+    if isinstance(model_limit, int) and model_limit > 0:
+        return min(safe_requested, model_limit)
+    return safe_requested
 
 
 def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
@@ -875,18 +793,10 @@ def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
 
 
 def _supports_temperature(model_name: str, temperature: float | None = None) -> bool:
-    """Check if the model supports the given temperature value.
-
-    Uses LiteLLM model registry for capability detection, with
-    provider-specific fallbacks for known restrictions:
-      - Anthropic claude-opus-4.*: temperature is deprecated
-      - Moonshot kimi-k2.6: only temperature=1 allowed
-
-    Queries LiteLLM's model info for every provider so that capability is
-    always determined from the registry rather than a hardcoded list.
+    """根据已知供应商限制判断是否传递 temperature。
 
     Args:
-        model_name: LiteLLM-formatted model name (from get_model_name).
+        model_name: 供应商实际接收的模型名。
         temperature: The temperature value to check. If None, returns True
             (caller isn't setting a specific value).
 
@@ -896,33 +806,13 @@ def _supports_temperature(model_name: str, temperature: float | None = None) -> 
     if temperature is None:
         return True
 
-    # Ollama models are often not in LiteLLM's registry (custom/local),
-    # but they universally support temperature.
-    if model_name.startswith(("ollama/", "ollama_chat/")):
-        return True
-
-    try:
-        info = litellm.get_model_info(model=model_name)
-        supported_params = info.get("supported_openai_params", [])
-        if "temperature" not in supported_params:
-            return False
-    except Exception:
-        # Model not in LiteLLM's registry — be conservative and skip
-        # temperature to avoid BadRequestError from unsupported params.
-        logging.debug(
-            "Model %s not in LiteLLM registry, skipping temperature", model_name
-        )
+    lowered = model_name.lower()
+    if "claude-opus-4" in lowered:
         return False
-
-    # Provider-specific restrictions not captured by the registry.
-    # Anthropic Opus 4.x deprecated temperature entirely.
-    if "claude-opus-4" in model_name.lower():
+    if "kimi-k2.6" in lowered and temperature != 1.0:
         return False
-
-    # Moonshot kimi-k2.6 only allows temperature=1.
-    if "kimi-k2.6" in model_name.lower() and temperature != 1.0:
+    if "gpt-5" in lowered or re.search(r"(?:^|[/_-])o[134](?:$|[/_.-])", lowered):
         return False
-
     return True
 
 
@@ -1081,28 +971,21 @@ async def complete_json(
     retries: int = 2,
     schema_type: str = "resume",
 ) -> dict[str, Any]:
-    """Make a completion request expecting JSON response.
-
-    Uses JSON mode when available, with app-level retries for content-quality
-    issues (malformed JSON, truncation).  Transport retries (429, 500, timeout)
-    are handled by the Router and are NOT retried again here.
+    """通过 LangChain 生成并校验 JSON，保留内容质量重试。
 
     Args:
         schema_type: Expected schema — "resume", "enrichment", "diff",
             "keywords", or "interview_prep". Passed to _appears_truncated for
             context-aware truncation detection and used to tailor retry hints.
     """
-    router, config = get_router(config)
-    model_name = get_model_name(config)
+    resolved = config or get_llm_config()
+    model_name = get_model_name(resolved)
 
     # Build messages
     json_system = (
         system_prompt or ""
     ) + "\n\nYou must respond with valid JSON only. No explanations, no markdown."
-    messages = [
-        {"role": "system", "content": json_system},
-        {"role": "user", "content": prompt},
-    ]
+    messages = _build_messages(prompt, json_system)
 
     # Check if we can use JSON mode
     use_json_mode = _supports_json_mode(model_name)
@@ -1110,27 +993,30 @@ async def complete_json(
 
     for attempt in range(retries + 1):
         try:
-            kwargs: dict[str, Any] = {
-                "model": "primary",
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "timeout": _calculate_timeout("json", max_tokens, config.provider),
-            }
-            # LLM-002: Increase temperature on retry for variation
             retry_temp = _get_retry_temperature(model_name, attempt)
-            if retry_temp is not None:
-                kwargs["temperature"] = retry_temp
-            if config.reasoning_effort:
-                kwargs["reasoning_effort"] = config.reasoning_effort
-
-            # JSON-012: Fallback to prompt-only JSON mode after JSON-mode failure.
-            # LiteLLM registry may report support for models that the upstream
-            # aggregator (OpenRouter) cannot actually serve with response_format.
+            model, _ = get_chat_model(
+                resolved,
+                max_tokens=max_tokens,
+                temperature=retry_temp,
+                timeout=_calculate_timeout("json", max_tokens, resolved.provider),
+            )
+            runnable: Any = model
             if use_json_mode and not json_mode_failed:
-                kwargs["response_format"] = {"type": "json_object"}
+                if resolved.provider in {
+                    "openai",
+                    "openai_compatible",
+                    "deepseek",
+                    "groq",
+                    "openrouter",
+                }:
+                    runnable = model.bind(response_format={"type": "json_object"})
+                elif resolved.provider == "gemini":
+                    runnable = model.bind(response_mime_type="application/json")
+                elif resolved.provider == "ollama":
+                    runnable = model.bind(format="json")
 
-            response = await router.acompletion(**kwargs)
-            content = _extract_choice_text(response.choices[0])
+            response = await runnable.ainvoke(messages)
+            content = _extract_message_text(response)
 
             if not content:
                 raise ValueError("Empty response from LLM")
@@ -1178,8 +1064,6 @@ async def complete_json(
             # Content quality — malformed JSON, retry with prompt hint
             logging.warning(f"JSON parse failed (attempt {attempt + 1}): {e}")
             if use_json_mode and not json_mode_failed:
-                # JSON-012: Registry claimed JSON mode support but the upstream
-                # failed to return valid JSON. Disable JSON mode for retries.
                 json_mode_failed = True
                 logging.warning(
                     "JSON mode failed for %s, falling back to prompt-only (attempt %d)",
@@ -1201,13 +1085,9 @@ async def complete_json(
                 continue
             raise
 
-        except litellm.BadRequestError as e:
-            # JSON-012b: some OpenAI-compatible servers (e.g. LM Studio) report
-            # response_format support via the registry but reject
-            # {"type": "json_object"} with a 400 (issue #857). The Router does
-            # not retry bad requests, so recover here by disabling JSON mode and
-            # retrying prompt-only. Unrelated 400s (e.g. context length) still
-            # propagate.
+        except Exception as e:
+            # 某些 OpenAI-compatible 服务拒绝 response_format；仅对此类错误
+            # 回退到 prompt-only JSON，其他传输错误由供应商集成重试后继续抛出。
             if (
                 use_json_mode
                 and not json_mode_failed
@@ -1222,12 +1102,6 @@ async def complete_json(
                 )
                 if attempt < retries:
                     continue
-            raise
-
-        except Exception:
-            # Transport errors — Router already retried with backoff.
-            # Cooldowns are disabled (see _build_router); no additional
-            # retry is attempted here.
             raise
 
     raise ValueError(f"Failed after {retries + 1} attempts")

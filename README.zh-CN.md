@@ -243,7 +243,7 @@ docker run srbhr/resume-matcher:latest
 
 | 组件 | 技术 |
 |------|------|
-| 后端 | FastAPI、Python 3.13+、LiteLLM |
+| 后端 | FastAPI、Python 3.13+、LangChain |
 | 前端 | Next.js 15、React 19、TypeScript |
 | 数据库 | TinyDB（JSON 文件存储） |
 | 样式 | Tailwind CSS 4、Swiss International Style |

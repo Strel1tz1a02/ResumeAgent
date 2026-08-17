@@ -1,113 +1,71 @@
 # LLM Integration Guide
 
-> **Multi-provider AI support, JSON handling, and prompt guidelines.**
+> **基于 LangChain 的多供应商模型、工具调用、结构化输出与 JSON 兼容处理。**
 
 ## Multi-Provider Support
 
-Backend uses LiteLLM to support multiple providers through a unified API:
+后端通过 LangChain 的统一 ChatModel 接口支持以下供应商：
 
-| Provider | Type | Notes |
-|----------|------|-------|
-| **Ollama** | Local | Free, runs on your machine |
-| **OpenAI** | Cloud | GPT-5 Nano, GPT-4o |
-| **Anthropic** | Cloud | Claude Haiku 4.5 |
-| **Google Gemini** | Cloud | Gemini 3 Flash |
-| **OpenRouter** | Cloud | Access to multiple models |
-| **DeepSeek** | Cloud | DeepSeek Chat |
+| Provider | LangChain integration | Notes |
+|----------|-----------------------|-------|
+| **Ollama** | `langchain-ollama` | 本地模型 |
+| **OpenAI** | `langchain-openai` | OpenAI 模型 |
+| **OpenAI Compatible** | `langchain-openai` | llama.cpp、vLLM、LM Studio 等 |
+| **Anthropic** | `langchain-anthropic` | Claude 模型 |
+| **Google Gemini** | `langchain-google-genai` | Gemini 模型 |
+| **OpenRouter** | `langchain-openrouter` | 聚合模型服务 |
+| **DeepSeek** | `langchain-deepseek` | DeepSeek 模型 |
+| **Groq** | `langchain-groq` | Groq 模型 |
+
+`app/llm.py::get_chat_model()` 使用 `init_chat_model()` 创建并缓存供应商模型。业务层使用统一的 `ainvoke()`、`astream()`、`bind_tools()` 和 `with_structured_output()`，不直接调用供应商 SDK。
 
 ## API Key Handling
 
-API keys are passed directly to `litellm.acompletion()` via the `api_key` parameter (not via `os.environ`) to avoid race conditions in async contexts.
+API Key 通过模型构造参数直接传入，不写入 `os.environ`，避免异步请求之间出现环境变量竞争。`openai_compatible` 和 `ollama` 不读取云端通用 Key；本地 OpenAI 兼容服务未配置 Key 时会使用无敏感信息的占位值满足客户端参数校验。
 
-```python
-# Correct
-await litellm.acompletion(
-    model=model,
-    messages=messages,
-    api_key=api_key  # Direct parameter
-)
+## Messages, Tools, and Structured Output
 
-# Incorrect - don't use os.environ in async code
-os.environ["OPENAI_API_KEY"] = key  # Race condition risk
-```
+- 普通补全：`ChatPromptTemplate` 构建消息，ChatModel `ainvoke()` 执行。
+- 流式工具调用：ChatModel `bind_tools()` 后使用 `astream()`；`AIMessageChunk` 直接聚合跨 chunk 工具参数，完整 `ToolCallChunk` 直接交给工具服务。
+- 工具定义：模型只接收 LangChain `StructuredTool`，由其 `args_schema` 完成基础参数校验；工具本身不保存风险或审批状态。
+- 工具生命周期：`ToolApprovalService` 根据完整调用决定审批路由，`ToolCallStore` 负责幂等固化，`ToolService` 编排准备、审批、执行和结果保存。
+- 经历文本导入：`with_structured_output(ExperienceGlobalSave, include_raw=True)` 直接返回经 Pydantic 校验的结构。
+- 业务 JSON 补全：`complete_json()` 保留现有花括号平衡提取、截断识别和内容质量重试。
 
 ## JSON Mode
 
-The `complete_json()` function automatically enables `response_format={"type": "json_object"}` for providers that support it:
-
-- OpenAI
-- Anthropic
-- Gemini
-- DeepSeek
-- Major OpenRouter models
+`complete_json()` 根据供应商绑定原生 JSON 参数：OpenAI 兼容系列使用 `response_format`，Gemini 使用 JSON MIME type，Ollama 使用 `format="json"`。兼容服务拒绝 `response_format` 时，会回退到提示词约束的 JSON 输出；这只改变传输参数，不改变业务结果契约。
 
 ## Retry Logic
 
-JSON completions include 2 automatic retries with progressively lower temperature:
+供应商传输重试由 LangChain 模型的 `max_retries` 处理。`complete_json()` 额外保留应用层内容质量重试，用于以下情况：
 
-- Attempt 1: temperature 0.1
-- Attempt 2: temperature 0.0
-
-## JSON Extraction
-
-Robust bracket-matching algorithm in `_extract_json()` handles:
-
-- Malformed responses
-- Markdown code blocks
-- Edge cases
-- Infinite recursion protection when content starts with `{` but matching fails
+- 返回内容不是合法 JSON；
+- JSON 疑似被输出长度截断；
+- 兼容服务不支持原生 JSON 参数。
 
 ## Error Handling Pattern
 
-LLM functions log detailed errors server-side but return generic messages to clients:
+模型函数在服务端记录详细错误，向客户端返回不包含密钥的通用消息：
 
 ```python
-except Exception as e:
-    logger.error(f"LLM completion failed: {e}")
-    raise ValueError("LLM completion failed. Please check your API configuration.")
-```
-
-## Adding Prompts
-
-Add new prompt templates to `apps/backend/app/prompts/templates.py`.
-
-### Prompt Guidelines
-
-1. Use `{variable}` for substitution (single braces)
-2. Include example JSON schemas for structured outputs
-3. Keep instructions concise: "Output ONLY the JSON object, no other text"
-
-### Example
-
-```python
-IMPROVE_BULLET = """
-Improve this resume bullet point for a {job_title} position.
-
-Current: {current_bullet}
-
-Output ONLY the improved bullet point, no explanations.
-"""
+except Exception as exc:
+    logger.error("LLM completion failed: %s", exc)
+    raise ValueError(
+        "LLM completion failed. Please check your API configuration."
+    ) from exc
 ```
 
 ## Provider Configuration
 
-Users configure their preferred AI provider via:
+用户可通过设置页 `/settings` 或 `/api/v1/config/*` 接口配置供应商、模型、地址、推理强度及加密存储的 API Key。旧配置中带供应商前缀的模型名会在读取时兼容处理。
 
-- Settings page: `/settings`
-- API: `PUT /api/v1/config/llm-api-key`
+## Health Checks and Timeouts
 
-## Health Checks
+`POST /api/v1/config/llm-test` 会实际调用当前 ChatModel；`GET /api/v1/health` 仅做服务存活检查。基础超时如下，并会结合输出 token 数量和供应商系数调整：
 
-The `/api/v1/health` endpoint validates LLM connectivity.
-
-> **Note**: Docker health checks must use `/api/v1/health` (not `/health`).
-
-## Timeouts
-
-All LLM calls have configurable timeouts:
-
-| Operation | Timeout |
-|-----------|---------|
+| Operation | Base timeout |
+|-----------|--------------|
 | Health checks | 30s |
 | Completions | 120s |
 | JSON operations | 180s |
@@ -116,7 +74,12 @@ All LLM calls have configurable timeouts:
 
 | File | Purpose |
 |------|---------|
-| `apps/backend/app/llm.py` | LiteLLM wrapper with JSON mode |
-| `apps/backend/app/prompts/templates.py` | Prompt templates |
-| `apps/backend/app/prompts/enrichment.py` | Enrichment-specific prompts |
-| `apps/backend/app/config.py` | Provider configuration |
+| `apps/backend/app/llm.py` | LangChain 模型工厂、补全、JSON 与健康检查 |
+| `apps/backend/app/ai_chat/streaming/model.py` | LangChain 流式工具调用适配 |
+| `apps/backend/app/ai_chat/tools/operation.py` | LangChain Tool 注册与业务 Operation |
+| `apps/backend/app/ai_chat/tool_approval.py` | 风险判断与审批路由 |
+| `apps/backend/app/ai_chat/tools/store.py` | Tool Call 幂等与固化边界 |
+| `apps/backend/app/ai_chat/services/tool_service.py` | Tool 生命周期编排 |
+| `apps/backend/app/experience/services/experience_text_extractor.py` | Pydantic 结构化输出 |
+| `apps/backend/app/prompts/templates.py` | Prompt 模板 |
+| `apps/backend/app/config.py` | 供应商配置 |

@@ -8,7 +8,7 @@
 |-----------|------------|
 | Framework | FastAPI |
 | Database | SQLite (SQLAlchemy 2.0 async + aiosqlite) |
-| AI | LiteLLM (100+ providers) |
+| AI | LangChain chat-model integrations |
 | Doc Parsing | markitdown |
 | Validation | Pydantic |
 | Key encryption | Fernet (`cryptography`) |
@@ -75,10 +75,18 @@ unique index. Jobs' dynamic pipeline fields (`preview_hash(es)`, `job_keywords`,
 
 | Feature | Description |
 |---------|-------------|
-| API Key Passing | Direct to litellm (avoids race conditions) |
+| API Key Passing | Direct to LangChain model constructors (avoids race conditions) |
 | JSON Mode | Auto-enabled for supported providers |
 | Retry Logic | 2 retries, temperature 0.1→0.0 |
 | Timeouts | 30s (health), 120s (completion), 180s (JSON) |
+
+### AI Chat Tool boundaries
+
+- `tools/operation.py` registers each capability as a LangChain `StructuredTool`; the Tool owns its description and Pydantic argument schema, but no risk or approval state.
+- `tool_approval.py` receives a complete validated Tool Call and returns either `execute` or `approval`.
+- `tools/store.py` owns durable state validation, atomic claims, replay and transaction access.
+- `services/tool_service.py` orchestrates preparation, approval persistence, LangChain Tool execution and result solidification.
+- Business Graphs only route between model, validation, risk assessment, approval and execution nodes.
 
 ## Prompt Guidelines
 

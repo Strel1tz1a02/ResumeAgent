@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services.ai_chat_service import AiChatService
-from app.ai_chat.services.tool_call_service import ToolCallService
+from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.streaming.events import AiChatEvent
 from app.ai_chat.tools.types import ToolContext
 from app.jd_import.adapters import JDImportAdapter
@@ -73,9 +74,9 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
     adapter = JDImportAdapter(dependencies)
     registry = AdapterRegistry()
     registry.register(adapter)
-    tools = ToolCallService(
-        isolated_db.session, repositories
-    ).bind_handlers(adapter.get_tool_handlers())
+    tools = ToolService(ToolCallStore(isolated_db.session, repositories)).bind_tools(
+        adapter.get_tools(), adapter.get_tool_approval_policy()
+    )
 
     async with isolated_db.session() as session:
         repos = repositories.create(session)

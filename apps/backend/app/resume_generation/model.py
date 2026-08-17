@@ -1,4 +1,4 @@
-"""简历规划语义模型协议、LiteLLM 实现与确定性降级实现。"""
+"""简历规划语义模型协议、LangChain 实现与确定性降级实现。"""
 
 from __future__ import annotations
 
@@ -299,8 +299,8 @@ class RuleBasedResumeGenerationModel:
         return ResumeDraft(summary=summary, experiences=drafted)
 
 
-class LiteLLMResumeGenerationModel:
-    """使用现有 LiteLLM JSON 链路进行分析、判定和忠实改写。"""
+class LangChainResumeGenerationModel:
+    """使用 LangChain JSON 链路进行分析、判定和忠实改写。"""
 
     def __init__(self, completion: Completion = complete_json) -> None:
         self._completion = completion

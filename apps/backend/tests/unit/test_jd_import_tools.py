@@ -1,7 +1,10 @@
 """JD 导入 Tool 处理器测试。"""
 
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_call_service import ToolCallService
+from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
+from app.ai_chat.tools.store import ToolCallStore
+from app.ai_chat.tools.operation import RegisteredTool
 from app.ai_chat.tools.types import ToolContext
 from app.jd_import.agent.types import (
     Assessment,
@@ -10,7 +13,7 @@ from app.jd_import.agent.types import (
     RequirementFact,
 )
 from app.jd_import.models import JDInformation
-from app.jd_import.tools import AskJDQuestionsHandler, PersistJDHandler
+from app.jd_import.tools import AskJDQuestionsOperation, PersistJDOperation
 from sqlalchemy import select
 
 
@@ -38,11 +41,20 @@ async def _context(isolated_db, *, adapter_context=None):  # type: ignore[no-unt
     )
 
 
-def _service(isolated_db) -> ToolCallService:  # type: ignore[no-untyped-def]
-    handlers = (AskJDQuestionsHandler(), PersistJDHandler())
-    return ToolCallService(
-        isolated_db.session, RepositoryFactory()
-    ).bind_handlers({item.name: item for item in handlers})
+def _service(isolated_db) -> ToolService:  # type: ignore[no-untyped-def]
+    tools = (
+        RegisteredTool(AskJDQuestionsOperation()),
+        RegisteredTool(
+            PersistJDOperation(),
+            model_visible=False,
+        ),
+    )
+    return ToolService(
+        ToolCallStore(isolated_db.session, RepositoryFactory())
+    ).bind_tools(
+        {item.name: item for item in tools},
+        ToolApprovalPolicy({item.name: ToolRisk.LOW for item in tools}),
+    )
 
 
 async def test_question_tool_builds_server_owned_batch(isolated_db) -> None:

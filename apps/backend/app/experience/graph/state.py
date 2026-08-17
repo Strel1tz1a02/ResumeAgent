@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NotRequired, TypedDict
 
+from langchain_core.messages import ToolCall as LangChainToolCall
+
 from app.ai_chat.tools.types import ApprovalDecision, ToolCall
 from app.ai_chat.types import (
     JsonObject,
@@ -22,7 +24,8 @@ class ExperienceState(TypedDict):
     tools_enabled: bool
     revision_snapshot: JsonObject
     model_messages: list[JsonObject]
-    raw_tool_call: str | None
+    raw_tool_call: LangChainToolCall | None
+    raw_tool_call_index: NotRequired[int | None]
     tool_call: ToolCall | None
 
     approval: NotRequired[ApprovalDecision | None]

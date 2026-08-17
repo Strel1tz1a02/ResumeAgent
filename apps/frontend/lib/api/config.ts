@@ -11,7 +11,7 @@ export type LLMProvider =
   | 'groq'
   | 'ollama';
 
-// Reasoning-effort levels supported by LiteLLM. `null` (or absent) means
+// Reasoning-effort levels supported by the configured LangChain model. `null` (or absent) means
 // "do not send the parameter" — the default for max compatibility.
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 

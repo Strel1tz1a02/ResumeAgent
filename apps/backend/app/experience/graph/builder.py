@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
+from langchain_core.messages import AIMessageChunk, ToolCall as LangChainToolCall
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -11,12 +13,7 @@ from langgraph.types import interrupt
 from app.ai_chat.errors import ProposalStateError, ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.streaming.events import tool_result_event
-from app.ai_chat.streaming.model import (
-    TextDelta,
-    ToolCallsCompleted,
-    build_model_tools,
-)
-from app.ai_chat.tools.security import ToolSecurity, guard_tool
+from app.ai_chat.streaming.model import complete_tool_calls
 from app.ai_chat.tools.types import ApprovalDecision, ToolCall, ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
 from app.experience.graph.context import prepare_request_messages
@@ -89,8 +86,7 @@ async def _durable_call(
     if (
         durable["status"] == "validated"
         and checkpoint["should_execute"] is True
-        and checkpoint["security"] == durable["security"]
-        and guard_tool(ToolSecurity(durable["security"])) == "execute"
+        and runtime.tools.approval.route(durable) == "execute"
     ):
         return {**durable, "should_execute": True}
     return durable
@@ -112,12 +108,14 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
     """构建模型、校验、审批策略、人工审批和执行五个节点。"""
 
     async def llm(state: ExperienceState) -> JsonObject:
-        """流式执行模型，并在结束后暴露原始工具调用字符串。"""
-        calls: tuple[str, ...] = ()
+        """流式执行模型，并在结束后暴露 LangChain 工具调用。"""
+        response = AIMessageChunk(content="")
         tools_enabled = state["tools_enabled"] and state["run_kind"] != "opening"
-        handlers = runtime.tools.model_handlers
+        tools = runtime.tools.model_tools
         tool_definitions = (
-            build_model_tools(handlers) if tools_enabled and handlers else None
+            [convert_to_openai_tool(tool) for tool in tools.values()]
+            if tools_enabled and tools
+            else None
         )
         request_messages = await prepare_request_messages(
             run_id=state["run_id"],
@@ -125,18 +123,20 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             memory=runtime.memory,
             tools=tool_definitions,
         )
-        async for event in runtime.stream_model(
+        async for chunk in runtime.stream_model(
             messages=request_messages,
             tools_enabled=tools_enabled,
         ):
-            if isinstance(event, TextDelta):
-                _emit("assistant.delta", {"text": event.text})
-            elif isinstance(event, ToolCallsCompleted):
-                calls = event.calls
+            response += chunk
+            if isinstance(chunk.content, str) and chunk.content:
+                _emit("assistant.delta", {"text": chunk.content})
+        calls = complete_tool_calls(response)
         if len(calls) > 1:
             raise ValueError("experience chat accepts at most one Tool Call per turn")
+        call_index, model_call = calls[0] if calls else (None, None)
         return {
-            "raw_tool_call": calls[0] if calls else None,
+            "raw_tool_call": model_call,
+            "raw_tool_call_index": call_index,
             "tool_call": None,
             "approval": None,
         }
@@ -145,49 +145,54 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         return "validation" if state.get("raw_tool_call") is not None else "done"
 
     async def validator(state: ExperienceState) -> JsonObject:
-        """解析原始字符串，并返回唯一的工具调用结构。"""
+        """校验 LangChain 工具调用，并返回唯一的工具调用结构。"""
         raw_call = state.get("raw_tool_call")
-        if not isinstance(raw_call, str):
+        if not isinstance(raw_call, dict):
             raise ToolProtocolError("Validator received no raw Tool Call")
-        call = await runtime.tools.validate_call(_tool_context(state), raw_call)
+        call_index = state.get("raw_tool_call_index")
+        if not isinstance(call_index, int):
+            raise ToolProtocolError("Validator received no Tool Call index")
+        call = await runtime.tools.validate_call(
+            _tool_context(state),
+            cast(LangChainToolCall, raw_call),
+            index=call_index,
+        )
         return {"tool_call": call}
 
-    def route_after_validator(state: ExperienceState) -> Literal["guard", "execution"]:
+    def route_after_validator(
+        state: ExperienceState,
+    ) -> Literal["risk_assessment", "execution"]:
         call = _get_tool_call(state)
         if call is None:
             raise ToolProtocolError("Validator did not return a Tool Call")
-        return "execution" if call["status"] == "resolved" else "guard"
+        return "execution" if call["status"] == "resolved" else "risk_assessment"
 
-    def guard(state: ExperienceState) -> JsonObject:
-        """只按工具调用的持久阶段和处理器风险声明决定路由。"""
+    def risk_assessment(state: ExperienceState) -> JsonObject:
+        """把完整 Tool Call 交给独立审批服务判断执行路由。"""
         call = _get_tool_call(state)
         if call is None:
-            raise ToolProtocolError("Guard received no Tool Call")
+            raise ToolProtocolError("Risk assessment received no Tool Call")
         if call["status"] in {"approved", "resolved", "awaiting_approval"}:
             return {}
         if call["status"] != "validated":
-            raise ToolProtocolError("Guard received an unsupported Tool status")
-        try:
-            security = ToolSecurity(call["security"])
-        except (TypeError, ValueError) as exc:
-            raise ToolProtocolError("Validated Tool Call has no security") from exc
-        if guard_tool(security) == "execute":
+            raise ToolProtocolError("Risk assessment received an unsupported status")
+        if runtime.tools.approval.route(call) == "execute":
             return {"tool_call": {**call, "should_execute": True}}
-        return {}  # 表示不修改 tool_call
+        return {}
 
-    def route_after_guard(
+    def route_after_risk_assessment(
         state: ExperienceState,
     ) -> Literal["approval", "execution"]:
         call = _get_tool_call(state)
         if call is None:
-            raise ToolProtocolError("Guard received no Tool Call")
+            raise ToolProtocolError("Risk assessment received no Tool Call")
         if call["status"] == "resolved":
             return "execution"
         if call["status"] == "approved" or call["should_execute"] is True:
             return "execution"
         if call["status"] in {"validated", "awaiting_approval"}:
             return "approval"
-        raise ToolProtocolError("Guard did not produce a routable Tool status")
+        raise ToolProtocolError("Risk assessment did not produce a routable status")
 
     async def approver(state: ExperienceState) -> JsonObject:
         """创建审批申请、等待用户决定，并保存独立审批命令。"""
@@ -224,7 +229,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         raise ToolProtocolError("Approver did not produce a decision")
 
     async def executor(state: ExperienceState) -> JsonObject:
-        """根据工具调用的决定执行处理器，或直接返回拒绝结果。"""
+        """根据审批结果调用 ToolService 执行或返回固化的拒绝结果。"""
         call = await _durable_call(state, runtime)
         already_resolved = call["status"] == "resolved"
         if not already_resolved and call["should_execute"] is not True:
@@ -241,7 +246,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
     graph = StateGraph(ExperienceState)
     graph.add_node("llm", llm)
     graph.add_node("validator", validator)
-    graph.add_node("guard", guard)
+    graph.add_node("risk_assessment", risk_assessment)
     graph.add_node("approver", approver)
     graph.add_node("executor", executor)
 
@@ -254,11 +259,11 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
     graph.add_conditional_edges(
         "validator",
         route_after_validator,
-        {"guard": "guard", "execution": "executor"},
+        {"risk_assessment": "risk_assessment", "execution": "executor"},
     )
     graph.add_conditional_edges(
-        "guard",
-        route_after_guard,
+        "risk_assessment",
+        route_after_risk_assessment,
         {"approval": "approver", "execution": "executor"},
     )
     graph.add_conditional_edges(

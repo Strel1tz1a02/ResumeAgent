@@ -1,5 +1,9 @@
 # ToolCallService 统一工具调用设计
 
+> 历史设计说明：本方案中的 `ToolHandler`、`ToolSecurity` 和 `ToolCallService`
+> 已由 LangChain `StructuredTool`、`ToolApprovalService`、`ToolCallStore` 与
+> `ToolService` 四层结构替代。当前实现以 `docs/agent/llm-integration.md` 为准。
+
 **状态：** Implemented
 
 **日期：** 2026-08-09

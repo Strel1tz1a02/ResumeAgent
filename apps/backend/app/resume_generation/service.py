@@ -18,7 +18,7 @@ from app.resume_generation.graph import (
 )
 from app.resume_generation.model import (
     FallbackResumeGenerationModel,
-    LiteLLMResumeGenerationModel,
+    LangChainResumeGenerationModel,
     ResumeGenerationModel,
     RuleBasedResumeGenerationModel,
 )
@@ -73,7 +73,7 @@ class ResumeGenerationService:
         self._jd = JDImportRepository(session)
         self._experiences = ExperienceRepository(session)
         self._evidence = EvidenceRepository(session)
-        self._llm_model = llm_model or LiteLLMResumeGenerationModel()
+        self._llm_model = llm_model or LangChainResumeGenerationModel()
         self._deterministic_model = (
             deterministic_model or RuleBasedResumeGenerationModel()
         )

@@ -136,6 +136,9 @@ class AiChatToolCall(Base):
     )
     tool_call_index: Mapped[int] = mapped_column(Integer)
     provider_tool_call_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    requested_by_model: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
     tool_name: Mapped[str] = mapped_column(String(160))
     arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
     proposal_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

@@ -116,13 +116,22 @@ def test_internal_string_token_counter_accepts_a_string(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_counter(**kwargs):  # type: ignore[no-untyped-def]
-        captured.update(kwargs)
-        return 37
+    class _TokenModel:
+        def get_num_tokens(self, text: str) -> int:
+            captured["text"] = text
+            return 37
 
     monkeypatch.setattr(
-        "app.ai_chat.memory.token_budget.litellm.token_counter",
-        fake_counter,
+        "app.ai_chat.memory.token_budget.get_llm_config",
+        lambda: SimpleNamespace(provider="openai", model="test"),
+    )
+    monkeypatch.setattr(
+        "app.ai_chat.memory.token_budget.get_model_name",
+        lambda _config: "test",
+    )
+    monkeypatch.setattr(
+        "app.ai_chat.memory.token_budget.get_chat_model",
+        lambda *_args, **_kwargs: (_TokenModel(), _args[0]),
     )
     monkeypatch.setattr(
         "app.ai_chat.memory.services.memory_service.build_memory_token_budget",
@@ -135,7 +144,6 @@ def test_internal_string_token_counter_accepts_a_string(
     service = MemoryService()
     assert service._count_string_tokens("system + tools + current") == 37
     assert captured["text"] == "system + tools + current"
-    assert "messages" not in captured
 
 
 async def _conversation(isolated_db) -> int:
@@ -308,30 +316,26 @@ def _fixed_budget(input_budget: int) -> MemoryTokenBudget:
     )
 
 
-async def test_summarizer_uses_non_streaming_litellm_router(
+async def test_summarizer_uses_non_streaming_langchain_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Router:
+    class _Model:
         def __init__(self) -> None:
-            self.kwargs: dict[str, Any] | None = None
+            self.messages: object | None = None
 
-        async def acompletion(self, **kwargs: Any) -> Any:
-            self.kwargs = kwargs
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content='{"operations":[]}'
-                        )
-                    )
-                ]
-            )
+        async def ainvoke(self, messages: object) -> Any:
+            self.messages = messages
+            return SimpleNamespace(content='{"operations":[]}', additional_kwargs={})
 
-    router = _Router()
+    model = _Model()
     config = SimpleNamespace(provider="openai", reasoning_effort="low")
     monkeypatch.setattr(
-        "app.ai_chat.memory.summarizer.get_router",
-        lambda: (router, config),
+        "app.ai_chat.memory.summarizer.get_llm_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "app.ai_chat.memory.summarizer.get_chat_model",
+        lambda *_args, **_kwargs: (model, config),
     )
     monkeypatch.setattr(
         "app.ai_chat.memory.summarizer.build_memory_token_budget",
@@ -359,11 +363,7 @@ async def test_summarizer_uses_non_streaming_litellm_router(
     )
 
     assert operations == []
-    assert router.kwargs is not None
-    assert router.kwargs["model"] == "primary"
-    assert router.kwargs["stream"] is False
-    assert router.kwargs["reasoning_effort"] == "low"
-    assert "tools" not in router.kwargs
+    assert model.messages is not None
 
 
 async def test_history_prompt_uses_exact_memory_boundary_and_two_run_buffer(

@@ -1,0 +1,301 @@
+
+=== DIRECTORY TREE (max depth 3, source files only) ===
+.claude
+.claude\CLAUDE.md
+.claude\settings.json
+.dockerignore
+.git-upstream-backup
+.git-upstream-backup\config
+.git-upstream-backup\description
+.git-upstream-backup\HEAD
+.git-upstream-backup\hooks
+.git-upstream-backup\hooks\applypatch-msg.sample
+.git-upstream-backup\hooks\commit-msg.sample
+.git-upstream-backup\hooks\fsmonitor-watchman.sample
+.git-upstream-backup\hooks\post-update.sample
+.git-upstream-backup\hooks\pre-applypatch.sample
+.git-upstream-backup\hooks\pre-commit.sample
+.git-upstream-backup\hooks\pre-merge-commit.sample
+.git-upstream-backup\hooks\pre-push.sample
+.git-upstream-backup\hooks\pre-rebase.sample
+.git-upstream-backup\hooks\pre-receive.sample
+.git-upstream-backup\hooks\prepare-commit-msg.sample
+.git-upstream-backup\hooks\push-to-checkout.sample
+.git-upstream-backup\hooks\sendemail-validate.sample
+.git-upstream-backup\hooks\update.sample
+.git-upstream-backup\index
+.git-upstream-backup\info
+.git-upstream-backup\info\exclude
+.git-upstream-backup\logs
+.git-upstream-backup\logs\HEAD
+.git-upstream-backup\logs\refs
+.git-upstream-backup\logs\refs\heads
+.git-upstream-backup\logs\refs\remotes
+.git-upstream-backup\objects
+.git-upstream-backup\objects\12
+.git-upstream-backup\objects\12\b7ce4383b2b6451cbce69224d76ade7aeba438
+.git-upstream-backup\objects\1e
+.git-upstream-backup\objects\1e\c004f41db1048b95cc4c173a54f9adaebf2c71
+.git-upstream-backup\objects\20
+.git-upstream-backup\objects\20\ba72758fb33da910a1c95e4b00bf1211b43734
+.git-upstream-backup\objects\21
+.git-upstream-backup\objects\21\df649d0ceacfa4593eb499105912e55acde32f
+.git-upstream-backup\objects\23
+.git-upstream-backup\objects\23\65bc3b57f3c351d4065907f865eaa2873548b1
+.git-upstream-backup\objects\38
+.git-upstream-backup\objects\38\0e707cbace70285a970f3361c9369c59569357
+.git-upstream-backup\objects\4b
+.git-upstream-backup\objects\4b\5a2944248f6b2d0d08c761afbd1453488f64a8
+.git-upstream-backup\objects\58
+.git-upstream-backup\objects\58\057e17c636ad51d6b969f0da7d5d849d291464
+.git-upstream-backup\objects\5d
+.git-upstream-backup\objects\5d\62ce4903f6067943c7971e522443d9fc79da1e
+.git-upstream-backup\objects\62
+.git-upstream-backup\objects\62\1da02a655dc570104a6b75bf15af9e9ebb2d15
+.git-upstream-backup\objects\70
+.git-upstream-backup\objects\70\38702b72ad76712fc793e3fcaac10f5577b3d1
+.git-upstream-backup\objects\75
+.git-upstream-backup\objects\75\9432f8acb48c73fa92aecd06104eb277a93454
+.git-upstream-backup\objects\81
+.git-upstream-backup\objects\81\dd8117a5c437a0e2b9d21ef91b5f326fce4db1
+.git-upstream-backup\objects\f2
+.git-upstream-backup\objects\f2\a913d7387fdce696fdc91fa99681e519384a90
+.git-upstream-backup\objects\f6
+.git-upstream-backup\objects\f6\0c9d7c81180a7f92171695a6aa23ed0fd2c80c
+.git-upstream-backup\objects\fc
+.git-upstream-backup\objects\fc\47a7b6493e514312323ce80172775c052441aa
+.git-upstream-backup\objects\fd
+.git-upstream-backup\objects\fd\b3102d04d0e225702526d5a89f6edeb92a9135
+.git-upstream-backup\objects\info
+.git-upstream-backup\objects\pack
+.git-upstream-backup\objects\pack\pack-9587087f5c56b90d9db7869aff0b4001bf6390df.idx
+.git-upstream-backup\objects\pack\pack-9587087f5c56b90d9db7869aff0b4001bf6390df.pack
+.git-upstream-backup\objects\pack\pack-9587087f5c56b90d9db7869aff0b4001bf6390df.rev
+.git-upstream-backup\packed-refs
+.git-upstream-backup\refs
+.git-upstream-backup\refs\codex
+.git-upstream-backup\refs\codex\turn-diffs
+.git-upstream-backup\refs\heads
+.git-upstream-backup\refs\heads\main
+.git-upstream-backup\refs\remotes
+.git-upstream-backup\refs\remotes\origin
+.git-upstream-backup\refs\tags
+.githooks
+.githooks\pre-push
+.githooks\README.md
+.github
+.github\CODE_OF_CONDUCT.md
+.github\CONTRIBUTING.md
+.github\FUNDING.yml
+.github\ISSUE_TEMPLATE
+.github\ISSUE_TEMPLATE\bug_report.yml
+.github\ISSUE_TEMPLATE\config.yml
+.github\ISSUE_TEMPLATE\custom.yml
+.github\ISSUE_TEMPLATE\feature_request.yml
+.github\ISSUE_TEMPLATE.md
+.github\PULL_REQUEST_TEMPLATE.md
+.github\SECURITY.md
+.github\workflows
+.github\workflows\docker-publish.yml
+.gitignore
+.impeccable.md
+.pytest_cache
+.pytest_cache\.gitignore
+.pytest_cache\CACHEDIR.TAG
+.pytest_cache\README.md
+.pytest_cache\v
+.pytest_cache\v\cache
+.pytest_cache\v\cache\nodeids
+.ruff_cache
+.ruff_cache\.gitignore
+.ruff_cache\0.16.2
+.ruff_cache\0.16.2\12011107443014270779
+.ruff_cache\0.16.2\14019213404640300435
+.ruff_cache\0.16.2\14489998484959580718
+.ruff_cache\0.16.2\15485966568660833784
+.ruff_cache\0.16.2\16233312316747654512
+.ruff_cache\0.16.2\17751955002682477127
+.ruff_cache\0.16.2\8313260809250630068
+.ruff_cache\0.16.2\8465697305325223416
+.ruff_cache\0.16.2\8757206424533003623
+.ruff_cache\0.16.2\8940493707363073521
+.ruff_cache\CACHEDIR.TAG
+.superpowers
+.superpowers\sdd
+.superpowers\sdd\.gitignore
+.superpowers\sdd\2026-07-30-personal-experience-library
+.superpowers\sdd\2026-07-30-personal-experience-library\progress.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-0458120..3c437d4.diff
+.superpowers\sdd\2026-07-30-personal-experience-library\review-final-0458120..a0ae7ac.diff
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-2-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-2-rerun.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-2.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-3-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-3-final2.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-3.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-4-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-4.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-5-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-5.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-6-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-6-final2.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-6-final3.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-6-final4.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-6.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-7-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-7.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-8-final.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-8-final2.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-8.md
+.superpowers\sdd\2026-07-30-personal-experience-library\review-task-9.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-1-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-1-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-10-audit.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-10-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-2-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-2-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-3-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-3-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-4-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-4-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-5-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-5-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-6-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-6-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-7-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-7-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-8-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-8-report.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-9-brief.md
+.superpowers\sdd\2026-07-30-personal-experience-library\task-9-report.md
+.superpowers\sdd\2026-08-08-tool-call-service
+.superpowers\sdd\2026-08-08-tool-call-service\progress.md
+.superpowers\sdd\2026-08-08-tool-call-service\review-task-1-fixes.diff
+.superpowers\sdd\2026-08-08-tool-call-service\review-task-1.diff
+.superpowers\sdd\2026-08-08-tool-call-service\review-task-2-fix.diff
+.superpowers\sdd\2026-08-08-tool-call-service\review-task-2.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-1-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-1-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-1-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-2-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-2-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-2-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-3-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-3-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-3-review-package.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-3-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-4-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-4-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-4-review-package.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-4-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-5-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-5-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-5-review-package-fix.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-5-review-package.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-5-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-6-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-6-report.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-6-review-package.diff
+.superpowers\sdd\2026-08-08-tool-call-service\task-6-review.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-7-brief.md
+.superpowers\sdd\2026-08-08-tool-call-service\task-7-review.md
+.vscode
+
+=== STACK DETECTION (manifest files) ===
+No recognized manifest files found in project root.
+
+=== ENTRY POINTS ===
+No common entry points found. Check 'main' or 'scripts.start' in manifest files above.
+
+=== LINTING AND FORMATTING CONFIG ===
+No linting or formatting config files found in project root.
+
+=== ENVIRONMENT VARIABLE TEMPLATES ===
+No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
+
+=== TODO / FIXME / HACK (production code only, test dirs excluded) ===
+None found.
+
+=== GIT RECENT COMMITS (last 20) ===
+ec2316c 简历生成模块
+27b64f5 JD导入前端
+4e9c147 1
+ee4d2d9 经历导入日志记录
+5fcfd40 JD导入后端能力
+ab3238b 1
+5ba299c 记忆模块边界修正
+4a7b007 JD库数据结构
+a78a5e8 经历一键导入功能
+1a4c7e6 后台压缩能力
+acc5152 改名
+db277e8 ai_chat接入记忆模块
+21effbd 记忆模块改造
+c826bf4 记忆模块测试
+118c50a 记忆模块测试
+e933a66 对话记忆模块
+4e56d56 merge: add standalone AI chat memory module
+f1335c9 refactor(ai-chat): keep memory implementation self-contained
+b74d3c8 工具模块系统化改造
+0140a12 refactor(ai-chat): isolate conversation memory module
+
+=== HIGH-CHURN FILES (last 90 days, top 20) ===
+  21 apps/frontend/tests/experience-library-page.test.tsx
+  20 apps/backend/tests/unit/test_experience_ai_chat.py
+  16 apps/frontend/components/experiences/experience-library-page.tsx
+  15 apps/backend/tests/integration/test_experiences_api.py
+  13 apps/backend/app/db_engine.py
+  12 apps/backend/app/ai_chat/repositories/tool_call_repository.py
+  12 apps/backend/tests/unit/test_tool_call_service.py
+  11 apps/frontend/messages/en.json
+  11 apps/frontend/messages/zh.json
+  11 apps/backend/tests/unit/test_ai_chat_model.py
+  11 apps/backend/app/ai_chat/services/service.py
+  10 apps/backend/app/ai_chat/graph/runner.py
+  10 apps/backend/tests/unit/test_experience_repositories.py
+  10 apps/frontend/components/experiences/evidence-list-editor.tsx
+  10 docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md
+   9 apps/backend/app/main.py
+   9 apps/backend/app/ai_chat/tools/handler.py
+   9 apps/backend/app/ai_chat/graph/runtime.py
+   9 apps/backend/app/experience/graph/builder.py
+   9 apps/frontend/components/experiences/experience-editor.tsx
+
+=== MONOREPO SIGNALS ===
+Sub-package directory found: apps/
+
+=== CODE METRICS ===
+Total files scanned: 1406
+Total lines of code: 206150
+
+Files by language:
+  Other: 552
+  Python: 492
+  TypeScript/React: 246
+  TypeScript: 116
+
+Top 10 largest files:
+.git-upstream-backup\objects\pack\pack-9587087f5c56b90d9db7869aff0b4001bf6390df.pack: 162727.6KB
+.worktrees\ai-chat-memory\assets\Resume_Matcher_Demo.gif: 16411.1KB
+assets\Resume_Matcher_Demo.gif: 16411.1KB
+.worktrees\ai-chat-memory\assets\Resume_Matcher_Video.mp4: 10857.5KB
+assets\Resume_Matcher_Video.mp4: 10857.5KB
+.worktrees\ai-chat-memory\assets\Resume_Matcher_Demo_2.gif: 9474.4KB
+assets\Resume_Matcher_Demo_2.gif: 9474.4KB
+.worktrees\ai-chat-memory\assets\page_2.png: 1708.2KB
+assets\page_2.png: 1708.2KB
+.worktrees\ai-chat-memory\assets\installing_resume_matcher.png: 1209.0KB
+
+=== CI/CD PIPELINES ===
+CI/CD: GitHub Actions
+
+=== CONTAINERS & ORCHESTRATION ===
+Container: Docker found
+Orchestration: Docker Compose found
+
+=== SECURITY & COMPLIANCE ===
+No security configs detected.
+
+=== PERFORMANCE & TESTING ===
+No performance testing configs detected.
+
+=== SCAN COMPLETE ===

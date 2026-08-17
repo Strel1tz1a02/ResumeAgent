@@ -20,7 +20,8 @@ from app.ai_chat.errors import (
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.models import AiChatMessage
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_call_service import ToolCallService
+from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
 from app.ai_chat.tools.types import ApprovalDecision
 from app.ai_chat.types import AdapterInput, JsonObject, ScopeRef, SubjectRef
@@ -66,11 +67,11 @@ class AiChatService:
         self._runner = runner
         self._repositories = repositories
 
-    def _tool_calls(self, adapter_name: str) -> ToolCallService:
+    def _tool_calls(self, adapter_name: str) -> ToolService:
         adapter = self._registry.get(adapter_name)
-        return ToolCallService(
-            database_module.db.session, self._repositories
-        ).bind_handlers(adapter.get_tool_handlers())
+        return ToolService(
+            ToolCallStore(database_module.db.session, self._repositories)
+        ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
 
     @staticmethod
     def _validate_approval_checkpoint(
@@ -226,7 +227,6 @@ class AiChatService:
                 raise ConversationNotFoundError(str(conversation_id))
             current_message_rows = await repositories.messages.list_completed_for_run(run_id)
             pending_rows = await repositories.tool_calls.pending_results(conversation_id)
-            handlers = self._registry.get(conversation.adapter).get_tool_handlers()
             pending: list[JsonObject] = [
                 {
                     "tool_call_id": row.id,
@@ -236,10 +236,6 @@ class AiChatService:
                     "result": dict(row.tool_result or {}),
                 }
                 for row in pending_rows
-                if (
-                    row.tool_name not in handlers
-                    or handlers[row.tool_name].deliver_result_to_model
-                )
             ]
             value: AdapterInput = {
                 "conversation_id": conversation.id,

@@ -2,12 +2,13 @@
 
 import json
 
+from langchain_core.messages import AIMessageChunk
+
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_call_service import ToolCallService
-from app.ai_chat.streaming.model import ModelCompleted, ToolCallsCompleted
-from app.ai_chat.tools.buffer import encode_tool_call
+from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.tools.store import ToolCallStore
 from app.jd_import.adapters import JDImportAdapter
 from app.jd_import.agent.input_parser import parse_mixed_input
 from app.jd_import.agent.model import ExtractionResult, UrlSelection
@@ -75,15 +76,19 @@ class QuestionPlanningModel:
     async def stream(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls += 1
         if self.calls > 1:
-            yield ModelCompleted("stop")
+            yield AIMessageChunk(
+                content="",
+                response_metadata={"finish_reason": "stop"},
+            )
             return
-        yield ToolCallsCompleted(
-            (
-                encode_tool_call(
-                    index=99,
-                    provider_id="model-owned-id",
-                    name="ask_jd_questions",
-                    arguments=json.dumps(
+        yield AIMessageChunk(
+            content="",
+            tool_call_chunks=[
+                {
+                    "index": 99,
+                    "id": "model-owned-id",
+                    "name": "ask_jd_questions",
+                    "args": json.dumps(
                         {
                             "questions": [
                                 {
@@ -96,8 +101,10 @@ class QuestionPlanningModel:
                         },
                         ensure_ascii=False,
                     ),
-                ),
-            )
+                    "type": "tool_call_chunk",
+                }
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
         )
 
 
@@ -163,9 +170,9 @@ async def test_mixed_input_happy_path_completes(isolated_db) -> None:  # type: i
         url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
     )
     adapter = JDImportAdapter(dependencies)
-    tools = ToolCallService(
-        isolated_db.session, RepositoryFactory()
-    ).bind_handlers(adapter.get_tool_handlers())
+    tools = ToolService(
+        ToolCallStore(isolated_db.session, RepositoryFactory())
+    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
     runtime = AiChatRuntime(NoPlanningModel(), tools, MemoryService())  # type: ignore[arg-type]
     graph = build_jd_import_graph(runtime, dependencies).compile()
     raw = "Acme Engineer full-time Remote Python https://example.com/job"
@@ -202,9 +209,9 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
         url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
     )
     adapter = JDImportAdapter(dependencies)
-    tools = ToolCallService(
-        isolated_db.session, RepositoryFactory()
-    ).bind_handlers(adapter.get_tool_handlers())
+    tools = ToolService(
+        ToolCallStore(isolated_db.session, RepositoryFactory())
+    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
     runtime = AiChatRuntime(QuestionPlanningModel(), tools, MemoryService())  # type: ignore[arg-type]
     graph = build_jd_import_graph(runtime, dependencies).compile(
         checkpointer=MemorySaver()

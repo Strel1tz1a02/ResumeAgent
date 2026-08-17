@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the shared Tool Call state machine with typed external input, while keeping approval semantics unchanged. The `plan_questions` node alone exposes the model-visible question tool; persistence calls are created by the Graph with stable business identities and execute automatically in the Tool Call transaction.
 
-**Tech Stack:** Python 3.13, Pydantic 2, SQLAlchemy asyncio, SQLite, LangGraph 1.2, LiteLLM, pytest.
+**Tech Stack:** Python 3.13, Pydantic 2, SQLAlchemy asyncio, SQLite, LangGraph 1.2, LangChain, pytest.
 
 ## Global Constraints
 
@@ -302,7 +302,7 @@ Replace `GraphPersistence` use with `runtime.tools.validate_system_call()` and
 - [ ] **Step 5: Remove obsolete State and structured planning code**
 
 Remove `pending_batch`, `resume_answer`, `QuestionPlanningRequest`, `QuestionPlan`,
-and `LiteLLMJDImportModel.plan_questions()` after Graph callers are gone. Preserve
+and `LangChainJDImportModel.plan_questions()` after Graph callers are gone. Preserve
 URL selection and extraction methods.
 
 - [ ] **Step 6: Verify and commit**

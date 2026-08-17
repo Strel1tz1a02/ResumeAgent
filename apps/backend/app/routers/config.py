@@ -139,7 +139,7 @@ async def update_llm_config(
     # blank/null" (explicit clear). The frontend sends api_base: null/"" when
     # the Base URL field is cleared; treating that as "don't change" left a
     # stale override in config.json (issue #760). Normalize blank → None so an
-    # empty string also never reaches LiteLLM as a bogus endpoint.
+    # empty string also never reaches LangChain as a bogus endpoint.
     if "api_base" in request.model_fields_set:
         cleaned = (request.api_base or "").strip()
         stored["api_base"] = cleaned or None

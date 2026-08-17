@@ -6,7 +6,7 @@
 
 Resume Matcher is an AI-powered application that helps users tailor resumes to job descriptions. It consists of:
 
-- **Backend**: FastAPI + Python 3.13+ with multi-provider LLM support via LiteLLM
+- **Backend**: FastAPI + Python 3.13+ with multi-provider LLM support via LangChain
 - **Frontend**: Next.js 16 + React 19 with Swiss International Style design
 - **Database**: SQLite via async SQLAlchemy (`aiosqlite`)
 - **PDF Generation**: Headless Chromium via Playwright

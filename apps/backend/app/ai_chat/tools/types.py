@@ -29,10 +29,10 @@ class ToolCall(TypedDict):
     tool_call_id: int
     index: int
     provider_id: str | None
+    requested_by_model: bool
     name: str
     arguments: JsonObject
     status: ToolCallStatus
-    security: Literal["low", "medium", "high"]
     proposal_payload: JsonObject | None
     should_execute: bool | None
     result: JsonObject | None
@@ -41,7 +41,7 @@ class ToolCall(TypedDict):
 
 @dataclass(frozen=True)
 class ToolContext:
-    """服务提供给处理器的可信身份与事务绑定。"""
+    """ToolService 提供给业务 Operation 的可信身份与事务绑定。"""
 
     conversation_id: int
     run_id: int
@@ -62,7 +62,7 @@ class ApprovalDecision(TypedDict):
 
 @dataclass(frozen=True)
 class ToolResult:
-    """处理器结果以及服务补充的持久化调用身份。"""
+    """业务 Operation 结果以及服务补充的持久化调用身份。"""
 
     payload: JsonObject
     tool_call_id: int | None = None

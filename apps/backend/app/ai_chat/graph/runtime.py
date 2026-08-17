@@ -6,13 +6,16 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.ai_chat.streaming.model import AiChatModel, ModelStreamEvent
-from app.ai_chat.tools.handler import ToolHandler
+from langchain_core.messages import AIMessageChunk
+
+from app.ai_chat.tools.approval import ToolApprovalPolicy
+from app.ai_chat.streaming.model import AiChatModel
+from app.ai_chat.tools.operation import RegisteredTool
 from app.ai_chat.types import JsonObject
 
 if TYPE_CHECKING:
     from app.ai_chat.memory import MemoryService
-    from app.ai_chat.services.tool_call_service import ToolCallService
+    from app.ai_chat.services.tool_service import ToolService
 
 
 @dataclass(frozen=True)
@@ -20,17 +23,21 @@ class AiChatRuntime:
     """一个具体适配器所需的无状态模型与统一 Tool 服务。"""
 
     model: AiChatModel
-    tools: ToolCallService
+    tools: ToolService
     memory: MemoryService
 
     def bind_tools(
         self,
-        tool_handlers: Mapping[str, ToolHandler],
+        tools: Mapping[str, RegisteredTool],
+        approval: ToolApprovalPolicy | None = None,
     ) -> AiChatRuntime:
         """返回绑定指定工具集合的运行环境。"""
         return AiChatRuntime(
             model=self.model,
-            tools=self.tools.bind_handlers(tool_handlers),
+            tools=self.tools.bind_tools(
+                tools,
+                approval or self.tools.approval_policy,
+            ),
             memory=self.memory,
         )
 
@@ -40,13 +47,13 @@ class AiChatRuntime:
         messages: list[JsonObject],
         tools_enabled: bool,
         max_tokens: int = 4096,
-    ) -> AsyncIterator[ModelStreamEvent]:
+    ) -> AsyncIterator[AIMessageChunk]:
         """在执行本次工具策略的同时流式调用模型。"""
-        handlers = self.tools.model_handlers
-        async for event in self.model.stream(
+        tools = self.tools.model_tools
+        async for chunk in self.model.stream(
             messages=messages,
-            handlers=handlers,
+            tools=tools,
             tools_enabled=tools_enabled,
             max_tokens=max_tokens,
         ):
-            yield event
+            yield chunk

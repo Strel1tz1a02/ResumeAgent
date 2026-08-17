@@ -9,8 +9,9 @@ from langgraph.graph import StateGraph
 from app import database as database_module
 from app.ai_chat.adapters.base import BaseAdapter
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBinding
+from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
+from app.ai_chat.tools.operation import RegisteredTool
+from app.ai_chat.types import AdapterInput, JsonObject, ScopeRef, SubjectRef, ValidatedBinding
 from app.experience.graph import ExperienceState, build_experience_graph
 from app.experience.graph.context import build_model_messages
 from app.experience.prompts.ai_chat import system_prompt
@@ -19,7 +20,16 @@ from app.experience.schemas.ai_chat import ExperienceChatScope
 from app.experience.services.experience_field_service import ExperienceFieldService
 from app.experience.services.experience_fields import EXPERIENCE_TARGET_KEYS
 from app.experience.services.experience_service import ExperienceService
-from app.experience.tools import ContentChangeHandler
+from app.experience.tools import ContentChangeOperation
+
+
+def _content_change_proposal(data: JsonObject) -> JsonObject:
+    """从准备数据中选择允许展示给审批界面的修改信息。"""
+    return {
+        "scope": data.get("scope"),
+        "current_content": data.get("current_content"),
+        "suggested_content": data.get("suggested_content"),
+    }
 
 
 class ExperienceAdapter(BaseAdapter[ExperienceState]):
@@ -27,8 +37,12 @@ class ExperienceAdapter(BaseAdapter[ExperienceState]):
 
     def __init__(self) -> None:
         """构造无请求状态、可长期复用的工具处理器集合。"""
-        handlers: tuple[ToolHandler, ...] = (ContentChangeHandler(),)
-        self._handlers = {handler.name: handler for handler in handlers}
+        tool = RegisteredTool(ContentChangeOperation())
+        self._tools = {tool.name: tool}
+        self._approval = ToolApprovalPolicy(
+            {tool.name: ToolRisk.MEDIUM},
+            {tool.name: _content_change_proposal},
+        )
 
     async def validate_request(
         self, subject: SubjectRef, scope: ScopeRef
@@ -110,6 +124,9 @@ class ExperienceAdapter(BaseAdapter[ExperienceState]):
         """返回由经历业务定义、尚未编译的图。"""
         return build_experience_graph(runtime)
 
-    def get_tool_handlers(self) -> Mapping[str, ToolHandler]:
-        """返回经历业务唯一的内容修改工具处理器。"""
-        return self._handlers
+    def get_tools(self) -> Mapping[str, RegisteredTool]:
+        """返回经历业务唯一的内容修改工具。"""
+        return self._tools
+
+    def get_tool_approval_policy(self) -> ToolApprovalPolicy:
+        return self._approval

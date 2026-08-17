@@ -45,7 +45,7 @@
 → ExperienceAdapter
 → ExperienceGraph
 → 模型产生 Tool Call
-→ Tool Handler 形成提案
+→ ToolService 调用业务 Operation 形成提案
 → interrupt + checkpoint
 → 用户批准
 → 领域 Service 写入
@@ -252,19 +252,18 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 产出：普通文本轮次的事务时间线。
 
-#### 第 8 课：模型流、Tool 参数聚合与内部事件
+#### 第 8 课：LangChain 模型流与 Tool 参数聚合
 
 按顺序阅读：
 
 1. `apps/backend/app/ai_chat/streaming/model.py`；
-2. `apps/backend/app/ai_chat/tools/buffer.py`；
-3. `apps/backend/app/ai_chat/streaming/compatibility/dsml.py`；
-4. `apps/backend/app/ai_chat/streaming/events.py`；
-5. `apps/backend/app/ai_chat/graph/runtime.py`。
+2. `apps/backend/app/ai_chat/streaming/compatibility/dsml.py`；
+3. `apps/backend/app/ai_chat/streaming/events.py`；
+4. `apps/backend/app/ai_chat/graph/runtime.py`。
 
-核心问题：模型流中的文本 delta 和 Tool Call delta 如何变成稳定内部事件？为什么必须等参数聚合完整后才能校验？
+核心问题：业务图如何直接消费 `AIMessageChunk`？为什么必须等 Tool Call 参数聚合完整后才能校验？
 
-产出：Provider 流事件到内部事件的转换表。
+产出：`AIMessageChunk` 到文本增量和完整 Tool Call 的处理流程。
 
 ### 阶段 C：ExperienceAdapter 与 LangGraph
 
@@ -320,13 +319,14 @@ START
 按顺序阅读：
 
 1. `apps/backend/app/experience/tools/content_change.py`；
-2. `apps/backend/app/ai_chat/tools/handler.py`；
-3. `apps/backend/app/ai_chat/services/tool_call_service.py`；
-4. `apps/backend/app/ai_chat/repositories/tool_call_repository.py`；
-5. `builder.py` 中 `validator`、`guard`、`approver`、`executor`；
-6. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
+2. `apps/backend/app/ai_chat/tools/operation.py`；
+3. `apps/backend/app/ai_chat/tool_approval.py`；
+4. `apps/backend/app/ai_chat/tools/store.py`；
+5. `apps/backend/app/ai_chat/services/tool_service.py`；
+6. `builder.py` 中 `validator`、`risk_assessment`、`approver`、`executor`；
+7. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
 
-核心问题：Handler 的 `validation()`、`execute()` 和 `show_result()` 为什么分开？`ToolCallService` 为什么必须统一固化、审批记录和执行事务？`proposal_payload` 与 `guard_payload` 为什么不能合并成一个前端对象？
+核心问题：为什么 LangChain Tool 只包含能力与参数协议？审批判断、幂等固化和执行编排为什么分别属于 `ToolApprovalService`、`ToolCallStore` 和 `ToolService`？`proposal_payload` 与可信执行数据为什么不能合并成一个前端对象？
 
 产出：Tool Call 生命周期图 + `content_change` 参数卡。
 
@@ -431,25 +431,26 @@ streamExperienceMessage
 
 ```text
 模型输出 content_change
-→ ToolCallBuffer 聚合参数
+→ LangChain AIMessageChunk 聚合参数
 → graph.validator
-→ ToolCallService.validate_call
-→ ContentChangeHandler.validation
+→ ToolService.validate_call
+→ LangChain Tool 参数校验
+→ ContentChangeOperation.prepare
 → ExperienceAiMutationService.prepare_*
 → 持久化可信 proposal / guard 并返回统一 ToolCall
-→ graph.guard 根据 ToolCall.security 分流
+→ graph.risk_assessment 调用 ToolApprovalService 分流
 → graph.approver 持久化申请并 interrupt
 → run=suspended
 → 前端展示 proposal
 → resolveExperienceProposal
 → AiChatService.resolve_proposal
 → Command(resume=decision + client_resolution_id)
-→ ToolCallService.record_decision 先提交 approved
+→ ToolService.record_decision 先通过 ToolCallStore 提交 approved
 → graph.executor
-→ ToolCallService.execute_call 原子认领执行
-→ ContentChangeHandler.execute
+→ ToolService.execute_call 通过 ToolCallStore 原子认领
+→ LangChain Tool.ainvoke
+→ ContentChangeOperation.execute
 → ExperienceAiMutationService.apply_*
-→ Handler.show_result
 → run=completed，Tool Result 保持 pending
 ```
 
@@ -468,7 +469,7 @@ streamExperienceMessage
 ```text
 问题：通用会话机制不应该认识 Experience 字段语义。
 方案：以 BaseAdapter 作为通用运行时与业务 AI 接入层的稳定协议。
-代码：validate_binding、parse_input、build_graph、get_tool_handlers。
+代码：validate_request、parse_input、build_graph、get_tools。
 权衡：增加了一层抽象和注册机制，但换来业务隔离和可扩展性。
 改进：新增 ResumeOptimizationAdapter 验证协议是否真正通用。
 ```

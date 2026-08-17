@@ -2,8 +2,8 @@
 
 These are the pure functions where local-LLM (Ollama / openai_compatible) bugs
 live, and they pin behavior we recently shipped:
-  - get_model_name        — LiteLLM provider prefixing (Ollama, OpenRouter nesting)
-  - _normalize_api_base   — the /v1/v1 duplicate-path fix (issue #751) + Ollama suffixes
+  - get_model_name        — LangChain 专用集成所需的原始模型名
+  - _normalize_api_base   — 供应商 SDK 地址规范化与 Ollama 后缀处理
   - resolve_api_key       — the security rule that local providers do NOT inherit
                             the env LLM_API_KEY (so a paid key can't leak to a
                             self-hosted server)
@@ -27,7 +27,7 @@ def _cfg(provider: str, model: str) -> LLMConfig:
 
 
 # ---------------------------------------------------------------------------
-# get_model_name — provider prefixing
+# get_model_name — strip legacy routing prefixes
 # ---------------------------------------------------------------------------
 
 
@@ -35,45 +35,42 @@ class TestGetModelName:
     def test_openai_no_prefix(self):
         assert get_model_name(_cfg("openai", "gpt-4")) == "gpt-4"
 
-    def test_ollama_uses_ollama_chat_prefix(self):
-        # ollama_chat/ routes to /api/chat (messages array) — the working path.
-        assert get_model_name(_cfg("ollama", "llama3")) == "ollama_chat/llama3"
+    def test_ollama_keeps_raw_model(self):
+        assert get_model_name(_cfg("ollama", "llama3")) == "llama3"
 
     def test_ollama_does_not_double_prefix(self):
-        assert get_model_name(_cfg("ollama", "ollama_chat/llama3")) == "ollama_chat/llama3"
-        assert get_model_name(_cfg("ollama", "ollama/llama3")) == "ollama/llama3"
+        assert get_model_name(_cfg("ollama", "ollama_chat/llama3")) == "llama3"
+        assert get_model_name(_cfg("ollama", "ollama/llama3")) == "llama3"
 
-    def test_openai_compatible_uses_openai_prefix(self):
-        # llama.cpp / vLLM / LM Studio served via the OpenAI client.
-        assert get_model_name(_cfg("openai_compatible", "llama-3.1-8b")) == "openai/llama-3.1-8b"
+    def test_openai_compatible_keeps_raw_model(self):
+        assert get_model_name(_cfg("openai_compatible", "llama-3.1-8b")) == "llama-3.1-8b"
 
     def test_openrouter_nested_prefix(self):
         assert (
             get_model_name(_cfg("openrouter", "anthropic/claude-3.5-sonnet"))
-            == "openrouter/anthropic/claude-3.5-sonnet"
+            == "anthropic/claude-3.5-sonnet"
         )
 
     def test_openrouter_does_not_double_prefix(self):
         assert (
             get_model_name(_cfg("openrouter", "openrouter/anthropic/claude-3.5-sonnet"))
-            == "openrouter/anthropic/claude-3.5-sonnet"
+            == "anthropic/claude-3.5-sonnet"
         )
 
     def test_anthropic_prefix(self):
-        assert get_model_name(_cfg("anthropic", "claude-3-opus")) == "anthropic/claude-3-opus"
+        assert get_model_name(_cfg("anthropic", "claude-3-opus")) == "claude-3-opus"
 
     def test_gemini_prefix(self):
-        assert get_model_name(_cfg("gemini", "gemini-1.5-pro")) == "gemini/gemini-1.5-pro"
+        assert get_model_name(_cfg("gemini", "gemini-1.5-pro")) == "gemini-1.5-pro"
 
     def test_deepseek_prefix(self):
-        assert get_model_name(_cfg("deepseek", "deepseek-chat")) == "deepseek/deepseek-chat"
+        assert get_model_name(_cfg("deepseek", "deepseek-chat")) == "deepseek-chat"
 
     def test_groq_prefix(self):
-        assert get_model_name(_cfg("groq", "llama-3.1-70b")) == "groq/llama-3.1-70b"
+        assert get_model_name(_cfg("groq", "llama-3.1-70b")) == "llama-3.1-70b"
 
-    def test_existing_known_prefix_is_preserved(self):
-        # Model already carries a known prefix → don't add the provider's.
-        assert get_model_name(_cfg("anthropic", "anthropic/claude-3-opus")) == "anthropic/claude-3-opus"
+    def test_existing_legacy_prefix_is_removed(self):
+        assert get_model_name(_cfg("anthropic", "anthropic/claude-3-opus")) == "claude-3-opus"
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +113,8 @@ class TestNormalizeApiBase:
     def test_gemini_strips_v1(self):
         assert _normalize_api_base("gemini", "https://host/v1") == "https://host"
 
-    def test_openrouter_strips_v1(self):
-        assert _normalize_api_base("openrouter", "https://openrouter.ai/api/v1") == "https://openrouter.ai/api"
+    def test_openrouter_preserves_v1(self):
+        assert _normalize_api_base("openrouter", "https://openrouter.ai/api/v1") == "https://openrouter.ai/api/v1"
 
     @pytest.mark.parametrize(
         "pasted",

@@ -1,41 +1,69 @@
-"""经历文本 Instructor 提取器的对象契约测试。"""
+"""经历文本 LangChain 结构化提取器的对象契约测试。"""
 
-from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
+from langchain_core.messages import AIMessage
+
 from app.experience.schemas.experiences import ExperienceGlobalSave
 from app.experience.services.experience_text_extractor import (
     ExperienceTextExtractionError,
     ExperienceTextExtractor,
 )
-from litellm import ModelResponse
+from app.llm import LLMConfig
 
 
-async def test_extractor_requests_typed_object_with_validation_retries() -> None:
-    """提取器必须让 Instructor 直接返回 Pydantic 对象并启用两次重试。"""
+class _StructuredModel:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[object] = []
+
+    async def ainvoke(self, messages: object) -> object:
+        self.calls.append(messages)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _Model:
+    def __init__(self, structured: _StructuredModel) -> None:
+        self.structured = structured
+        self.schema: type[ExperienceGlobalSave] | None = None
+        self.include_raw = False
+
+    def with_structured_output(
+        self,
+        schema: type[ExperienceGlobalSave],
+        *,
+        include_raw: bool,
+    ) -> _StructuredModel:
+        self.schema = schema
+        self.include_raw = include_raw
+        return self.structured
+
+
+async def test_extractor_requests_typed_object() -> None:
+    """提取器必须通过 LangChain 请求 Pydantic 结构化输出。"""
     expected = ExperienceGlobalSave.model_validate(
         {
             "experience": {"kind": "project", "title": "Agent"},
             "evidence_items": [{"action": "Built parser"}],
         }
     )
-    create = AsyncMock(return_value=expected)
-    instructor_client = SimpleNamespace(create=create)
-    router = SimpleNamespace(acompletion=AsyncMock())
-    config = SimpleNamespace(
-        provider="openai", model="gpt-4o-mini", reasoning_effort=None
-    )
+    structured = _StructuredModel([expected])
+    model = _Model(structured)
+    config = LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test")
 
     with (
         patch(
-            "app.experience.services.experience_text_extractor.get_router",
-            return_value=(router, config),
+            "app.experience.services.experience_text_extractor.get_llm_config",
+            return_value=config,
         ),
         patch(
-            "app.experience.services.experience_text_extractor.instructor.from_litellm",
-            return_value=instructor_client,
-        ) as from_litellm,
+            "app.experience.services.experience_text_extractor.get_chat_model",
+            return_value=(model, config),
+        ) as get_model,
         patch(
             "app.experience.services.experience_text_extractor.get_content_language",
             return_value="zh",
@@ -44,111 +72,91 @@ async def test_extractor_requests_typed_object_with_validation_retries() -> None
         result = await ExperienceTextExtractor().extract("做了一个解析器")
 
     assert result is expected
-    from_litellm.assert_called_once()
-    kwargs = create.await_args.kwargs
-    assert kwargs["response_model"] is ExperienceGlobalSave
-    assert kwargs["max_retries"] == 2
-    assert kwargs["max_tokens"] == 8_192
-    assert kwargs["timeout"] == 360
-    assert kwargs["model"] == "primary"
-    assert "做了一个解析器" in kwargs["messages"][1]["content"]
+    assert model.schema is ExperienceGlobalSave
+    assert model.include_raw is True
+    assert get_model.call_args.kwargs["max_tokens"] == 8_192
+    assert get_model.call_args.kwargs["timeout"] == 360
+    assert "做了一个解析器" in structured.calls[0][1]["content"]  # type: ignore[index]
 
 
-async def test_extractor_retries_invalid_pydantic_output_with_real_instructor() -> None:
-    """第一次对象校验失败时，Instructor 应携带错误再次请求模型。"""
-    calls = 0
-
-    async def fake_completion(**_kwargs: object) -> ModelResponse:
-        nonlocal calls
-        calls += 1
-        assert "stream" not in _kwargs
-        content = (
-            '{"experience":{"kind":"invalid"},"evidence_items":[]}'
-            if calls == 1
-            else '{"experience":{"kind":"project","title":"Agent"},"evidence_items":[]}'
-        )
-
-        return ModelResponse(
-            model="fake",
-            choices=[
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-        )
-
-    router = SimpleNamespace(acompletion=fake_completion)
-    config = SimpleNamespace(
-        provider="openai", model="gpt-4o-mini", reasoning_effort=None
+async def test_extractor_retries_invalid_structured_output() -> None:
+    """第一次结构校验失败时应携带修复提示再次请求模型。"""
+    expected = ExperienceGlobalSave.model_validate(
+        {"experience": {"kind": "project", "title": "Agent"}, "evidence_items": []}
     )
+    structured = _StructuredModel(
+        [
+            {
+                "raw": AIMessage(content='{"experience":{"kind":"invalid"}}'),
+                "parsed": None,
+                "parsing_error": ValueError("invalid kind"),
+            },
+            {
+                "raw": AIMessage(content='{"experience":{"kind":"project"}}'),
+                "parsed": expected,
+                "parsing_error": None,
+            },
+        ]
+    )
+    model = _Model(structured)
+    config = LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test")
     with (
         patch(
-            "app.experience.services.experience_text_extractor.get_router",
-            return_value=(router, config),
+            "app.experience.services.experience_text_extractor.get_llm_config",
+            return_value=config,
+        ),
+        patch(
+            "app.experience.services.experience_text_extractor.get_chat_model",
+            return_value=(model, config),
         ),
         patch(
             "app.experience.services.experience_text_extractor.get_content_language",
             return_value="zh",
         ),
-        patch(
-            "app.experience.services.experience_text_extractor.logger.info"
-        ) as log_info,
     ):
         result = await ExperienceTextExtractor().extract("做了一个 Agent")
 
     assert result.experience.title == "Agent"
-    assert calls == 2
-    assert log_info.call_count == 2
-    assert sum("原始回答" in call.args[0] for call in log_info.call_args_list) == 2
-    assert all(call.args[4] == 8_192 for call in log_info.call_args_list)
-    assert all(call.args[5] is None for call in log_info.call_args_list)
-    assert any("Agent" in call.args[6] for call in log_info.call_args_list)
+    assert len(structured.calls) == 2
+    assert "上次输出未通过结构校验" in structured.calls[1][1]["content"]  # type: ignore[index]
 
 
 async def test_extractor_logs_last_raw_completion_on_failure() -> None:
-    """最终失败应同时记录异常栈和 Instructor 的最后一次原始响应。"""
-    source_text = "待解析的经历文本"
-    error = RuntimeError("provider unavailable")
-    error.last_completion = SimpleNamespace(  # type: ignore[attr-defined]
-        model_dump_json=lambda: '{"choices":[{"message":{"content":"raw output"}}]}'
-    )
-    create = AsyncMock(side_effect=error)
-    instructor_client = SimpleNamespace(create=create)
-    router = SimpleNamespace(acompletion=AsyncMock())
-    config = SimpleNamespace(
-        provider="deepseek", model="deepseek-chat", reasoning_effort="minimal"
+    """最终失败应记录 LangChain 的最后一次原始响应。"""
+    raw = AIMessage(content="raw output")
+    outcomes = [
+        {"raw": raw, "parsed": None, "parsing_error": RuntimeError("invalid")}
+        for _ in range(3)
+    ]
+    structured = _StructuredModel(outcomes)
+    model = _Model(structured)
+    config = LLMConfig(
+        provider="deepseek",
+        model="deepseek-chat",
+        api_key="test",
+        reasoning_effort="minimal",
     )
 
     with (
         patch(
-            "app.experience.services.experience_text_extractor.get_router",
-            return_value=(router, config),
+            "app.experience.services.experience_text_extractor.get_llm_config",
+            return_value=config,
         ),
         patch(
-            "app.experience.services.experience_text_extractor.instructor.from_litellm",
-            return_value=instructor_client,
-        ),
+            "app.experience.services.experience_text_extractor.get_chat_model",
+            return_value=(model, config),
+        ) as get_model,
         patch(
-            "app.experience.services.experience_text_extractor.logger.exception"
-        ) as log_exception,
+            "app.experience.services.experience_text_extractor.logger.error"
+        ) as log_error,
         pytest.raises(ExperienceTextExtractionError),
     ):
-        await ExperienceTextExtractor().extract(source_text)
+        await ExperienceTextExtractor().extract("待解析的经历文本")
 
-    assert create.await_args.kwargs["max_tokens"] == 32_768
-    assert create.await_args.kwargs["timeout"] == 1_440
-    assert create.await_args.kwargs["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in create.await_args.kwargs
-    log_exception.assert_called_once_with(
-        "经历文本解析失败：request_id=%s provider=%s model=primary "
-        "requested_max_tokens=%s error_type=%s model_answer=%s "
-        "last_completion=%s",
-        ANY,
-        "deepseek",
-        32_768,
-        "RuntimeError",
-        '"raw output"',
-        '{"choices":[{"message":{"content":"raw output"}}]}',
-    )
+    assert len(structured.calls) == 3
+    assert get_model.call_args.kwargs["max_tokens"] == 32_768
+    assert get_model.call_args.kwargs["timeout"] == 1_440
+    assert get_model.call_args.kwargs["disable_reasoning"] is True
+    log_error.assert_called_once()
+    assert log_error.call_args.args[2] == "deepseek"
+    assert "raw output" in log_error.call_args.args[-1]

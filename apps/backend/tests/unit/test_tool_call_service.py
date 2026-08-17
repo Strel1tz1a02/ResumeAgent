@@ -9,18 +9,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import ToolCall as LangChainToolCall
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from app.ai_chat.errors import IdempotencyConflictError, ToolProtocolError
 from app.ai_chat.models import AiChatMessage, AiChatToolCall
 from app.ai_chat.repositories import (
     AiChatRepositories,
     RepositoryFactory,
-    ToolCallRepository,
 )
-from app.ai_chat.services.tool_call_service import ToolCallService
-from app.ai_chat.streaming.model import build_model_tools
-from app.ai_chat.tools.buffer import encode_tool_call
-from app.ai_chat.tools.handler import ToolHandler
-from app.ai_chat.tools.security import ToolSecurity
+from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
+from app.ai_chat.tools.operation import RegisteredTool, ToolOperation
+from app.ai_chat.tools.preparation import ToolCallPreparationService
+from app.ai_chat.repositories.tool_repository import ToolCallRepository
+from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
 from app.database import Database
 from app.scripts.migrate_ai_chat_tool_call_state import (
@@ -46,26 +48,24 @@ class _FloatArguments(BaseModel):
     value: float
 
 
-class _DemoHandler(ToolHandler):
+class _DemoHandler(ToolOperation):
     name = "demo"
     description = "demo"
-    arguments_schema = _DemoArguments
-    security = ToolSecurity.MEDIUM
+    args_schema = _DemoArguments
+    risk = ToolRisk.MEDIUM
 
     def __init__(self) -> None:
         self.validation_count = 0
         self.execution_count = 0
 
-    async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
+    async def prepare(self, context, arguments):  # type: ignore[no-untyped-def]
         self.validation_count += 1
-        values = self.arguments_schema.model_validate(arguments)
+        values = self.args_schema.model_validate(arguments)
         if values.value == "done":
             return self.show_result({"outcome": "no_change"})
-        return {"value": values.value}, {"trusted": values.value}
+        return {"value": values.value, "trusted": values.value}
 
-    async def execute(  # type: ignore[no-untyped-def]
-        self, context, proposal_payload, guard_payload
-    ):
+    async def execute(self, context, prepared_data):  # type: ignore[no-untyped-def]
         self.execution_count += 1
         return self.show_result({"outcome": "applied"})
 
@@ -75,17 +75,16 @@ class _DemoHandler(ToolHandler):
 
 class _FloatHandler(_DemoHandler):
     name = "float_demo"
-    arguments_schema = _FloatArguments
+    args_schema = _FloatArguments
 
 
 class _InternalHandler(_DemoHandler):
     name = "internal"
     model_visible = False
-    deliver_result_to_model = False
 
 
 class _NeverValidateHandler(_DemoHandler):
-    async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
+    async def prepare(self, context, arguments):  # type: ignore[no-untyped-def]
         raise AssertionError("validated replay must not regenerate trusted payloads")
 
 
@@ -96,23 +95,23 @@ class _ConcurrentDemoHandler(_DemoHandler):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
+    async def prepare(self, context, arguments):  # type: ignore[no-untyped-def]
         self.validation_count += 1
         sequence = self.validation_count
-        values = self.arguments_schema.model_validate(arguments)
+        values = self.args_schema.model_validate(arguments)
         if sequence == 2:
             self.entered.set()
         await self.release.wait()
         if self.immediate:
             return self.show_result({"outcome": f"immediate-{sequence}"})
-        return (
-            {"value": f"{values.value}-{sequence}"},
-            {"trusted": f"{values.value}-{sequence}"},
-        )
+        return {
+            "value": f"{values.value}-{sequence}",
+            "trusted": f"{values.value}-{sequence}",
+        }
 
 
 class _ExecutionHandler(_DemoHandler):
-    security = ToolSecurity.LOW
+    risk = ToolRisk.LOW
 
     def __init__(self, *, fail_first: bool = False) -> None:
         super().__init__()
@@ -120,10 +119,10 @@ class _ExecutionHandler(_DemoHandler):
         self.success_count = 0
         self.received_payloads: list[tuple[dict[str, object], dict[str, object]]] = []
 
-    async def execute(  # type: ignore[no-untyped-def]
-        self, context, proposal_payload, guard_payload
-    ):
+    async def execute(self, context, prepared_data):  # type: ignore[no-untyped-def]
         self.execution_count += 1
+        proposal_payload = {"value": prepared_data["value"]}
+        guard_payload = {"trusted": prepared_data["trusted"]}
         self.received_payloads.append(
             (dict(proposal_payload), dict(guard_payload))
         )
@@ -156,8 +155,10 @@ class _BlockingExecutionHandler(_ExecutionHandler):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def execute(self, context, proposal_payload, guard_payload):  # type: ignore[no-untyped-def]
+    async def execute(self, context, prepared_data):  # type: ignore[no-untyped-def]
         self.execution_count += 1
+        proposal_payload = {"value": prepared_data["value"]}
+        guard_payload = {"trusted": prepared_data["trusted"]}
         self.received_payloads.append(
             (dict(proposal_payload), dict(guard_payload))
         )
@@ -260,8 +261,23 @@ def _tool_context(conversation_id: int, run_id: int) -> ToolContext:
     )
 
 
-def _tool_call(*, value: str, index: int = 0) -> str:
-    return encode_tool_call(
+def _model_call(
+    *,
+    index: int,
+    provider_id: str | None,
+    name: str,
+    arguments: str,
+) -> LangChainToolCall:
+    del index
+    return LangChainToolCall(
+        id=provider_id,
+        name=name,
+        args=json.loads(arguments),
+    )
+
+
+def _tool_call(*, value: str, index: int = 0) -> LangChainToolCall:
+    return _model_call(
         index=index,
         provider_id=f"provider-{index}",
         name="demo",
@@ -269,11 +285,42 @@ def _tool_call(*, value: str, index: int = 0) -> str:
     )
 
 
-def _tool_service(isolated_db, handler: ToolHandler) -> ToolCallService:  # type: ignore[no-untyped-def]
-    return ToolCallService(
-        session_factory=isolated_db.session,
-        repositories=RepositoryFactory(),
-    ).bind_handlers({handler.name: handler})
+def _registered(operation: ToolOperation) -> RegisteredTool:
+    return RegisteredTool(
+        operation,
+        model_visible=getattr(operation, "model_visible", True),
+    )
+
+
+def _new_service(session_factory, repositories):  # type: ignore[no-untyped-def]
+    return ToolService(ToolCallStore(session_factory, repositories))
+
+
+def _bind(
+    service: ToolService,
+    operations: dict[str, ToolOperation],
+) -> ToolService:
+    tools = {name: _registered(operation) for name, operation in operations.items()}
+    return service.bind_tools(
+        tools,
+        ToolApprovalPolicy(
+            {
+                name: getattr(operation, "risk", ToolRisk.LOW)
+                for name, operation in operations.items()
+            },
+            {
+                name: lambda data: {"value": data["value"]}
+                for name in operations
+            },
+        ),
+    )
+
+
+def _tool_service(isolated_db, handler: ToolOperation) -> ToolService:  # type: ignore[no-untyped-def]
+    return _bind(
+        _new_service(isolated_db.session, RepositoryFactory()),
+        {handler.name: handler},
+    )
 
 async def _create_conversation_run(isolated_db) -> tuple[int, int]:  # type: ignore[no-untyped-def]
     async with isolated_db.session() as session:
@@ -308,21 +355,21 @@ async def _create_received_tool_call(isolated_db) -> int:  # type: ignore[no-unt
         return row.id
 
 
-async def test_bind_handlers_returns_an_isolated_immutable_service(isolated_db) -> None:
+async def test_bind_tools_returns_an_isolated_immutable_service(isolated_db) -> None:
     handler = _DemoHandler()
-    service = ToolCallService(
+    service = _new_service(
         session_factory=isolated_db.session,
         repositories=RepositoryFactory(),
     )
 
-    bound = service.bind_handlers({"demo": handler})
+    bound = _bind(service, {"demo": handler})
 
-    assert dict(service.model_handlers) == {}
-    assert dict(bound.model_handlers) == {"demo": handler}
+    assert dict(service.model_tools) == {}
+    assert tuple(bound.model_tools) == ("demo",)
     with pytest.raises(TypeError):
-        service.model_handlers["other"] = handler  # type: ignore[index]
+        service.model_tools["other"] = _registered(handler).tool  # type: ignore[index]
     with pytest.raises(TypeError):
-        bound.model_handlers["other"] = handler  # type: ignore[index]
+        bound.model_tools["other"] = _registered(handler).tool  # type: ignore[index]
 
 
 async def test_external_input_call_resolves_once_and_replays(isolated_db) -> None:
@@ -383,6 +430,7 @@ async def test_system_call_uses_stable_identity_and_allocates_indexes(isolated_d
     )
     assert replay["tool_call_id"] == first["tool_call_id"]
     assert replay["replayed"] is True
+    assert first["requested_by_model"] is False
     assert second["index"] == first["index"] + 1
     with pytest.raises(IdempotencyConflictError):
         await service.validate_system_call(
@@ -398,7 +446,7 @@ async def test_model_call_as_discards_model_identity(isolated_db) -> None:
     service = _tool_service(isolated_db, _DemoHandler())
     call = await service.validate_model_call_as(
         _tool_context(conversation_id, run_id),
-        encode_tool_call(
+        _model_call(
             index=999,
             provider_id="untrusted-provider-id",
             name="demo",
@@ -409,6 +457,7 @@ async def test_model_call_as_discards_model_identity(isolated_db) -> None:
     )
     assert call["index"] == 0
     assert call["provider_id"] == "jd-import:questions:1"
+    assert call["requested_by_model"] is True
 
 
 def test_tool_input_state_migration_is_idempotent(tmp_path) -> None:
@@ -426,50 +475,50 @@ def test_tool_input_state_migration_is_idempotent(tmp_path) -> None:
     assert "'awaiting_input'" in table_sql
 
 
-def test_handler_capabilities_control_model_schema_and_delivery() -> None:
+def test_registration_controls_only_model_visibility() -> None:
     visible = _DemoHandler()
     internal = _InternalHandler()
-    definitions = build_model_tools({visible.name: visible, internal.name: internal})
+    registrations = (_registered(visible), _registered(internal))
+    definitions = [
+        convert_to_openai_tool(item.tool)
+        for item in registrations
+        if item.model_visible
+    ]
     assert [item["function"]["name"] for item in definitions] == ["demo"]
-    assert visible.deliver_result_to_model is True
-    assert internal.deliver_result_to_model is False
+    assert not hasattr(registrations[0], "deliver_result_to_model")
 
 
-def test_tool_handler_requires_each_business_method() -> None:
-    """Tool Handler 缺少任一业务方法时都不能注册实例。"""
+def test_tool_operation_requires_prepare_and_execute() -> None:
+    """业务操作缺少准备或执行方法时不能注册实例。"""
 
-    class CompleteHandler(ToolHandler):
+    class CompleteOperation(ToolOperation):
         name = "complete"
         description = "complete"
-        arguments_schema = _DemoArguments
-        security = ToolSecurity.LOW
+        args_schema = _DemoArguments
 
-        async def validation(self, context, arguments):  # type: ignore[no-untyped-def]
+        async def prepare(self, context, arguments):  # type: ignore[no-untyped-def]
             return self.show_result({"outcome": "validated"})
 
-        async def execute(  # type: ignore[no-untyped-def]
-            self, context, proposal_payload, guard_payload
-        ):
+        async def execute(self, context, prepared_data):  # type: ignore[no-untyped-def]
             return self.show_result({"outcome": "executed"})
 
         def show_result(self, payload):  # type: ignore[no-untyped-def]
             return ToolResult(dict(payload))
 
-    required = {"validation", "execute", "show_result"}
-    assert ToolHandler.__abstractmethods__ == required
+    required = {"prepare", "execute"}
+    assert ToolOperation.__abstractmethods__ == required
     for missing in required:
         methods = {
-            name: CompleteHandler.__dict__[name]
+            name: CompleteOperation.__dict__[name]
             for name in required - {missing}
         }
         incomplete = type(
-            f"Missing{missing.title()}Handler",
-            (ToolHandler,),
+            f"Missing{missing.title()}Operation",
+            (ToolOperation,),
             {
                 "name": f"missing_{missing}",
                 "description": "incomplete",
-                "arguments_schema": _DemoArguments,
-                "security": ToolSecurity.LOW,
+                "args_schema": _DemoArguments,
                 **methods,
             },
         )
@@ -509,14 +558,16 @@ import app.ai_chat.tools as tools
 import app.ai_chat.tools.types as tool_types
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
-from app.ai_chat.repositories import RepositoryFactory, ToolCallRepository
-from app.ai_chat.services import ToolCallService
+from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.services import ToolService
 from app.ai_chat.streaming.model import AiChatModel
-from app.ai_chat.tools.handler import ToolHandler
+from app.ai_chat.tools.operation import RegisteredTool, ToolOperation
+from app.ai_chat.tools.repository import ToolCallRepository
+from app.ai_chat.tools.store import ToolCallStore
 from app.database import db
 from app.experience import ExperienceAdapter
 from app.experience.graph import build_experience_graph
-from app.experience.tools.content_change import ContentChangeHandler
+from app.experience.tools.content_change import ContentChangeOperation
 
 for alias in (
     "ApprovalProposal",
@@ -543,11 +594,8 @@ for name in (
     "ToolResult",
 ):
     assert getattr(tools, name) is getattr(tool_types, name), name
-assert ToolHandler.__abstractmethods__ == {"validation", "execute", "show_result"}
-assert not hasattr(ToolHandler, "invoke")
-assert not hasattr(ToolHandler, "resolve")
-assert not hasattr(ContentChangeHandler, "invoke")
-assert not hasattr(ContentChangeHandler, "resolve")
+assert ToolOperation.__abstractmethods__ == {"prepare", "execute"}
+assert not hasattr(ContentChangeOperation, "security")
 assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
 assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "memory"}
@@ -558,23 +606,26 @@ assert {"decision", "client_resolution_id"}.issubset(
     tool_types.ApprovalDecision.__annotations__
 )
 
-service = ToolCallService(db.session, RepositoryFactory()).bind_handlers(
-    ExperienceAdapter().get_tool_handlers()
+adapter = ExperienceAdapter()
+service = ToolService(ToolCallStore(db.session, RepositoryFactory())).bind_tools(
+    adapter.get_tools(), adapter.get_tool_approval_policy()
 )
 graph = build_experience_graph(
     AiChatRuntime(AiChatModel(), service, MemoryService())
 )
-assert set(graph.nodes) == {"llm", "validator", "guard", "approver", "executor"}
+assert set(graph.nodes) == {
+    "llm", "validator", "risk_assessment", "approver", "executor"
+}
 graph.compile()
 
 app_root = Path.cwd() / "app"
-for call in ("handler.validation", "handler.execute"):
+for call in ("ToolHandler", "handler.validation", "handler.execute"):
     matches = [
         path.relative_to(Path.cwd()).as_posix()
         for path in app_root.rglob("*.py")
         if call in path.read_text(encoding="utf-8")
     ]
-    assert matches == ["app/ai_chat/services/tool_call_service.py"], (call, matches)
+    assert matches == [], (call, matches)
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -586,46 +637,34 @@ for call in ("handler.validation", "handler.execute"):
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-def test_parse_model_call_rejects_index_outside_sqlite_int64() -> None:
-    maximum = ToolCallService._parse_model_call(
-        encode_tool_call(
-            index=(1 << 63) - 1,
-            provider_id=None,
-            name="demo",
-            arguments="{}",
-        )
-    )
-    assert maximum[0] == (1 << 63) - 1
-
+def test_validate_call_index_rejects_values_outside_sqlite_int64() -> None:
+    ToolCallPreparationService.validate_call_index((1 << 63) - 1)
     with pytest.raises(ToolProtocolError, match="index"):
-        ToolCallService._parse_model_call(
-            encode_tool_call(
-                index=1 << 63,
-                provider_id=None,
-                name="demo",
-                arguments="{}",
-            )
-        )
+        ToolCallPreparationService.validate_call_index(1 << 63)
+
+
+def test_validate_model_call_accepts_complete_langchain_call() -> None:
+    parsed = ToolCallPreparationService.validate_model_call(
+        LangChainToolCall(name="demo", args={}, id=None)
+    )
+    assert parsed == (None, "demo", {})
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    "value",
     [
-        '{"value":NaN}',
-        '{"value":Infinity}',
-        '{"value":-Infinity}',
-        '{"value":1e400}',
-        '{"nested":[{"value":-1e400}]}',
+        float("nan"),
+        float("inf"),
+        float("-inf"),
     ],
 )
-def test_parse_model_call_rejects_non_finite_json_numbers(arguments: str) -> None:
-    with pytest.raises(ToolProtocolError, match="finite|valid JSON"):
-        ToolCallService._parse_model_call(
-            encode_tool_call(
-                index=0,
-                provider_id=None,
+def test_validate_model_call_rejects_non_finite_numbers(value: float) -> None:
+    with pytest.raises(ToolProtocolError, match="finite"):
+        ToolCallPreparationService.validate_model_call(
+            LangChainToolCall(
+                id=None,
                 name="demo",
-                arguments=arguments,
+                args={"value": value},
             )
         )
 
@@ -639,7 +678,7 @@ async def test_validate_call_rejects_schema_coerced_non_finite_number(
     with pytest.raises(ToolProtocolError, match="non-finite"):
         await _tool_service(isolated_db, handler).validate_call(
             _tool_context(conversation_id, run_id),
-            encode_tool_call(
+            _model_call(
                 index=0,
                 provider_id="provider-0",
                 name=handler.name,
@@ -662,12 +701,12 @@ async def test_validate_call_rejects_unknown_handler_before_materializing(
     isolated_db,
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
-    service = _tool_service(isolated_db, _DemoHandler()).bind_handlers({})
+    service = _new_service(isolated_db.session, RepositoryFactory())
 
     with pytest.raises(ToolProtocolError, match="Unknown tool: unknown"):
         await service.validate_call(
             _tool_context(conversation_id, run_id),
-            encode_tool_call(
+            _model_call(
                 index=0,
                 provider_id="provider-0",
                 name="unknown",
@@ -689,7 +728,7 @@ async def test_validate_call_keeps_invalid_arguments_as_durable_received_row(
     with pytest.raises(ToolProtocolError, match="Invalid arguments"):
         await service.validate_call(
             _tool_context(conversation_id, run_id),
-            encode_tool_call(
+            _model_call(
                 index=0,
                 provider_id="provider-0",
                 name="demo",
@@ -749,13 +788,14 @@ async def test_validate_call_rejects_corrupt_received_row_before_mutation(
 async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     handler = _DemoHandler()
-    dispatched = await _tool_service(isolated_db, handler).validate_call(
+    service = _tool_service(isolated_db, handler)
+    dispatched = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
 
     assert dispatched["status"] == "validated"
     assert dispatched["name"] == "demo"
-    assert dispatched["security"] == ToolSecurity.MEDIUM.value
+    assert service.approval.risk("demo") is ToolRisk.MEDIUM
     assert handler.validation_count == 1
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
@@ -764,7 +804,7 @@ async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db)
     assert row is not None
     assert row.status == "validated"
     assert row.proposal_payload == {"value": "input"}
-    assert row.guard_payload == {"trusted": "input"}
+    assert row.guard_payload == {"value": "input", "trusted": "input"}
 
 
 async def test_validate_call_resolves_immediate_result_before_returning(isolated_db) -> None:
@@ -785,6 +825,8 @@ async def test_validate_call_resolves_immediate_result_before_returning(isolated
     assert row is not None
     assert row.status == "resolved"
     assert row.tool_result == {"outcome": "no_change"}
+    assert row.requested_by_model is True
+    assert row.delivery_status == "pending"
 
 
 async def test_validate_call_replay_does_not_validate_twice(isolated_db) -> None:
@@ -829,7 +871,10 @@ async def test_validate_call_concurrent_prepared_validation_keeps_one_durable_wi
     assert row is not None
     assert row.status == "validated"
     assert row.proposal_payload in ({"value": "input-1"}, {"value": "input-2"})
-    assert row.guard_payload == {"trusted": row.proposal_payload["value"]}
+    assert row.guard_payload == {
+        "value": row.proposal_payload["value"],
+        "trusted": row.proposal_payload["value"],
+    }
 
 
 async def test_validate_call_concurrent_immediate_result_replays_durable_winner(
@@ -1104,10 +1149,13 @@ async def test_request_approval_concurrent_calls_converge_on_durable_request(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     observation = _RepositoryObservation(approval_barrier=_TwoPartyBarrier())
-    service = ToolCallService(
-        session_factory=isolated_db.session,
-        repositories=_ObservedRepositoryFactory(observation),
-    ).bind_handlers({"demo": _DemoHandler()})
+    service = _bind(
+        _new_service(
+            session_factory=isolated_db.session,
+            repositories=_ObservedRepositoryFactory(observation),
+        ),
+        {"demo": _DemoHandler()},
+    )
     prepared = await service.validate_call(
         _tool_context(conversation_id, run_id), _tool_call(value="input")
     )
@@ -1323,10 +1371,14 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
     handler = _DemoHandler()
     service = _tool_service(isolated_db, handler)
     first = await service.validate_call(
-        _tool_context(conversation_id, run_id), _tool_call(value="first", index=0)
+        _tool_context(conversation_id, run_id),
+        _tool_call(value="first"),
+        index=0,
     )
     second = await service.validate_call(
-        _tool_context(conversation_id, run_id), _tool_call(value="second", index=1)
+        _tool_context(conversation_id, run_id),
+        _tool_call(value="second", index=1),
+        index=1,
     )
     assert first["status"] == "validated"
     assert second["status"] == "validated"
@@ -1337,10 +1389,13 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
         resolution_barrier=_TwoPartyBarrier(),
         resolution_id="shared-resolution",
     )
-    decision_service = ToolCallService(
-        session_factory=isolated_db.session,
-        repositories=_ObservedRepositoryFactory(observation),
-    ).bind_handlers({"demo": handler})
+    decision_service = _bind(
+        _new_service(
+            session_factory=isolated_db.session,
+            repositories=_ObservedRepositoryFactory(observation),
+        ),
+        {"demo": handler},
+    )
 
     async def decide(tool_call_id: int):  # type: ignore[no-untyped-def]
         await start.wait()
@@ -1471,7 +1526,10 @@ async def test_execute_call_uses_only_persisted_payloads_and_replays_result(
         )
         assert row is not None
         row.proposal_payload = {"value": "persisted-proposal"}
-        row.guard_payload = {"trusted": "persisted-guard"}
+        row.guard_payload = {
+            "value": "persisted-proposal",
+            "trusted": "persisted-guard",
+        }
         await session.commit()
 
     completed = await service.execute_call(context, prepared["tool_call_id"])
@@ -1503,10 +1561,13 @@ async def test_execute_call_concurrent_claim_runs_business_side_effect_once(
     observation = _RepositoryObservation(
         second_execution_claim=asyncio.Event()
     )
-    service = ToolCallService(
-        session_factory=isolated_db.session,
-        repositories=_ObservedRepositoryFactory(observation),
-    ).bind_handlers({"demo": handler})
+    service = _bind(
+        _new_service(
+            session_factory=isolated_db.session,
+            repositories=_ObservedRepositoryFactory(observation),
+        ),
+        {"demo": handler},
+    )
     context = _tool_context(conversation_id, run_id)
     prepared = await service.validate_call(context, _tool_call(value="input"))
     assert prepared["status"] == "validated"
@@ -1895,15 +1956,19 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
 
     database = Database(path)
     try:
-        dispatched = await ToolCallService(
-            session_factory=database.session,
-            repositories=RepositoryFactory(),
-        ).bind_handlers({"demo": _NeverValidateHandler()}).validate_call(
+        service = _bind(
+            _new_service(
+                session_factory=database.session,
+                repositories=RepositoryFactory(),
+            ),
+            {"demo": _NeverValidateHandler()},
+        )
+        dispatched = await service.validate_call(
             _tool_context(
                 conversation_id=1,
                 run_id=1,
             ),
-            encode_tool_call(
+            _model_call(
                 index=0,
                 provider_id=None,
                 name="demo",
@@ -1911,7 +1976,7 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
             ),
         )
         assert dispatched["status"] == "validated"
-        assert dispatched["security"] == ToolSecurity.MEDIUM.value
+        assert service.approval.risk("demo") is ToolRisk.MEDIUM
         async with database.session() as session:
             row = await RepositoryFactory().create(session).tool_calls.get(1)
         assert row is not None

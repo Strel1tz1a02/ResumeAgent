@@ -16,7 +16,7 @@ from app.ai_chat.memory.token_budget import MemoryTokenBudget
 async def test_invalid_delete_value_is_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _Router:
+    class _Model:
         def __init__(self) -> None:
             self.prompts: list[str] = []
             self.responses = [
@@ -24,21 +24,21 @@ async def test_invalid_delete_value_is_retried(
                 '{"operations":[{"op":"delete","path":"core.open_questions"}]}',
             ]
 
-        async def acompletion(self, **kwargs: Any) -> Any:
-            self.prompts.append(kwargs["messages"][0]["content"])
+        async def ainvoke(self, messages: list[dict[str, str]]) -> Any:
+            self.prompts.append(messages[0]["content"])
             return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content=self.responses.pop(0))
-                    )
-                ]
+                content=self.responses.pop(0), additional_kwargs={}
             )
 
-    router = _Router()
+    model = _Model()
     config = SimpleNamespace(provider="openai", reasoning_effort=None)
     monkeypatch.setattr(
-        "app.ai_chat.memory.summarizer.get_router",
-        lambda: (router, config),
+        "app.ai_chat.memory.summarizer.get_llm_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "app.ai_chat.memory.summarizer.get_chat_model",
+        lambda *_args, **_kwargs: (model, config),
     )
     monkeypatch.setattr(
         "app.ai_chat.memory.summarizer.build_memory_token_budget",
@@ -75,8 +75,8 @@ async def test_invalid_delete_value_is_retried(
         ),
     )
 
-    assert len(router.prompts) == 2
-    assert "delete 只能包含 op 和 path" in router.prompts[1]
+    assert len(model.prompts) == 2
+    assert "delete 只能包含 op 和 path" in model.prompts[1]
     assert operations[0].op == "delete"
     assert operations[0].path == "core.open_questions"
     assert operations[0].value is None

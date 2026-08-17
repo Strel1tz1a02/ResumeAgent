@@ -554,7 +554,7 @@ E:\MiniConda\envs\resume-matcher\python.exe -m pytest -q
 E:\MiniConda\envs\resume-matcher\python.exe -m compileall -q app tests
 ```
 
-Expected: the full backend suite passes with only the already-known Windows POSIX skip and third-party LiteLLM warnings.
+Expected: the full backend suite passes with only the already-known Windows POSIX skip and third-party model-client warnings.
 
 - [ ] **Step 5: Check the final diff and status**
 

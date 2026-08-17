@@ -1,10 +1,37 @@
 """Unit tests for LLM capability helpers in app.llm."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
-from app.llm import _appears_truncated, _get_retry_temperature, _supports_temperature
+from app.llm import (
+    LLMConfig,
+    _appears_truncated,
+    _build_messages,
+    _get_retry_temperature,
+    _supports_temperature,
+)
+
+
+class TestBuildMessages:
+    """LangChain 消息模板必须保持业务图请求格式。"""
+
+    def test_builds_user_message_without_system_prompt(self):
+        assert _build_messages("你好 {name}") == [
+            {"role": "user", "content": "你好 {name}"}
+        ]
+
+    def test_builds_system_and_user_messages_in_order(self):
+        assert _build_messages("用户内容", "系统内容") == [
+            {"role": "system", "content": "系统内容"},
+            {"role": "user", "content": "用户内容"},
+        ]
+
+    def test_empty_system_prompt_is_omitted(self):
+        assert _build_messages("用户内容", "") == [
+            {"role": "user", "content": "用户内容"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -24,53 +51,25 @@ class TestSupportsTemperature:
         assert _supports_temperature("ollama/llama3", 0.7) is True
         assert _supports_temperature("ollama_chat/llama3", 0.7) is True
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_openai_gpt4_supports_temperature(self, mock_get_model_info):
-        """GPT-4 has temperature in supported_openai_params."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens", "top_p"]
-        }
+    def test_openai_gpt4_supports_temperature(self):
         assert _supports_temperature("gpt-4", 0.7) is True
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_model_without_temperature_param(self, mock_get_model_info):
-        """Model registry omits temperature → not supported."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["max_tokens"]
-        }
-        assert _supports_temperature("some-model", 0.7) is False
+    def test_unknown_model_keeps_temperature(self):
+        assert _supports_temperature("some-model", 0.7) is True
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_opus4_deprecated_temperature(self, mock_get_model_info):
+    def test_opus4_deprecated_temperature(self):
         """Anthropic Opus 4.x deprecated temperature entirely."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _supports_temperature("anthropic/claude-opus-4-7", 0.7) is False
         # Also check with temperature=1 — still deprecated
         assert _supports_temperature("anthropic/claude-opus-4-7", 1.0) is False
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_kimi_k26_only_allows_one(self, mock_get_model_info):
+    def test_kimi_k26_only_allows_one(self):
         """Moonshot kimi-k2.6 only allows temperature=1."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _supports_temperature("openai/kimi-k2.6", 0.7) is False
         assert _supports_temperature("openai/kimi-k2.6", 1.0) is True
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_model_not_in_registry(self, mock_get_model_info):
-        """Unknown model not in registry — be conservative, skip temperature."""
-        mock_get_model_info.side_effect = Exception("model not found")
-        assert _supports_temperature("unknown-vendor/model", 0.7) is False
-
-    @patch("app.llm.litellm.get_model_info")
-    def test_case_insensitive_model_name(self, mock_get_model_info):
+    def test_case_insensitive_model_name(self):
         """Provider-specific checks are case-insensitive."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _supports_temperature("Anthropic/Claude-Opus-4-7", 0.7) is False
         assert _supports_temperature("OPENAI/KIMI-K2.6", 0.7) is False
         assert _supports_temperature("openai/KIMI-K2.6", 1.0) is True
@@ -84,43 +83,27 @@ class TestSupportsTemperature:
 class TestGetRetryTemperature:
     """Tests for _get_retry_temperature()."""
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_openai_progression(self, mock_get_model_info):
+    def test_openai_progression(self):
         """Standard retry temperature progression for supported models."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _get_retry_temperature("gpt-4", 0) == 0.1
         assert _get_retry_temperature("gpt-4", 1) == 0.3
         assert _get_retry_temperature("gpt-4", 2) == 0.5
         assert _get_retry_temperature("gpt-4", 3) == 0.7
         assert _get_retry_temperature("gpt-4", 10) == 0.7  # clamped
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_opus4_returns_none(self, mock_get_model_info):
+    def test_opus4_returns_none(self):
         """Opus 4 doesn't support temperature → None on all retries."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _get_retry_temperature("anthropic/claude-opus-4-7", 0) is None
         assert _get_retry_temperature("anthropic/claude-opus-4-7", 3) is None
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_kimi_k26_returns_one(self, mock_get_model_info):
+    def test_kimi_k26_returns_one(self):
         """Kimi K2.6 only allows temperature=1 → always 1.0."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _get_retry_temperature("openai/kimi-k2.6", 0) == 1.0
         assert _get_retry_temperature("openai/kimi-k2.6", 1) == 1.0
         assert _get_retry_temperature("openai/kimi-k2.6", 5) == 1.0
 
-    @patch("app.llm.litellm.get_model_info")
-    def test_custom_base_temp(self, mock_get_model_info):
+    def test_custom_base_temp(self):
         """Custom base_temp is respected for supported models."""
-        mock_get_model_info.return_value = {
-            "supported_openai_params": ["temperature", "max_tokens"]
-        }
         assert _get_retry_temperature("gpt-4", 0, base_temp=0.2) == 0.2
         assert _get_retry_temperature("gpt-4", 1, base_temp=0.2) == 0.3
 
@@ -246,16 +229,40 @@ class TestAppearsTruncated:
 # ---------------------------------------------------------------------------
 
 
+class _BoundModel:
+    def __init__(self, model, kwargs):  # type: ignore[no-untyped-def]
+        self.model = model
+        self.kwargs = kwargs
+
+    async def ainvoke(self, messages):  # type: ignore[no-untyped-def]
+        return await self.model.invoke_with(messages, self.kwargs)
+
+
+class _FakeModel:
+    def __init__(self, *responses):  # type: ignore[no-untyped-def]
+        self.responses = list(responses)
+        self.calls = []
+
+    def bind(self, **kwargs):  # type: ignore[no-untyped-def]
+        return _BoundModel(self, kwargs)
+
+    async def ainvoke(self, messages):  # type: ignore[no-untyped-def]
+        return await self.invoke_with(messages, {})
+
+    async def invoke_with(self, messages, kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append({"messages": messages, **kwargs})
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class TestCompleteJsonFallback:
     """Tests for JSON mode fallback in complete_json()."""
 
     @pytest.mark.asyncio
-    @patch("app.llm.get_router")
-    @patch("app.llm.get_model_name")
     @patch("app.llm._supports_json_mode")
-    async def test_json_mode_fallback_on_parse_error(
-        self, mock_supports_json, mock_get_name, mock_get_router
-    ):
+    async def test_json_mode_fallback_on_parse_error(self, mock_supports_json):
         """When JSON mode returns invalid JSON, fallback to prompt-only mode.
 
         First call: JSON mode enabled → returns malformed JSON (trailing comma)
@@ -263,34 +270,25 @@ class TestCompleteJsonFallback:
         Second call: JSON mode disabled → returns valid JSON → success
         """
         mock_supports_json.return_value = True
-        mock_get_name.return_value = "openrouter/openai/gpt-5.4"
-
-        # First response: balanced braces but trailing comma → json.loads fails
-        bad_choice = MagicMock()
-        bad_choice.message.content = '{"items_to_enrich": [], "questions": [],}'
-        bad_response = MagicMock()
-        bad_response.choices = [bad_choice]
-
-        # Second response: valid JSON without JSON mode
-        good_choice = MagicMock()
-        good_choice.message.content = '{"items_to_enrich": [], "questions": [], "analysis_summary": "ok"}'
-        good_response = MagicMock()
-        good_response.choices = [good_choice]
-
-        router = MagicMock()
-        router.acompletion = AsyncMock(side_effect=[bad_response, good_response])
-        config = MagicMock()
-        config.provider = "openrouter"
-        config.reasoning_effort = None
-        mock_get_router.return_value = (router, config)
+        model = _FakeModel(
+            AIMessage(content='{"items_to_enrich": [], "questions": [],}'),
+            AIMessage(
+                content='{"items_to_enrich": [], "questions": [], "analysis_summary": "ok"}'
+            ),
+        )
+        config = LLMConfig(
+            provider="openrouter", model="openai/gpt-5.4", api_key="test"
+        )
 
         from app.llm import complete_json
 
-        result = await complete_json(
-            prompt="Test prompt",
-            schema_type="enrichment",
-            retries=2,
-        )
+        with patch("app.llm.get_chat_model", return_value=(model, config)):
+            result = await complete_json(
+                prompt="Test prompt",
+                config=config,
+                schema_type="enrichment",
+                retries=2,
+            )
 
         assert result == {
             "items_to_enrich": [],
@@ -298,16 +296,13 @@ class TestCompleteJsonFallback:
             "analysis_summary": "ok",
         }
         # Verify JSON mode was used on first call but not second
-        calls = router.acompletion.call_args_list
-        assert calls[0].kwargs.get("response_format") == {"type": "json_object"}
-        assert "response_format" not in calls[1].kwargs
+        assert model.calls[0].get("response_format") == {"type": "json_object"}
+        assert "response_format" not in model.calls[1]
 
     @pytest.mark.asyncio
-    @patch("app.llm.get_router")
-    @patch("app.llm.get_model_name")
     @patch("app.llm._supports_json_mode")
     async def test_json_mode_fallback_on_response_format_rejection(
-        self, mock_supports_json, mock_get_name, mock_get_router
+        self, mock_supports_json
     ):
         """Issue #857: an OpenAI-compatible server (e.g. LM Studio) rejects
         ``response_format={"type": "json_object"}`` with a 400.
@@ -320,51 +315,38 @@ class TestCompleteJsonFallback:
         only handled malformed JSON, not rejection of the parameter itself),
         so the wizard turn failed with a 500.
         """
-        import litellm
-
         mock_supports_json.return_value = True
-        mock_get_name.return_value = "openai/gemma-4-e2b"
-
-        # First call raises the exact LM Studio rejection over the wire.
-        rejection = litellm.BadRequestError(
+        rejection = RuntimeError(
             "OpenAIException - Error code: 400 - "
-            "{'error': \"'response_format.type' must be 'json_schema' or 'text'\"}",
-            model="openai/gemma-4-e2b",
-            llm_provider="openai",
+            "{'error': \"'response_format.type' must be 'json_schema' or 'text'\"}"
         )
-
-        good_choice = MagicMock()
-        good_choice.message.content = '{"answer": "ok"}'
-        good_response = MagicMock()
-        good_response.choices = [good_choice]
-
-        router = MagicMock()
-        router.acompletion = AsyncMock(side_effect=[rejection, good_response])
-        config = MagicMock()
-        config.provider = "openai_compatible"
-        config.reasoning_effort = None
-        mock_get_router.return_value = (router, config)
+        model = _FakeModel(rejection, AIMessage(content='{"answer": "ok"}'))
+        config = LLMConfig(
+            provider="openai_compatible",
+            model="gemma-4-e2b",
+            api_key="",
+            api_base="http://localhost:1234/v1",
+        )
 
         from app.llm import complete_json
 
-        result = await complete_json(
-            prompt="Test prompt",
-            schema_type="resume",
-            retries=2,
-        )
+        with patch("app.llm.get_chat_model", return_value=(model, config)):
+            result = await complete_json(
+                prompt="Test prompt",
+                config=config,
+                schema_type="resume",
+                retries=2,
+            )
 
         assert result == {"answer": "ok"}
         # JSON mode was sent on the first (rejected) call, dropped on the retry.
-        calls = router.acompletion.call_args_list
-        assert calls[0].kwargs.get("response_format") == {"type": "json_object"}
-        assert "response_format" not in calls[1].kwargs
+        assert model.calls[0].get("response_format") == {"type": "json_object"}
+        assert "response_format" not in model.calls[1]
 
     @pytest.mark.asyncio
-    @patch("app.llm.get_router")
-    @patch("app.llm.get_model_name")
     @patch("app.llm._supports_json_mode")
     async def test_json_mode_fallback_on_varied_rejection_wording(
-        self, mock_supports_json, mock_get_name, mock_get_router
+        self, mock_supports_json
     ):
         """The fallback must trigger across provider wording, not just LM Studio's.
 
@@ -372,78 +354,59 @@ class TestCompleteJsonFallback:
         response_format rejection phrased as "not supported" is missed (which
         would re-introduce issue #857 for that provider).
         """
-        import litellm
-
         mock_supports_json.return_value = True
-        mock_get_name.return_value = "openai/some-local-model"
-
-        rejection = litellm.BadRequestError(
+        rejection = RuntimeError(
             "OpenAIException - Error code: 400 - "
-            "{'error': 'response_format json_object is not supported by this model'}",
-            model="openai/some-local-model",
-            llm_provider="openai",
+            "{'error': 'response_format json_object is not supported by this model'}"
         )
-
-        good_choice = MagicMock()
-        good_choice.message.content = '{"answer": "ok"}'
-        good_response = MagicMock()
-        good_response.choices = [good_choice]
-
-        router = MagicMock()
-        router.acompletion = AsyncMock(side_effect=[rejection, good_response])
-        config = MagicMock()
-        config.provider = "openai_compatible"
-        config.reasoning_effort = None
-        mock_get_router.return_value = (router, config)
+        model = _FakeModel(rejection, AIMessage(content='{"answer": "ok"}'))
+        config = LLMConfig(
+            provider="openai_compatible",
+            model="some-local-model",
+            api_key="",
+            api_base="http://localhost:1234/v1",
+        )
 
         from app.llm import complete_json
 
-        result = await complete_json(
-            prompt="Test prompt", schema_type="resume", retries=2
-        )
+        with patch("app.llm.get_chat_model", return_value=(model, config)):
+            result = await complete_json(
+                prompt="Test prompt", config=config, schema_type="resume", retries=2
+            )
 
         assert result == {"answer": "ok"}
-        assert "response_format" not in router.acompletion.call_args_list[1].kwargs
+        assert "response_format" not in model.calls[1]
 
     @pytest.mark.asyncio
-    @patch("app.llm.get_router")
-    @patch("app.llm.get_model_name")
     @patch("app.llm._supports_json_mode")
-    async def test_unrelated_bad_request_is_not_swallowed(
-        self, mock_supports_json, mock_get_name, mock_get_router
-    ):
+    async def test_unrelated_bad_request_is_not_swallowed(self, mock_supports_json):
         """A 400 unrelated to response_format must still propagate, not retry.
 
         Uses a context-length error that *also names* response_format — the
         false-positive case raised in review (cubic/Kilo). Dropping JSON mode
         would not help, so the fallback must NOT fire and the error must surface.
         """
-        import litellm
-
         mock_supports_json.return_value = True
-        mock_get_name.return_value = "openai/gpt-4o"
-
-        rejection = litellm.BadRequestError(
+        rejection = RuntimeError(
             "OpenAIException - Error code: 400 - {'error': 'maximum context "
-            "length exceeded while using response_format=json_object'}",
-            model="openai/gpt-4o",
-            llm_provider="openai",
+            "length exceeded while using response_format=json_object'}"
         )
-
-        router = MagicMock()
-        router.acompletion = AsyncMock(side_effect=rejection)
-        config = MagicMock()
-        config.provider = "openai"
-        config.reasoning_effort = None
-        mock_get_router.return_value = (router, config)
+        model = _FakeModel(rejection)
+        config = LLMConfig(provider="openai", model="gpt-4o", api_key="test")
 
         from app.llm import complete_json
 
-        with pytest.raises(litellm.BadRequestError):
-            await complete_json(prompt="Test prompt", schema_type="resume", retries=2)
+        with patch("app.llm.get_chat_model", return_value=(model, config)):
+            with pytest.raises(RuntimeError):
+                await complete_json(
+                    prompt="Test prompt",
+                    config=config,
+                    schema_type="resume",
+                    retries=2,
+                )
 
         # No retry: an unrelated 400 fails fast (Router already handles retries).
-        assert router.acompletion.await_count == 1
+        assert len(model.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -455,33 +418,20 @@ class TestCompleteDynamicTimeout:
     """Tests for complete() using _calculate_timeout()."""
 
     @pytest.mark.asyncio
-    @patch("app.llm.get_router")
-    @patch("app.llm.get_model_name")
     @patch("app.llm._calculate_timeout")
-    @patch("app.llm._supports_temperature")
-    async def test_uses_calculate_timeout(
-        self, mock_supports_temp, mock_calc_timeout, mock_get_name, mock_get_router
-    ):
+    async def test_uses_calculate_timeout(self, mock_calc_timeout):
         """complete() passes provider and max_tokens to _calculate_timeout."""
-        mock_supports_temp.return_value = True
         mock_calc_timeout.return_value = 180
-        mock_get_name.return_value = "deepseek/deepseek-chat"
-
-        choice = MagicMock()
-        choice.message.content = "Hello"
-        response = MagicMock()
-        response.choices = [choice]
-
-        router = MagicMock()
-        router.acompletion = AsyncMock(return_value=response)
-        config = MagicMock()
-        config.provider = "deepseek"
-        mock_get_router.return_value = (router, config)
+        model = _FakeModel(AIMessage(content="Hello"))
+        config = LLMConfig(provider="deepseek", model="deepseek-chat", api_key="test")
 
         from app.llm import complete
 
-        await complete(prompt="Hi", max_tokens=8192)
+        with patch("app.llm.get_llm_config", return_value=config), patch(
+            "app.llm.get_chat_model", return_value=(model, config)
+        ) as get_model:
+            await complete(prompt="Hi", max_tokens=8192)
 
         mock_calc_timeout.assert_called_once_with("completion", 8192, "deepseek")
-        router.acompletion.assert_awaited_once()
-        assert router.acompletion.call_args.kwargs["timeout"] == 180
+        assert get_model.call_args.kwargs["timeout"] == 180
+        assert len(model.calls) == 1

@@ -1,14 +1,16 @@
-"""供业务图节点使用的 LiteLLM 流式适配器。"""
+"""供业务图节点使用的 LangChain 流式适配器。"""
 
+import json
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
+from langchain_core.messages import AIMessageChunk, ToolCall
+from langchain_core.tools import BaseTool
+
+from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
-from app.ai_chat.tools.buffer import ToolCallBuffer
-from app.ai_chat.tools.handler import ToolHandler
 from app.ai_chat.types import JsonObject
-from app.llm import _calculate_timeout, get_router
+from app.llm import get_chat_model
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
@@ -19,7 +21,7 @@ def _get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def _text(value: Any) -> str:
-    """规范化 LiteLLM 文本内容，不暴露推理字段。"""
+    """规范化 LangChain 文本内容，不暴露推理字段。"""
     if isinstance(value, str):
         return value
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
@@ -35,105 +37,73 @@ def _text(value: Any) -> str:
     return ""
 
 
-@dataclass(frozen=True)
-class TextDelta:
-    """一段可见的助手文本增量。"""
-
-    text: str
+def _reject_json_constant(value: str) -> None:
+    """拒绝完整工具参数中的非标准 JSON 常量。"""
+    raise ValueError(f"Unsupported JSON constant: {value}")
 
 
-@dataclass(frozen=True)
-class ToolCallsCompleted:
-    """仅在全部片段组装完成后发出的原始工具调用字符串。"""
+def complete_tool_calls(message: AIMessageChunk) -> list[tuple[int, ToolCall]]:
+    """在流聚合边界把分片收束为带顺序的完整 LangChain ToolCall。"""
+    if message.invalid_tool_calls:
+        raise ToolProtocolError("Model produced an invalid streamed Tool Call")
+    chunks = message.tool_call_chunks
+    calls = message.tool_calls
+    if len(chunks) != len(calls):
+        raise ToolProtocolError("Streamed Tool Call could not be assembled completely")
 
-    calls: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ModelCompleted:
-    """模型流结束标记。"""
-
-    finish_reason: str | None
-
-
-ModelStreamEvent = TextDelta | ToolCallsCompleted | ModelCompleted
-
-
-def build_model_tools(
-    handlers: Mapping[str, ToolHandler],
-) -> list[JsonObject]:
-    """生成实际发送给模型的 Tool 定义，供调用与 Token 计数共用。"""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": handler.description.strip(),
-                "parameters": handler.schema(),
-            },
-        }
-        for name, handler in handlers.items()
-        if handler.model_visible
-    ]
+    complete: list[tuple[int, ToolCall]] = []
+    for position, (chunk, call) in enumerate(zip(chunks, calls, strict=True)):
+        index = chunk.get("index")
+        if index is None:
+            index = position
+        raw_arguments = chunk.get("args") or "{}"
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise ToolProtocolError("Streamed Tool Call has an invalid index")
+        if not isinstance(raw_arguments, str):
+            raise ToolProtocolError("Streamed Tool Call arguments are not text")
+        try:
+            arguments = json.loads(
+                raw_arguments,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError, ValueError) as exc:
+            raise ToolProtocolError(
+                "Streamed Tool Call arguments are not valid JSON"
+            ) from exc
+        if not isinstance(arguments, dict) or arguments != call.get("args"):
+            raise ToolProtocolError("Streamed Tool Call arguments are incomplete")
+        complete.append((index, cast(ToolCall, call)))
+    return complete
 
 
 class AiChatModel:
-    """通过 LiteLLM 流式输出可见文本和原子组装的工具调用。"""
+    """通过 LangChain 流式输出可见文本和原子组装的工具调用。"""
 
     async def stream(
         self,
         *,
         messages: list[JsonObject],
-        handlers: Mapping[str, ToolHandler],
+        tools: Mapping[str, BaseTool],
         tools_enabled: bool,
         max_tokens: int = 4096,
-    ) -> AsyncIterator[ModelStreamEvent]:
-        """调用已配置模型并规范化其流式响应。"""
-        router, config = get_router()
-        kwargs: dict[str, Any] = {
-            "model": "primary",
-            "messages": messages,
-            "stream": True,
-            "max_tokens": max_tokens,
-            "timeout": _calculate_timeout("completion", max_tokens, config.provider),
-        }
-        if config.reasoning_effort:
-            kwargs["reasoning_effort"] = config.reasoning_effort
-        if tools_enabled and handlers:
-            kwargs["tools"] = build_model_tools(handlers)
-        buffer = ToolCallBuffer()
-        text_fallback = DsmlToolCallFallback() if tools_enabled and handlers else None
-        finish_reason: str | None = None
-        response = await router.acompletion(**kwargs)
-        async for chunk in response:
-            choices = _get(chunk, "choices", []) or []
-            if not choices:
-                continue
-            choice = choices[0]
-            delta = _get(choice, "delta", {})
-            content = _text(_get(delta, "content"))
-            if content:
-                visible = text_fallback.feed(content) if text_fallback else content
-                if visible:
-                    yield TextDelta(visible)
-            for call in _get(delta, "tool_calls", []) or []:
-                function = _get(call, "function", {})
-                buffer.add(
-                    index=int(_get(call, "index", 0) or 0),
-                    provider_id=_get(call, "id"),
-                    name=_get(function, "name"),
-                    arguments=_get(function, "arguments"),
-                )
-            reason = _get(choice, "finish_reason")
-            if reason:
-                finish_reason = str(reason)
-        calls = buffer.assemble()
+    ) -> AsyncIterator[AIMessageChunk]:
+        """直接流式返回 LangChain 消息，并过滤正文中的兼容协议。"""
+        model, _ = get_chat_model(max_tokens=max_tokens)
+        runnable: Any = model
+        if tools_enabled and tools:
+            runnable = model.bind_tools(list(tools.values()))
+        text_fallback = DsmlToolCallFallback() if tools_enabled and tools else None
+        async for chunk in runnable.astream(messages):
+            content = _text(chunk.content)
+            visible = text_fallback.feed(content) if text_fallback and content else content
+            if visible == chunk.content:
+                yield chunk
+            else:
+                yield chunk.model_copy(update={"content": visible})
         if text_fallback is not None:
-            fallback_calls, trailing_text = text_fallback.finish()
-            if trailing_text:
-                yield TextDelta(trailing_text)
-            if not calls:
-                calls = fallback_calls
-        if calls:
-            yield ToolCallsCompleted(tuple(calls))
-        yield ModelCompleted(finish_reason)
+            fallback_chunks, trailing_text = text_fallback.finish()
+            if fallback_chunks or trailing_text:
+                yield AIMessageChunk(
+                    content=trailing_text,
+                    tool_call_chunks=fallback_chunks,
+                )

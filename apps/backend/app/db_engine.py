@@ -80,6 +80,9 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_ai_chat_tool_input_state import (
         migrate as migrate_ai_chat_tool_input_state,
     )
+    from app.scripts.migrate_ai_chat_tool_call_origin import (
+        migrate as migrate_ai_chat_tool_call_origin,
+    )
     from app.scripts.migrate_evidence_background import (
         migrate as migrate_evidence_background,
     )
@@ -111,6 +114,7 @@ def init_models_sync(engine: Engine) -> None:
     migrate_ai_chat_tool_call_index(engine)
     migrate_ai_chat_tool_call_state(engine)
     migrate_ai_chat_tool_input_state(engine)
+    migrate_ai_chat_tool_call_origin(engine)
     migrate_ai_chat_conversation_scope(engine)
     migrate_experience_chat_scope_field(engine)
     migrate_ai_chat_memory_background(engine)

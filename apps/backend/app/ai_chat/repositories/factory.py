@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai_chat.repositories.conversation_repository import ConversationRepository
 from app.ai_chat.repositories.message_repository import MessageRepository
 from app.ai_chat.repositories.run_repository import RunRepository
-from app.ai_chat.repositories.tool_call_repository import ToolCallRepository
+from app.ai_chat.repositories.tool_repository import ToolCallRepository
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,7 @@
 
 **Architecture:** `JDImportAdapter` translates the existing AI Chat run into a `JDImportState`; a deterministic graph owns routing, limits, evidence checks, interrupts, and persistence, while an injectable structured model only makes semantic decisions. URL retrieval goes through an injectable Playwright MCP source provider behind an application URL policy and a mandatory network-egress boundary. Question resumption extends the shared GraphRunner/AiChatService without pretending that questions are Tool approvals.
 
-**Tech Stack:** Python 3.13, FastAPI, Pydantic 2, SQLAlchemy async, SQLite, LangGraph 1.2.10, LiteLLM JSON completion, MCP Python SDK 2.0.0, Microsoft Playwright MCP, pytest.
+**Tech Stack:** Python 3.13, FastAPI, Pydantic 2, SQLAlchemy async, SQLite, LangGraph 1.2.10, LangChain JSON completion, MCP Python SDK 2.0.0, Microsoft Playwright MCP, pytest.
 
 ## Global Constraints
 
@@ -44,7 +44,7 @@
 - `app/jd_import/agent/input_parser.py`: URL extraction, normalization, limits, and text-source creation.
 - `app/jd_import/agent/evidence.py`: quote normalization and assessment.
 - `app/jd_import/agent/questions.py`: stable keys, ordering, batching, and answer validation.
-- `app/jd_import/agent/model.py`: `JDImportModel` protocol and production structured LiteLLM implementation.
+- `app/jd_import/agent/model.py`: `JDImportModel` protocol and production structured LangChain implementation.
 - `app/jd_import/agent/prompts.py`: URL-selection, extraction, and question-planning prompts.
 - `app/jd_import/sources/url_policy.py`: initial/final URL validation and DNS classification.
 - `app/jd_import/sources/playwright_mcp.py`: allow-listed MCP calls and bounded result conversion.
@@ -298,7 +298,7 @@ class JDImportModel(Protocol):
     async def plan_questions(self, request: QuestionPlanningRequest) -> QuestionPlan: ...
 ```
 
-- Production class: `LiteLLMJDImportModel` using `complete_json(..., retries=1, schema_type="jd_import")` plus Pydantic validation.
+- Production class: `LangChainJDImportModel` using `complete_json(..., retries=1, schema_type="jd_import")` plus Pydantic validation.
 
 - [ ] **Step 1: Write failing schema and repair tests**
 
@@ -613,7 +613,7 @@ Create the long-lived production dependencies in `_register_business_adapters()`
 ```python
 register_adapter(
     JDImportAdapter(
-        model=LiteLLMJDImportModel(),
+        model=LangChainJDImportModel(),
         page_sources=PlaywrightMCPSourceProvider.from_settings(),
         persistence=GraphPersistence(database_module.db.session),
     )

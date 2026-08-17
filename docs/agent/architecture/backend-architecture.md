@@ -1,6 +1,6 @@
 # Backend Architecture
 
-> FastAPI + Python 3.13+ | SQLite (SQLAlchemy 2.0 async + aiosqlite) | LiteLLM multi-provider
+> FastAPI + Python 3.13+ | SQLite (SQLAlchemy 2.0 async + aiosqlite) | LangChain multi-provider
 
 ## Directory Structure
 
@@ -12,7 +12,8 @@ apps/backend/app/
 ├── database.py          # Async SQLAlchemy/SQLite facade (returns plain dicts)
 ├── models.py            # SQLAlchemy declarative Base + ORM models
 ├── db_engine.py         # SQLite engine/session factories (async + sync) + PRAGMAs
-├── llm.py               # LiteLLM multi-provider
+├── llm.py               # LangChain multi-provider
+├── ai_chat/              # LangGraph runtime, LangChain tools, approval and durable Tool Calls
 ├── pdf.py               # Playwright PDF rendering
 ├── routers/             # API endpoints (health, config, resumes, jobs, applications, enrichment)
 ├── services/            # parser.py, improver.py, cover_letter.py
@@ -20,6 +21,11 @@ apps/backend/app/
 ├── scripts/             # migrate_tinydb_to_sqlite.py (one-time importer)
 └── prompts/templates.py # LLM prompts
 ```
+
+`ai_chat` keeps four tool concerns separate: LangChain `StructuredTool` definitions,
+`ToolApprovalService` risk routing, `ToolCallStore` idempotent persistence, and
+`ToolService` orchestration. Tool implementations do not contain approval or risk
+logic, and model-visible schemas are passed directly to `bind_tools()`.
 
 ## API Endpoints
 

@@ -56,7 +56,7 @@ Generic, reusable guides (Swiss design system, Next.js performance) live in [`..
 ### LLM Integration
 | Doc | Purpose |
 |-----|---------|
-| [llm-integration](llm-integration.md) | Multi-provider AI via LiteLLM |
+| [llm-integration](llm-integration.md) | Multi-provider AI via LangChain |
 
 ### Portable packs (live outside this folder)
 | Pack | Purpose |

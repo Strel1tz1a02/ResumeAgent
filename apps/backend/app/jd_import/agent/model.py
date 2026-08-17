@@ -65,7 +65,7 @@ class JDImportModel(Protocol):
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult: ...
 
-class LiteLLMJDImportModel:
+class LangChainJDImportModel:
     """生产模型适配器，每次决策允许一次结构修复。"""
 
     def __init__(self, completion: Completion = complete_json) -> None:

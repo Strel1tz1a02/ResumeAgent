@@ -8,7 +8,12 @@ from typing import Any
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
+"""
+保证：
+    全局只打开一次；
+    退出应用时正确释放文件句柄；
+    重置前先关闭连接，再删除 .db/-wal/-shm 文件。
+"""
 
 class CheckpointLifecycle:
     """在应用生命周期内持有 AsyncSqliteSaver 上下文。"""
