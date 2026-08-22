@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.ai_chat.context import ContextAssembler
+from app.ai_chat.memory import token_budget
 
 
 async def test_context_assembler_owns_order_memory_tools_and_budget(monkeypatch) -> None:
@@ -27,7 +28,7 @@ async def test_context_assembler_owns_order_memory_tools_and_budget(monkeypatch)
         fake_count,
     )
     monkeypatch.setattr(
-        "app.ai_chat.context.assembler.build_memory_token_budget",
+        "app.ai_chat.context.assembler.build_structured_token_budget",
         lambda: SimpleNamespace(input_budget=1000),
     )
     prepared = await ContextAssembler(_HistoryMemory()).assemble(  # type: ignore[arg-type]
@@ -100,3 +101,37 @@ def test_structured_context_uses_same_data_boundary_and_budget(monkeypatch) -> N
             {"role": "user", "content": context.prompt},
         ]
     ]
+
+
+def test_structured_budget_uses_known_model_input_limit(monkeypatch) -> None:
+    captured: list[int] = []
+    expected = SimpleNamespace(input_budget=999_488)
+
+    monkeypatch.setattr(token_budget, "_model_limits", lambda: (1_000_000, 384_000))
+    monkeypatch.setattr(
+        token_budget,
+        "build_memory_token_budget",
+        lambda *, configured_input_cap: (
+            captured.append(configured_input_cap) or expected
+        ),
+    )
+
+    result = token_budget.build_structured_token_budget()
+
+    assert result is expected
+    assert captured == [1_000_000]
+
+
+def test_structured_budget_keeps_safe_cap_for_unknown_model(monkeypatch) -> None:
+    captured: list[int] = []
+
+    monkeypatch.setattr(token_budget, "_model_limits", lambda: (None, None))
+    monkeypatch.setattr(
+        token_budget,
+        "build_memory_token_budget",
+        lambda *, configured_input_cap: captured.append(configured_input_cap),
+    )
+
+    token_budget.build_structured_token_budget()
+
+    assert captured == [token_budget.memory_settings.ai_chat_input_cap]

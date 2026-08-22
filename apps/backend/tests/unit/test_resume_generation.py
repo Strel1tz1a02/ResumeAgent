@@ -13,6 +13,7 @@ from app.resume_generation.graph import (
 from app.resume_generation.indexing import QdrantEvidenceIndexer
 from app.resume_generation.model import (
     FallbackResumeGenerationModel,
+    LangChainResumeGenerationModel,
     RuleBasedResumeGenerationModel,
 )
 from app.resume_generation.planner import (
@@ -39,6 +40,7 @@ from app.resume_generation.schemas import (
     PlanCritique,
     ResumeConstraints,
     ResumeDraft,
+    RetrievedEvidence,
     SearchTask,
 )
 
@@ -134,6 +136,164 @@ def _source() -> JDAnalysisSourceSnapshot:
             ),
         ],
     )
+
+
+async def test_llm_jd_analysis_normalizes_localized_importance() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "coverage_items": [
+                {
+                    "coverage_id": "python-api",
+                    "source_requirement_ids": [1],
+                    "statement": "使用 Python 和 FastAPI 设计 API",
+                    "importance": "高",
+                    "capability": "Python API 设计",
+                    "evidence_expectation": ["实际项目"],
+                    "aliases": ["Python", "FastAPI"],
+                },
+                {
+                    "coverage_id": "opensearch",
+                    "source_requirement_ids": [2],
+                    "statement": "OpenSearch 检索",
+                    "importance": "中",
+                    "capability": "检索系统开发",
+                    "evidence_expectation": [],
+                    "aliases": ["OpenSearch"],
+                },
+            ]
+        }
+
+    result = await LangChainResumeGenerationModel(completion).analyze_jd(_source())
+
+    assert [item.importance for item in result] == ["must", "should"]
+    assert len(calls) == 1
+    system_prompt = calls[0]["kwargs"]["system_prompt"]
+    input_prompt = calls[0]["args"][0]
+    assert "EXPECTED_OUTPUT_SCHEMA" in system_prompt
+    assert '"statement"' in system_prompt
+    assert '"capability"' in system_prompt
+    assert '"required"' in system_prompt
+    assert "UNTRUSTED_DOMAIN_DATA name=resume_generation_input" in input_prompt
+    assert calls[0]["kwargs"]["retries"] == 1
+
+
+async def test_llm_structure_repair_keeps_schema_and_requests_complete_output() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        if len(calls) == 1:
+            return {
+                "coverage_items": [
+                    {
+                        "coverage_id": "python-api",
+                        "source_requirement_ids": [1],
+                        "importance": "must",
+                    }
+                ]
+            }
+        return {
+            "coverage_items": [
+                {
+                    "coverage_id": "python-api",
+                    "source_requirement_ids": [1],
+                    "statement": "使用 Python 和 FastAPI 设计 API",
+                    "importance": "must",
+                    "capability": "Python API 设计",
+                    "evidence_expectation": [],
+                    "aliases": ["Python", "FastAPI"],
+                },
+                {
+                    "coverage_id": "opensearch",
+                    "source_requirement_ids": [2],
+                    "statement": "OpenSearch 检索",
+                    "importance": "should",
+                    "capability": "检索系统开发",
+                    "evidence_expectation": [],
+                    "aliases": ["OpenSearch"],
+                },
+            ]
+        }
+
+    result = await LangChainResumeGenerationModel(completion).analyze_jd(_source())
+
+    assert len(result) == 2
+    assert len(calls) == 2
+    assert calls[0]["kwargs"]["system_prompt"] == calls[1]["kwargs"]["system_prompt"]
+    assert calls[1]["kwargs"]["retries"] == 1
+    repair_prompt = calls[1]["args"][0]
+    assert "VALIDATION_ERRORS" in repair_prompt
+    assert "重新输出完整 JSON 对象" in repair_prompt
+    assert "Field required" in repair_prompt
+
+
+async def test_llm_judge_filters_skills_outside_candidate_allowlist() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "judgments": [
+                {
+                    "evidence_id": 11,
+                    "experience_id": 1,
+                    "coverage_item_ids": ["python-api"],
+                    "relevance": 0.9,
+                    "evidence_strength": 0.8,
+                    "uniqueness": 0.6,
+                    "supported_skills": ["fastapi", "Web 框架开发"],
+                    "unsupported_risk": [],
+                    "reason": "存在直接项目证据",
+                }
+            ]
+        }
+
+    analysis = JDAnalysisSnapshot(
+        source=_source(),
+        target_title="Backend Engineer",
+        coverage_items=[
+            CoverageItem(
+                coverage_id="python-api",
+                source_requirement_ids=[1],
+                statement="使用 Python 和 FastAPI 设计 API",
+                importance="must",
+                capability="Python API 设计",
+                aliases=["Python", "FastAPI"],
+            )
+        ],
+    )
+    task = SearchTask(
+        task_id="t1",
+        coverage_item_ids=["python-api"],
+        intent="exact_skill",
+        query="Python FastAPI",
+    )
+    document = build_documents(
+        [
+            _experience(
+                1,
+                11,
+                action="设计接口参数校验",
+                result="服务稳定运行",
+                technologies=["FastAPI"],
+            )
+        ]
+    )[0]
+    candidate = RetrievedEvidence(
+        document=document,
+        retrieval_score=0.9,
+        task_ids=["t1"],
+    )
+
+    result = await LangChainResumeGenerationModel(completion).judge(
+        analysis, [task], [candidate]
+    )
+
+    assert result[0].supported_skills == ["FastAPI"]
+    assert '"allowed_supported_skills": ["FastAPI"]' in calls[0]["args"][0]
 
 
 def _experience(

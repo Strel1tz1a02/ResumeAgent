@@ -84,6 +84,14 @@ def build_memory_token_budget(
     )
 
 
+def build_structured_token_budget() -> MemoryTokenBudget:
+    """为无历史结构化任务使用模型输入上限，未知模型保持保守上限。"""
+    model_input, _ = _model_limits()
+    return build_memory_token_budget(
+        configured_input_cap=model_input or memory_settings.ai_chat_input_cap
+    )
+
+
 def count_request_tokens(
     spec: MemoryTokenBudget,
     messages: list[JsonObject],
@@ -99,7 +107,7 @@ def count_request_tokens(
             convert_to_messages(messages),
             tools=tools,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - tokenizer 不可用时必须回退到保守计数
         count = _conservative_token_count({"messages": messages, "tools": tools or []})
     if not isinstance(count, int) or count < 0:
         raise TokenEstimationError("token counter returned an invalid value")
@@ -114,7 +122,7 @@ def count_text_tokens(spec: MemoryTokenBudget, text: str) -> int:
         config = get_llm_config()
         model, _ = get_chat_model(config, max_retries=0)
         count = model.get_num_tokens(text)
-    except Exception:
+    except Exception:  # noqa: BLE001 - tokenizer 不可用时必须回退到保守计数
         count = _conservative_token_count(text)
     if not isinstance(count, int) or count < 0:
         raise TokenEstimationError("token counter returned an invalid value")

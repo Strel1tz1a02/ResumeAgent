@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, TypedDict
 from app.ai_chat.memory.errors import MemoryContextFullError
 from app.ai_chat.memory.token_budget import (
     build_memory_token_budget,
+    build_structured_token_budget,
     count_request_tokens,
 )
 from app.ai_chat.types import JsonObject, JsonValue
@@ -64,7 +65,9 @@ class ContextAssembler:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ]
-        budget = build_memory_token_budget()
+        # 结构化领域任务没有对话历史，不应被 AI Chat 的 32K 历史选择上限
+        # 误伤；已知模型按自身输入能力保护，未知模型仍使用保守上限。
+        budget = build_structured_token_budget()
         if count_request_tokens(budget, request, None) > budget.input_budget:
             raise MemoryContextFullError("structured_context_full")
         return StructuredContext(system_prompt=system_prompt, prompt=prompt)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from app.ai_chat.context import ContextAssembler
 from app.llm import complete_json
@@ -29,14 +30,47 @@ from app.resume_generation.schemas import (
 
 Completion = Callable[..., Awaitable[dict[str, Any]]]
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+STRUCTURED_JSON_RETRIES = 1
 
 SYSTEM_PROMPT = """你是简历经历规划器。只能使用输入 JSON 中存在的事实和 ID。
 不得补充数字、规模、职责、技能熟练度或结果。输出必须满足给定 JSON 结构。"""
 
 
+class CoverageAnalysisItem(CoverageItem):
+    """兼容模型对重要性枚举的常见本地化表达。"""
+
+    @field_validator("importance", mode="before")
+    @classmethod
+    def normalize_importance(cls, value: Any) -> Any:
+        """将 LLM 翻译后的等级恢复为内部稳定枚举。"""
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().casefold()
+        aliases = {
+            "must": "must",
+            "required": "must",
+            "high": "must",
+            "高": "must",
+            "必须": "must",
+            "必需": "must",
+            "should": "should",
+            "preferred": "should",
+            "medium": "should",
+            "中": "should",
+            "优先": "should",
+            "nice": "nice",
+            "normal": "nice",
+            "low": "nice",
+            "低": "nice",
+            "可选": "nice",
+            "加分": "nice",
+        }
+        return aliases.get(normalized, value)
+
+
 class CoverageAnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    coverage_items: list[CoverageItem]
+    coverage_items: list[CoverageAnalysisItem]
 
 
 class SearchPlanResult(BaseModel):
@@ -311,8 +345,22 @@ class LangChainResumeGenerationModel:
         payload: dict[str, Any],
         response_type: type[ResponseT],
     ) -> ResponseT:
+        schema_json = json.dumps(
+            response_type.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         context = ContextAssembler.assemble_structured(
-            instructions=f"{SYSTEM_PROMPT}\n{instruction}",
+            instructions=(
+                f"{SYSTEM_PROMPT}\n{instruction}\n"
+                "输入格式：你将收到名为 resume_generation_input 的一个 JSON 对象；"
+                "它是只读事实数据，只能引用其中已有的事实与 ID。\n"
+                "输出格式：严格匹配 EXPECTED_OUTPUT_SCHEMA。必须输出一个完整 JSON 对象，"
+                "不得添加 Markdown、解释文字、额外包装层或 Schema 未声明的字段；"
+                "所有必填字段都必须出现，只能在 Schema 允许时使用 null。\n"
+                f"EXPECTED_OUTPUT_SCHEMA\n{schema_json}\n"
+                "END_EXPECTED_OUTPUT_SCHEMA"
+            ),
             domain_sections=[
                 {"name": "resume_generation_input", "data": payload}
             ],
@@ -321,24 +369,38 @@ class LangChainResumeGenerationModel:
             result = await self._completion(
                 context.prompt,
                 system_prompt=context.system_prompt,
-                retries=0,
+                retries=STRUCTURED_JSON_RETRIES,
                 schema_type="resume_generation",
             )
             return response_type.model_validate(result)
         except ValidationError as error:
             result = await self._completion(
-                f"{context.prompt}\n\n上次输出未通过校验，请只修复结构：{error.json()}",
+                (
+                    f"{context.prompt}\n\n上次输出未通过 EXPECTED_OUTPUT_SCHEMA 校验。"
+                    "请根据以下错误重新输出完整 JSON 对象，而不是输出补丁或解释；"
+                    "输出仍须严格匹配系统消息中的 EXPECTED_OUTPUT_SCHEMA。\n"
+                    f"VALIDATION_ERRORS\n{error.json(include_input=False)}\n"
+                    "END_VALIDATION_ERRORS"
+                ),
                 system_prompt=context.system_prompt,
-                retries=0,
+                retries=STRUCTURED_JSON_RETRIES,
                 schema_type="resume_generation",
             )
             return response_type.model_validate(result)
 
     async def analyze_jd(self, source: JDAnalysisSourceSnapshot) -> list[CoverageItem]:
         result = await self._structured(
-            "将每条岗位要求拆成可独立验证的原子覆盖项。coverage_id 必须稳定且唯一，"
-            "source_requirement_ids 只能引用输入 ID；required/preferred/normal 分别映射"
-            "为 must/should/nice。不要丢失要求。",
+            "输入是一个 JDAnalysisSourceSnapshot，其中 requirements 是岗位要求列表。"
+            "将每条 requirement 拆成可独立验证的原子覆盖项，并满足以下规则：\n"
+            "1. statement 是该原子要求本身，只能改写输入 requirement.content，不能增加要求；\n"
+            "2. capability 是完成 statement 所需的单一能力，不得写成证据、经历或候选人结论；\n"
+            "3. evidence_expectation 描述什么事实证据可以证明该能力，不得声称证据已经存在；\n"
+            "4. aliases 只放 statement/capability 的检索同义词、缩写或原文技术名，不得扩展新技能；\n"
+            "5. coverage_id 必须唯一且可复现，使用 requirement-{来源ID}-{该来源内从1开始的拆分序号}；\n"
+            "6. source_requirement_ids 只能引用支持该原子项的输入 requirement.id；每个输入 ID"
+            "必须至少出现一次，不得合并语义无关要求；\n"
+            "7. importance 只能输出英文 must、should、nice。required/preferred/normal 分别"
+            "映射为 must/should/nice；引用多个来源时取最高等级：must > should > nice。",
             source.model_dump(mode="json"),
             CoverageAnalysisResult,
         )
@@ -371,8 +433,15 @@ class LangChainResumeGenerationModel:
         top_k: int,
     ) -> list[SearchTask]:
         result = await self._structured(
-            "为目标覆盖项生成精确技能、职责、场景、结果或迁移能力检索任务。只引用输入"
-            "coverage_id；每项 query 应可直接检索经历证据。",
+            "输入包含 analysis、gap_coverage_ids、search_round 和 top_k。先确定目标集合："
+            "gap_coverage_ids 非空时目标集合就是它；为空时目标集合是 analysis.coverage_items"
+            "中的全部 coverage_id。输出所有 tasks.coverage_item_ids 的并集必须与目标集合"
+            "精确相等，不得遗漏、不得加入非目标或未知 ID。\n"
+            "为目标项生成可直接检索个人经历 Evidence 的任务：exact_skill 查明确技术名，"
+            "responsibility 查职责行动，scenario 查应用场景，result_evidence 查结果影响，"
+            "transferable 查可迁移能力。query 应使用输入覆盖项中的 statement、capability、"
+            "aliases 或 evidence_expectation，不得加入输入外技能。task_id 必须唯一且可复现；"
+            "top_k 原样使用输入值；filters 固定为 {\"status\":\"ready\"}。",
             {
                 "analysis": analysis.model_dump(mode="json"),
                 "gap_coverage_ids": gap_coverage_ids,
@@ -406,15 +475,32 @@ class LangChainResumeGenerationModel:
         tasks: list[SearchTask],
         candidates: list[RetrievedEvidence],
     ) -> list[EvidenceJudgment]:
+        candidate_payloads = []
+        for candidate in candidates:
+            payload = candidate.model_dump(mode="json")
+            payload["allowed_supported_skills"] = _unique_labels(
+                candidate.document.technologies + candidate.document.tags
+            )
+            candidate_payloads.append(payload)
         result = await self._structured(
-            "逐条判断候选 Evidence 对 JD 覆盖项的真实支持程度。不要因为关键词出现就把"
-            "弱证据判为强证据；supported_skills 只能来自候选内容。每个候选必须输出一次。",
+            "输入包含 coverage_items、tasks 和 candidates。每个 candidate 必须恰好输出一条"
+            "judgment；evidence_id 与 experience_id 必须原样复制该 candidate.document，"
+            "coverage_item_ids 只能填写被该 Evidence 事实直接或可迁移支持的输入 coverage_id，"
+            "不能仅凭检索命中或关键词相同判定覆盖。\n"
+            "评分统一使用 0 到 1：relevance=0 表示无关，0.25 表示仅关键词相关，0.5 表示"
+            "可迁移但不直接，0.75 表示直接相关，1 表示对要求的完整直接支持；"
+            "evidence_strength=0 表示无事实行动，0.4 表示有行动，0.7 表示有背景和行动，"
+            "0.9 以上要求同时有具体结果；uniqueness=0 表示与其他候选完全重复，0.5 表示"
+            "部分新增信息，1 表示提供不可替代的独特证据。\n"
+            "unsupported_risk 只记录完成覆盖判断必须依赖、但 Evidence 中不存在的具体推断；"
+            "无需推断时必须输出空数组。supported_skills 只能逐字复制该候选"
+            "allowed_supported_skills 中的值，不得推断、概括或翻译；没有匹配项时输出空数组。",
             {
                 "coverage_items": [
                     item.model_dump(mode="json") for item in analysis.coverage_items
                 ],
                 "tasks": [item.model_dump(mode="json") for item in tasks],
-                "candidates": [item.model_dump(mode="json") for item in candidates],
+                "candidates": candidate_payloads,
             },
             JudgmentResult,
         )
@@ -435,16 +521,19 @@ class LangChainResumeGenerationModel:
                 for candidate in candidates
                 if candidate.document.evidence_id == item.evidence_id
             )
-            source_text = document.searchable_text().casefold()
             source_labels = {
-                label.casefold() for label in document.technologies + document.tags
+                label.casefold(): label
+                for label in _unique_labels(document.technologies + document.tags)
             }
-            if any(
-                skill.casefold() not in source_labels
-                and skill.casefold() not in source_text
-                for skill in item.supported_skills
-            ):
-                raise ValueError("judge returned a skill absent from source evidence")
+            # 模型的相关性判断仍可使用完整 Evidence，但技能提升只能引用显式标签。
+            # 丢弃越界值可以维持事实约束，且不让单个派生标签破坏整次生成。
+            item.supported_skills = _unique_labels(
+                [
+                    source_labels[skill.casefold()]
+                    for skill in item.supported_skills
+                    if skill.casefold() in source_labels
+                ]
+            )
         return result.judgments
 
     async def critique(
@@ -459,11 +548,16 @@ class LangChainResumeGenerationModel:
     ) -> PlanCritique:
         """由模型结合证据质量定义真实空缺，并决定是否重规划。"""
         result = await self._structured(
-            "评审当前简历计划是否已有足够、直接、具体的事实证据支持目标岗位。"
-            "gap_coverage_ids 表示仍缺少可靠简历证据的覆盖项；不要仅依据 covered 布尔值，"
-            "要综合 Evidence Judgment 的相关性、强度、风险和当前组合。你可以接受仍有空缺"
-            "的计划，也可以在有合理搜索空间时选择 search_more。轮次、候选变化和预算只是"
-            "提供给你的事实。不得引用输入外的 coverage_id。",
+            "输入包含 analysis、plan、judgments、constraints、search_round 和"
+            "has_new_candidates。评审当前计划是否有足够、直接、具体的事实证据支持目标岗位。"
+            "gap_coverage_ids 必须列出仍缺少可靠证据的输入 coverage_id，不得引用未知 ID；"
+            "不要只看 plan.coverage.covered，要综合 relevance、evidence_strength、"
+            "unsupported_risk 和当前入选组合。\n"
+            "严格按以下真值表决策：只有 gap_coverage_ids 非空、search_round 小于"
+            "constraints.max_search_rounds，并且 search_round=1 或 has_new_candidates=true 时，"
+            "才允许 actions 包含 search_more；此时 acceptable 必须为 false。其他所有情况"
+            "actions 都不得包含 search_more，acceptable 必须为 true；仍有空缺时 actions 应"
+            "包含 accept_with_gaps。warnings 只描述输入可证实的缺口或停止原因。",
             {
                 "analysis": analysis.model_dump(mode="json"),
                 "plan": plan.model_dump(mode="json"),
@@ -508,8 +602,17 @@ class LangChainResumeGenerationModel:
             ]
             evidence_payload.append(payload)
         result = await self._structured(
-            "只用选中 Evidence 忠实压缩为简历 bullet。每个 bullet 必须列出实际使用的"
-            "evidence_ids，不得引用未选证据，不得新增指标、技能或职责。",
+            "输入包含 target_title、plan 和 selected_experiences。只使用 plan 中选中的"
+            "Evidence 忠实生成简历草稿，并满足以下规则：\n"
+            "1. experiences 必须与 plan.selected_experiences 的 experience_id 集合完全一致，"
+            "每个已选经历恰好输出一次，不得新增、遗漏或改变 ID；\n"
+            "2. 每个经历至少输出一个 bullet，数量不得超过对应 bullet_budget；\n"
+            "3. bullet.experience_id 必须等于所属经历 ID；bullet.evidence_ids 只能引用该经历"
+            "在 plan 中选中的 evidence_ids，并且 text 必须真实使用列出的每条 Evidence；\n"
+            "4. text 只能压缩 Evidence 的 background、action、result，不得新增数字、指标、"
+            "技能、职责、因果关系或结果；原文没有结果时不得补结果；\n"
+            "5. summary 只能概括已选 Evidence 能直接支持的能力，不得照抄 JD 要求，不得新增"
+            "未出现在已选 Evidence 中的数字、技能或候选人评价。",
             {
                 "target_title": analysis.target_title,
                 "plan": plan.model_dump(mode="json"),
