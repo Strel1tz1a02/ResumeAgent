@@ -6,22 +6,21 @@ import json
 import logging
 from uuid import uuid4
 
+from app.ai_chat.context import ContextAssembler
 from app.config_cache import get_content_language
-from app.experience.prompts.import_text import SYSTEM_PROMPT, import_text_prompt
+from app.experience.prompts.import_text import SYSTEM_PROMPT, import_text_instruction
 from app.experience.schemas.experiences import ExperienceGlobalSave
 from app.llm import (
-    DEFAULT_JSON_MAX_TOKENS,
     _calculate_timeout,
     _extract_message_text,
     get_chat_model,
+    get_configured_max_tokens,
     get_llm_config,
     get_model_name,
-    get_safe_max_tokens,
 )
 
 logger = logging.getLogger(__name__)
 IMPORT_MAX_RETRIES = 2
-DEEPSEEK_IMPORT_MAX_TOKENS = 32_768
 
 
 def _completion_for_log(completion: object | None) -> str:
@@ -62,12 +61,7 @@ class ExperienceTextExtractor:
         config = get_llm_config()
         request_id = uuid4().hex
         model_name = get_model_name(config)
-        # DeepSeek 长经历导入需要更长输出，避免推理阶段耗尽正文预算。
-        max_tokens = (
-            DEEPSEEK_IMPORT_MAX_TOKENS
-            if config.provider == "deepseek"
-            else get_safe_max_tokens(model_name, DEFAULT_JSON_MAX_TOKENS)
-        )
+        max_tokens = get_configured_max_tokens(config)
         model, _ = get_chat_model(
             config,
             max_tokens=max_tokens,
@@ -78,9 +72,15 @@ class ExperienceTextExtractor:
             ExperienceGlobalSave,
             include_raw=True,
         )
+        context = ContextAssembler.assemble_structured(
+            instructions=f"{SYSTEM_PROMPT}\n{import_text_instruction(language)}",
+            domain_sections=[
+                {"name": "experience_import_text", "data": {"text": text}}
+            ],
+        )
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": import_text_prompt(text, language)},
+            {"role": "system", "content": context.system_prompt},
+            {"role": "user", "content": context.prompt},
         ]
         last_error: Exception | None = None
         last_completion: object | None = None
@@ -112,9 +112,8 @@ class ExperienceTextExtractor:
             except Exception as error:
                 last_error = error
                 if attempt < IMPORT_MAX_RETRIES:
-                    messages[-1]["content"] = (
-                        import_text_prompt(text, language)
-                        + "\n\n上次输出未通过结构校验，请重新输出完整且合法的对象。"
+                    messages[-1]["content"] = context.prompt + (
+                        "\n\n上次输出未通过结构校验，请重新输出完整且合法的对象。"
                     )
                     continue
         logger.error(

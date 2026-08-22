@@ -285,13 +285,13 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 按顺序阅读：
 
-1. `apps/backend/app/experience/adapters/adapter.py::validate_binding()`；
+1. `apps/backend/app/experience/adapters/adapter.py::validate_request()`；
 2. `ExperienceAdapter.parse_input()`；
-3. `apps/backend/app/experience/graph/context.py`；
-4. `apps/backend/app/experience/graph/prompts.py`；
+3. `apps/backend/app/ai_chat/context/assembler.py`；
+4. `apps/backend/app/experience/prompts/ai_chat.py`；
 5. `apps/backend/app/experience/graph/state.py`。
 
-核心问题：`subject` 和 `target` 为什么对通用层是不透明的？为什么业务上下文在运行开始前加载？Prompt、消息历史和业务快照如何组合？
+核心问题：`subject` 和 `scope` 为什么对通用层是不透明的？业务为何只声明指令与领域 Section，而最终消息顺序、Memory、Tool Result 和 Token 预算由 `ContextAssembler` 统一？
 
 产出：用一个 `background` 会话实例填写完整的字段来源表。
 
@@ -308,7 +308,7 @@ START
 → END
 ```
 
-再阅读 `apps/backend/app/ai_chat/graph/runner.py::stream()` 和 `_normalize()`。
+再阅读 `apps/backend/app/ai_chat/graph/runner.py::stream()`、`graph/driver.py::stream()` 和 `normalize()`。
 
 核心问题：Graph 节点为什么返回局部 State？条件边如何选择分支？Graph 事件和 Service 持久化为什么分属不同位置？
 
@@ -320,13 +320,13 @@ START
 
 1. `apps/backend/app/experience/tools/content_change.py`；
 2. `apps/backend/app/ai_chat/tools/operation.py`；
-3. `apps/backend/app/ai_chat/tool_approval.py`；
+3. `apps/backend/app/ai_chat/tools/approval/service.py`；
 4. `apps/backend/app/ai_chat/tools/store.py`；
 5. `apps/backend/app/ai_chat/services/tool_service.py`；
 6. `builder.py` 中 `validator`、`risk_assessment`、`approver`、`executor`；
 7. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
 
-核心问题：为什么 LangChain Tool 只包含能力与参数协议？审批判断、幂等固化和执行编排为什么分别属于 `ToolApprovalService`、`ToolCallStore` 和 `ToolService`？`proposal_payload` 与可信执行数据为什么不能合并成一个前端对象？
+核心问题：为什么 LangChain Tool 只包含能力与参数协议？审批判断、幂等固化和执行编排为什么分别属于 `ToolApprovalService`、`ToolCallStore` 和 `ToolService`？可展示的 `interaction_payload` 与可信执行数据为什么不能合并成一个前端对象？
 
 产出：Tool Call 生命周期图 + `content_change` 参数卡。
 
@@ -335,12 +335,13 @@ START
 按顺序阅读：
 
 1. `builder.py` 中 `approver` 和 `executor`；
-2. `apps/backend/app/ai_chat/graph/runner.py`；
-3. `apps/backend/app/ai_chat/checkpoint/factory.py`；
-4. `AiChatService.resolve_proposal()`；
-5. `test_real_graph_interrupt_approve_and_deferred_tool_result()`。
+2. `apps/backend/app/ai_chat/protocol.py`；
+3. `apps/backend/app/ai_chat/graph/driver.py`；
+4. `apps/backend/app/ai_chat/services/run_lifecycle.py`；
+5. `AiChatService.resolve_interaction()`；
+6. `test_real_graph_interrupt_approve_and_deferred_tool_result()`。
 
-核心问题：`interrupt()` 后为什么普通 Python 调用栈不需要一直存在？`Command(resume=...)` 如何找到原来的状态？为什么审批收尾不需要再次调用模型？
+核心问题：`interrupt(InteractionRequest)` 后为什么普通 Python 调用栈不需要一直存在？为什么 Resolution 必须先持久化，再用只含身份的 `GraphResumeCommand` 恢复并重读可信状态？
 
 产出：暂停前、暂停中、恢复后的数据库状态与 checkpoint 状态表。
 
@@ -354,7 +355,7 @@ START
 - 重复审批：`client_resolution_id`；
 - 同会话并发运行：current run 唯一约束；
 - 用户先断流：`CancelledError` 与 run/message 状态；
-- 提案落库但尚未进入 interrupt：`ensure_interrupted()`；
+- Interaction 已落库但 checkpoint 尚未暂停：`GraphDriver.recover()` 与 Run CAS 对账；
 - Tool 已应用但模型续答失败：pending Tool Result；
 - 生成期间字段变化：revision guard。
 
@@ -405,7 +406,7 @@ createExperienceConversation
 → POST /experience-ai-chat/conversations
 → experience.routers.ai_chat.create_conversation
 → AiChatService.create_conversation
-→ ExperienceAdapter.validate_binding
+→ ExperienceAdapter.validate_request
 → ConversationRepository.create
 → ExperienceFieldService.snapshot
 ```
@@ -421,10 +422,11 @@ streamExperienceMessage
 → ExperienceAdapter.parse_input
 → ExperienceGraph.agent_stream
 → AiChatRuntime.stream_model
+→ ContextAssembler.assemble
 → AiChatModel.stream
-→ assistant.delta
+→ output.delta
 → AiChatService 持久化完整 assistant message
-→ assistant.completed
+→ run.completed
 ```
 
 ### 5.3 Tool 提案与审批恢复
@@ -442,10 +444,11 @@ streamExperienceMessage
 → graph.approver 持久化申请并 interrupt
 → run=suspended
 → 前端展示 proposal
-→ resolveExperienceProposal
-→ AiChatService.resolve_proposal
-→ Command(resume=decision + client_resolution_id)
+→ resolveExperienceInteraction
+→ AiChatService.resolve_interaction
 → ToolService.record_decision 先通过 ToolCallStore 提交 approved
+→ GraphResumeCommand(run_id + interaction_id)
+→ GraphDriver.resume
 → graph.executor
 → ToolService.execute_call 通过 ToolCallStore 原子认领
 → LangChain Tool.ainvoke

@@ -3,8 +3,6 @@
 from unittest.mock import patch
 
 import pytest
-from langchain_core.messages import AIMessage
-
 from app.llm import (
     LLMConfig,
     _appears_truncated,
@@ -12,6 +10,7 @@ from app.llm import (
     _get_retry_temperature,
     _supports_temperature,
 )
+from langchain_core.messages import AIMessage
 
 
 class TestBuildMessages:
@@ -416,6 +415,32 @@ class TestCompleteJsonFallback:
 
 class TestCompleteDynamicTimeout:
     """Tests for complete() using _calculate_timeout()."""
+
+    @pytest.mark.asyncio
+    async def test_complete_json_uses_unified_default_budget(self):
+        """未显式传预算时，JSON 调用必须读取统一配置。"""
+        model = _FakeModel(AIMessage(content='{"answer":"ok"}'))
+        config = LLMConfig(
+            provider="deepseek", model="deepseek-v4-flash", api_key="test"
+        )
+
+        from app.llm import complete_json
+
+        with patch(
+            "app.llm.get_configured_max_tokens", return_value=32_768
+        ) as get_budget, patch(
+            "app.llm.get_chat_model", return_value=(model, config)
+        ) as get_model:
+            result = await complete_json(
+                prompt="Return JSON",
+                config=config,
+                schema_type="custom",
+                retries=0,
+            )
+
+        assert result == {"answer": "ok"}
+        get_budget.assert_called_once_with(config)
+        assert get_model.call_args.kwargs["max_tokens"] == 32_768
 
     @pytest.mark.asyncio
     @patch("app.llm._calculate_timeout")

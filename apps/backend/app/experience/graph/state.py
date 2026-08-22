@@ -6,7 +6,8 @@ from typing import NotRequired, TypedDict
 
 from langchain_core.messages import ToolCall as LangChainToolCall
 
-from app.ai_chat.tools.types import ApprovalDecision, ToolCall
+from app.ai_chat.context import ModelContext
+from app.ai_chat.tools.types import ToolCall
 from app.ai_chat.types import (
     JsonObject,
     JsonValue,  # noqa: F401 - 递归 JsonObject 类型的前向引用需要
@@ -23,9 +24,7 @@ class ExperienceState(TypedDict):
     run_kind: str
     tools_enabled: bool
     revision_snapshot: JsonObject
-    model_messages: list[JsonObject]
+    model_context: ModelContext
     raw_tool_call: LangChainToolCall | None
     raw_tool_call_index: NotRequired[int | None]
     tool_call: ToolCall | None
-
-    approval: NotRequired[ApprovalDecision | None]

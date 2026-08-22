@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.config import get_stream_writer
 
+from app.ai_chat.streaming.events import RuntimeEvent
 from app.resume_generation.model import ResumeGenerationModel
 from app.resume_generation.planner import (
     assemble_plan,
@@ -185,6 +187,19 @@ def build_resume_generation_graph(
             validation.warnings.append(
                 "auto 模式在以下阶段使用了确定性降级: " + ", ".join(fallback_events)
             )
+        result = {
+            "analysis": state["analysis"].model_dump(mode="json"),
+            "plan": state["plan"].model_dump(mode="json"),
+            "resume_data": state["resume_data"].model_dump(mode="json"),
+            "provenance": state["provenance"].model_dump(mode="json"),
+            "validation": validation.model_dump(mode="json"),
+        }
+        get_stream_writer()(
+            RuntimeEvent(
+                "result.available",
+                {"kind": "resume_generation", "result": result},
+            )
+        )
         return {"validation": validation}
 
     graph = StateGraph(ResumeGenerationState)

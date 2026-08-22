@@ -41,11 +41,8 @@ LLM_TIMEOUT_JSON = 180  # JSON completions may take longer
 MAX_JSON_EXTRACTION_RECURSION = 10
 MAX_JSON_CONTENT_SIZE = 1024 * 1024  # 1MB
 
-# Default token budget for structured JSON completions (e.g. resume parsing).
-# Chosen to accommodate large resumes while staying within most providers'
-# output limits. Callers should use get_safe_max_tokens() so this is
-# automatically clamped to the model's actual capacity.
-DEFAULT_JSON_MAX_TOKENS = 8192
+# 所有未显式收紧预算的模型调用共用同一配置；保留旧名称兼容现有调用方。
+DEFAULT_JSON_MAX_TOKENS = settings.llm_max_tokens
 
 _USER_CHAT_PROMPT = ChatPromptTemplate.from_messages([("human", "{prompt}")])
 _SYSTEM_USER_CHAT_PROMPT = ChatPromptTemplate.from_messages(
@@ -629,16 +626,23 @@ async def complete(
     prompt: str,
     system_prompt: str | None = None,
     config: LLMConfig | None = None,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     temperature: float = 0.7,
 ) -> str:
     """通过 LangChain ChatModel 完成一次文本生成。"""
     resolved = config or get_llm_config()
+    effective_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else get_configured_max_tokens(resolved)
+    )
     model, resolved = get_chat_model(
         resolved,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
         temperature=temperature,
-        timeout=_calculate_timeout("completion", max_tokens, resolved.provider),
+        timeout=_calculate_timeout(
+            "completion", effective_max_tokens, resolved.provider
+        ),
     )
     model_name = get_model_name(resolved)
 
@@ -696,19 +700,27 @@ def _is_response_format_unsupported(error: Exception) -> bool:
     return any(cue in msg for cue in rejection_cues)
 
 
-FALLBACK_MAX_TOKENS = 4096
-
-
 def get_model_profile(config: LLMConfig | None = None) -> dict[str, Any]:
     """读取 LangChain 供应商集成附带的模型能力资料。"""
     try:
         model, _ = get_chat_model(config, max_retries=0)
-    except Exception:
+        profile = getattr(model, "profile", None)
+    except Exception:  # noqa: BLE001 - 能力资料缺失时按未知模型处理
         return {}
-    return dict(model.profile or {})
+    if profile is None:
+        return {}
+    try:
+        return dict(profile)
+    except (TypeError, ValueError):
+        return {}
 
 
-def get_safe_max_tokens(model_name: str, requested: int = DEFAULT_JSON_MAX_TOKENS) -> int:
+def get_safe_max_tokens(
+    model_name: str,
+    requested: int = DEFAULT_JSON_MAX_TOKENS,
+    *,
+    config: LLMConfig | None = None,
+) -> int:
     """按 LangChain 模型资料限制输出 token；未知模型保留调用方预算。
 
     Args:
@@ -720,12 +732,31 @@ def get_safe_max_tokens(model_name: str, requested: int = DEFAULT_JSON_MAX_TOKEN
     """
     safe_requested = max(1, requested)
 
-    config = get_llm_config()
-    profile = get_model_profile(config) if get_model_name(config) == model_name else {}
+    resolved = config or get_llm_config()
+    profile = (
+        get_model_profile(resolved)
+        if get_model_name(resolved) == model_name
+        else {}
+    )
     model_limit = profile.get("max_output_tokens")
     if isinstance(model_limit, int) and model_limit > 0:
         return min(safe_requested, model_limit)
     return safe_requested
+
+
+def get_configured_max_tokens(config: LLMConfig | None = None) -> int:
+    """返回统一配置、并按当前模型能力裁剪后的默认输出预算。"""
+    resolved = config or get_llm_config()
+    requested = settings.llm_max_tokens
+    # LangChain 当前的 DeepSeek 注册资料仍可能报告过时的 8K 上限；官方
+    # V4 Flash 路径已支持统一的 32K 默认预算，因此保持显式配置值。
+    if resolved.provider == "deepseek":
+        return requested
+    return get_safe_max_tokens(
+        get_model_name(resolved),
+        requested,
+        config=resolved,
+    )
 
 
 def _appears_truncated(data: dict, schema_type: str = "resume") -> bool:
@@ -967,7 +998,7 @@ async def complete_json(
     prompt: str,
     system_prompt: str | None = None,
     config: LLMConfig | None = None,
-    max_tokens: int = 4096,
+    max_tokens: int | None = None,
     retries: int = 2,
     schema_type: str = "resume",
 ) -> dict[str, Any]:
@@ -980,6 +1011,11 @@ async def complete_json(
     """
     resolved = config or get_llm_config()
     model_name = get_model_name(resolved)
+    effective_max_tokens = (
+        max_tokens
+        if max_tokens is not None
+        else get_configured_max_tokens(resolved)
+    )
 
     # Build messages
     json_system = (
@@ -996,9 +1032,11 @@ async def complete_json(
             retry_temp = _get_retry_temperature(model_name, attempt)
             model, _ = get_chat_model(
                 resolved,
-                max_tokens=max_tokens,
+                max_tokens=effective_max_tokens,
                 temperature=retry_temp,
-                timeout=_calculate_timeout("json", max_tokens, resolved.provider),
+                timeout=_calculate_timeout(
+                    "json", effective_max_tokens, resolved.provider
+                ),
             )
             runnable: Any = model
             if use_json_mode and not json_mode_failed:

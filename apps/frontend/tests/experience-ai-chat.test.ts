@@ -3,10 +3,11 @@ import {
   closeExperienceConversation,
   createExperienceConversation,
   eventExperienceDetail,
-  resolveExperienceProposal,
+  resolveExperienceInteraction,
   streamExperienceMessage,
   streamExperienceOpening,
 } from '@/lib/api/experience-ai-chat';
+import { parseRuntimeSse } from '@/lib/api/runtime-events';
 
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -68,9 +69,9 @@ describe('experience AI chat API', () => {
       .fn()
       .mockResolvedValue(
         sseResponse([
-          ': 代理刷新填充\r\n\r\nevent: assistant.started\r\ndata: {"message_id":1}\r\n\r\nevent: assistant.',
-          'delta\ndata: {"text":"你好"}\n\nevent: content_change.requested\n',
-          'data: {"proposal_id":4,"tool_name":"content_change","proposal":{"scope":{"field":"background","evidence_id":null},"suggested_content":"新值"}}\n\n',
+          ': 代理刷新填充\r\n\r\nevent: run.started\r\ndata: {"type":"run.started","run_id":12,"sequence":1,"payload":{"output_id":1}}\r\n\r\nevent: output.',
+          'delta\ndata: {"type":"output.delta","run_id":12,"sequence":2,"payload":{"text":"你好"}}\n\nevent: interaction.requested\n',
+          'data: {"type":"interaction.requested","run_id":12,"sequence":3,"payload":{"interaction_id":4,"kind":"approval","request":{"tool_name":"content_change","proposal":{"scope":{"field":"background","evidence_id":null},"suggested_content":"新值"}}}}\n\n',
         ])
       );
     vi.stubGlobal('fetch', fetchMock);
@@ -78,26 +79,34 @@ describe('experience AI chat API', () => {
 
     const events = await collect(streamExperienceOpening(8, controller.signal));
 
-    expect(events.map((event) => event.event)).toEqual([
-      'assistant.started',
-      'assistant.delta',
-      'content_change.requested',
+    expect(events.map((event) => event.type)).toEqual([
+      'run.started',
+      'output.delta',
+      'interaction.requested',
     ]);
-    expect(events[2].data).toMatchObject({ proposal_id: 4, tool_name: 'content_change' });
+    expect(events[2].payload).toMatchObject({ interaction_id: 4, kind: 'approval' });
   });
 
   it('sends one user turn and one approval resolution with caller-owned signals', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(sseResponse(['event: assistant.completed\ndata: {}\n\n']))
-      .mockResolvedValueOnce(sseResponse(['event: content_change.applied\ndata: {}\n\n']));
+      .mockResolvedValueOnce(
+        sseResponse([
+          'event: run.completed\ndata: {"type":"run.completed","run_id":12,"sequence":1,"payload":{}}\n\n',
+        ])
+      )
+      .mockResolvedValueOnce(
+        sseResponse([
+          'event: run.completed\ndata: {"type":"run.completed","run_id":12,"sequence":1,"payload":{}}\n\n',
+        ])
+      );
     vi.stubGlobal('fetch', fetchMock);
     const messageController = new AbortController();
     const resolutionController = new AbortController();
 
     await collect(streamExperienceMessage(8, '继续完善', 'message-1', messageController.signal));
     await collect(
-      resolveExperienceProposal(4, 'approve', 'resolution-1', resolutionController.signal)
+      resolveExperienceInteraction(12, 4, 'approve', 'resolution-1', resolutionController.signal)
     );
 
     const messageOptions = fetchMock.mock.calls[0][1] as RequestInit;
@@ -107,6 +116,7 @@ describe('experience AI chat API', () => {
       JSON.stringify({ content: '继续完善', client_message_id: 'message-1' })
     );
     expect(resolutionOptions.signal).toBe(resolutionController.signal);
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/runs/12/interactions/4/resolve');
     expect(resolutionOptions.body).toBe(
       JSON.stringify({ decision: 'approve', client_resolution_id: 'resolution-1' })
     );
@@ -115,9 +125,43 @@ describe('experience AI chat API', () => {
   it('extracts an authoritative experience only from business result events', () => {
     const experience = { experience_id: 7, title: 'Updated' };
 
-    expect(eventExperienceDetail({ event: 'content_change.applied', data: { experience } })).toBe(
-      experience
+    expect(
+      eventExperienceDetail({
+        type: 'result.available',
+        run_id: 12,
+        sequence: 1,
+        payload: { kind: 'tool_result', result: { experience } },
+      })
+    ).toBe(experience);
+    expect(eventExperienceDetail({ type: 'run.completed', sequence: 1, payload: {} })).toBeNull();
+  });
+
+  it('rejects envelopes that bypass the unified event contract', async () => {
+    const malformed = [
+      'event: run.completed\ndata: {"type":"run.completed","payload":{}}\n\n',
+      'event: run.completed\ndata: {"type":"run.completed","sequence":1,"payload":[]}\n\n',
+    ];
+
+    for (const record of malformed) {
+      await expect(collect(parseRuntimeSse(sseResponse([record])))).rejects.toThrow(
+        /Runtime event/
+      );
+    }
+  });
+
+  it('parses CRLF record boundaries split across network chunks', async () => {
+    const events = await collect(
+      parseRuntimeSse(
+        sseResponse([
+          'event: run.completed\r',
+          '\ndata: {"type":"run.completed","run_id":12,"sequence":1,"payload":{}}\r',
+          '\n\r',
+          '\n',
+        ])
+      )
     );
-    expect(eventExperienceDetail({ event: 'assistant.completed', data: {} })).toBeNull();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'run.completed', run_id: 12, sequence: 1 });
   });
 });

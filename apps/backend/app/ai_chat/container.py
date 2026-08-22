@@ -5,14 +5,16 @@ from pathlib import Path
 from app import database as database_module
 from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
 from app.ai_chat.checkpoint import CheckpointLifecycle
+from app.ai_chat.context import ContextAssembler
 from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services import AiChatService, ToolService
-from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.streaming import AiChatModel
+from app.ai_chat.tools.store import ToolCallStore
 from app.config import settings
+from app.llm import get_configured_max_tokens
 
 _registry = AdapterRegistry()
 _checkpoints: CheckpointLifecycle | None = None
@@ -46,7 +48,13 @@ async def start_ai_chat() -> None:
         _checkpoints = CheckpointLifecycle(path)
     checkpoint = await _checkpoints.start()
     tools = ToolService(ToolCallStore(database_module.db.session, _repositories))
-    runtime = AiChatRuntime(AiChatModel(), tools, MemoryService())
+    memory = MemoryService()
+    runtime = AiChatRuntime(
+        AiChatModel(),
+        tools,
+        ContextAssembler(memory),
+        max_tokens=get_configured_max_tokens(),
+    )
     runner = GraphRunner(_registry, checkpoint, runtime)
     _service = AiChatService(_registry, runner, _repositories)
 

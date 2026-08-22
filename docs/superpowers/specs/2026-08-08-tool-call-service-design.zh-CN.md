@@ -2,7 +2,9 @@
 
 > 历史设计说明：本方案中的 `ToolHandler`、`ToolSecurity` 和 `ToolCallService`
 > 已由 LangChain `StructuredTool`、`ToolApprovalService`、`ToolCallStore` 与
-> `ToolService` 四层结构替代。当前实现以 `docs/agent/llm-integration.md` 为准。
+> `ToolService` 四层结构替代；`proposal_payload` 也已统一为
+> `interaction_payload`。当前控制面以
+> [Agent Runtime 统一设计](./2026-08-17-agent-runtime-unification-design.zh-CN.md) 为准。
 
 **状态：** Implemented
 

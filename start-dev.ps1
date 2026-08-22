@@ -148,13 +148,14 @@ if (-not $SkipInfrastructure) {
         Start-Process -FilePath $DockerDesktop -WindowStyle Hidden | Out-Null
         Wait-DockerEngine -DockerCommand $DockerCommand
     }
-    Write-Host "Starting Redis and Qdrant..." -ForegroundColor Cyan
-    & $DockerCommand compose --project-directory $ProjectRoot up -d redis qdrant
+    Write-Host "Starting Redis, Qdrant, and the secured Playwright MCP service..." -ForegroundColor Cyan
+    & $DockerCommand compose --project-directory $ProjectRoot up -d redis qdrant playwright-mcp-gateway
     if ($LASTEXITCODE -ne 0) {
-        throw "Redis/Qdrant startup failed. Check Docker Desktop and docker compose logs."
+        throw "Infrastructure startup failed. Check Docker Desktop and docker compose logs."
     }
     Wait-TcpPort -HostName "127.0.0.1" -Port 6379
     Wait-TcpPort -HostName "127.0.0.1" -Port 6333
+    Wait-TcpPort -HostName "127.0.0.1" -Port 8931
 }
 
 if (-not (Test-Path -LiteralPath $CondaExe)) {
@@ -224,4 +225,5 @@ if (-not $SkipFrontend) {
 }
 Write-Host "Backend: http://localhost:8000"
 Write-Host "Qdrant: http://localhost:6333/dashboard"
+Write-Host "Playwright MCP: http://localhost:8931/mcp"
 Write-Host "The first indexing run downloads dense/sparse models and may take some time." -ForegroundColor Yellow

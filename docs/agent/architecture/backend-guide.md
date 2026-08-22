@@ -83,10 +83,18 @@ unique index. Jobs' dynamic pipeline fields (`preview_hash(es)`, `job_keywords`,
 ### AI Chat Tool boundaries
 
 - `tools/operation.py` registers each capability as a LangChain `StructuredTool`; the Tool owns its description and Pydantic argument schema, but no risk or approval state.
-- `tool_approval.py` receives a complete validated Tool Call and returns either `execute` or `approval`.
+- `tools/approval/` receives a complete validated Tool Call and owns risk routing plus approval persistence.
 - `tools/store.py` owns durable state validation, atomic claims, replay and transaction access.
 - `services/tool_service.py` orchestrates preparation, approval persistence, LangChain Tool execution and result solidification.
 - Business Graphs only route between model, validation, risk assessment, approval and execution nodes.
+
+### Agent Runtime control plane
+
+- Business adapters own their Graph topology and domain state; `graph/driver.py` is the only LangGraph execution and recovery boundary.
+- `protocol.py` defines `InteractionRequest`, `ResolveInteractionCommand`, `GraphResumeCommand`, and `GraphOutcome`.
+- `services/run_lifecycle.py` is the only Run lifecycle writer; checkpoints only own Graph position.
+- `context/assembler.py` is the only Agent message assembly boundary.
+- `streaming/sse.py` exposes one `RuntimeEvent` envelope to every frontend consumer.
 
 ## Prompt Guidelines
 

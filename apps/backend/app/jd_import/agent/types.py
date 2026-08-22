@@ -20,6 +20,7 @@ class ImportSource(BaseModel):
     content: str = ""
     source_url: str | None = None
     url_status: UrlStatus | None = None
+    url_error_code: str | None = None
 
 
 class ParsedInput(BaseModel):
@@ -137,9 +138,7 @@ class QuestionAnswer(BaseModel):
 class QuestionBatchAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["question_batch_answer"] = "question_batch_answer"
-    batch_id: str
-    client_resolution_id: str = Field(min_length=1, max_length=200)
+    batch_id: str = Field(min_length=1, max_length=200)
     answers: list[QuestionAnswer]
 
 

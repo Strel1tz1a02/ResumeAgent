@@ -17,7 +17,7 @@
 | **DeepSeek** | `langchain-deepseek` | DeepSeek 模型 |
 | **Groq** | `langchain-groq` | Groq 模型 |
 
-`app/llm.py::get_chat_model()` 使用 `init_chat_model()` 创建并缓存供应商模型。业务层使用统一的 `ainvoke()`、`astream()`、`bind_tools()` 和 `with_structured_output()`，不直接调用供应商 SDK。
+`app/llm.py::get_chat_model()` 使用 `init_chat_model()` 创建并缓存供应商模型。普通结构化任务使用 LangChain 的 `ainvoke()` / `with_structured_output()`；Agent Graph 只能经 `AiChatRuntime.stream_model()` 和 `ContextAssembler` 组装请求，不直接调用供应商 SDK。
 
 ## API Key Handling
 
@@ -29,6 +29,8 @@ API Key 通过模型构造参数直接传入，不写入 `os.environ`，避免�
 - 流式工具调用：ChatModel `bind_tools()` 后使用 `astream()`；`AIMessageChunk` 直接聚合跨 chunk 工具参数，完整 `ToolCallChunk` 直接交给工具服务。
 - 工具定义：模型只接收 LangChain `StructuredTool`，由其 `args_schema` 完成基础参数校验；工具本身不保存风险或审批状态。
 - 工具生命周期：`ToolApprovalService` 根据完整调用决定审批路由，`ToolCallStore` 负责幂等固化，`ToolService` 编排准备、审批、执行和结果保存。
+- Agent 控制面：业务拥有 Graph 拓扑，统一 Driver 只接收 `RuntimeEvent` / `GraphOutcome`；外部输入统一为 `InteractionRequest` / `ResolveInteractionCommand`。
+- Agent 上下文：业务只声明指令、领域 Section、消息与待投递 Tool Result，`ContextAssembler` 负责来源标记、Memory、顺序和 Token 预算。
 - 经历文本导入：`with_structured_output(ExperienceGlobalSave, include_raw=True)` 直接返回经 Pydantic 校验的结构。
 - 业务 JSON 补全：`complete_json()` 保留现有花括号平衡提取、截断识别和内容质量重试。
 
@@ -76,10 +78,15 @@ except Exception as exc:
 |------|---------|
 | `apps/backend/app/llm.py` | LangChain 模型工厂、补全、JSON 与健康检查 |
 | `apps/backend/app/ai_chat/streaming/model.py` | LangChain 流式工具调用适配 |
+| `apps/backend/app/ai_chat/streaming/sse.py` | Runtime Event 的唯一 SSE 编码与错误收敛 |
+| `apps/backend/app/ai_chat/context/assembler.py` | Agent 模型上下文、Memory 与 Token 预算边界 |
+| `apps/backend/app/ai_chat/protocol.py` | Interaction、恢复命令与 Graph Outcome 协议 |
+| `apps/backend/app/ai_chat/graph/driver.py` | 唯一 LangGraph 执行、暂停和恢复边界 |
 | `apps/backend/app/ai_chat/tools/operation.py` | LangChain Tool 注册与业务 Operation |
-| `apps/backend/app/ai_chat/tool_approval.py` | 风险判断与审批路由 |
+| `apps/backend/app/ai_chat/tools/approval/` | 风险判断与审批生命周期 |
 | `apps/backend/app/ai_chat/tools/store.py` | Tool Call 幂等与固化边界 |
 | `apps/backend/app/ai_chat/services/tool_service.py` | Tool 生命周期编排 |
+| `apps/backend/app/ai_chat/services/run_lifecycle.py` | Run 状态、消息收尾和结果投递的唯一写边界 |
 | `apps/backend/app/experience/services/experience_text_extractor.py` | Pydantic 结构化输出 |
 | `apps/backend/app/prompts/templates.py` | Prompt 模板 |
 | `apps/backend/app/config.py` | 供应商配置 |

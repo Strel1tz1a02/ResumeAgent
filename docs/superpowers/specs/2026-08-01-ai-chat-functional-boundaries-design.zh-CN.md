@@ -1,3 +1,7 @@
+> **历史设计说明：** 本文的业务分层原则仍有效；其中 Event、Run、Context、Interaction
+> 与 Graph 执行口径已由
+> [Agent Runtime 统一设计](./2026-08-17-agent-runtime-unification-design.zh-CN.md) 取代。
+
 ```mermaid
 flowchart LR
     UI["业务页面"] --> CHAT["通用聊天模块"]

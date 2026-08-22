@@ -3,6 +3,8 @@ import { apiFetch, apiPost } from './client';
 
 export type ResumeGenerationMode = 'auto' | 'llm' | 'deterministic';
 export type CoverageImportance = 'must' | 'should' | 'nice';
+export type RunStatus = 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled';
+export type ResumeArtifactStatus = 'pending' | 'previewed' | 'confirmed';
 
 export interface ResumeGenerationConstraints {
   page_count?: 1 | 2;
@@ -55,7 +57,8 @@ export interface ResumePlan {
 
 export interface ResumeGenerationPreview {
   run_id: string;
-  status: 'previewed';
+  status: 'completed';
+  artifact_status: 'previewed';
   plan: ResumePlan;
   resume_data: ResumeData;
   provenance: {
@@ -78,7 +81,8 @@ export interface ResumeGenerationPreview {
 
 export interface ResumeGenerationRun {
   run_id: string;
-  status: 'running' | 'previewed' | 'failed' | 'confirmed';
+  status: RunStatus;
+  artifact_status: ResumeArtifactStatus;
   jd_information_id: number;
   request: {
     jd_information_id: number;
@@ -118,7 +122,12 @@ export async function getResumeGeneration(runId: string): Promise<ResumeGenerati
 export async function confirmResumeGeneration(
   runId: string,
   title?: string
-): Promise<{ run_id: string; status: 'confirmed'; resume_id: string }> {
+): Promise<{
+  run_id: string;
+  status: 'completed';
+  artifact_status: 'confirmed';
+  resume_id: string;
+}> {
   return parseJson(
     await apiPost(`/resume-generations/${encodeURIComponent(runId)}/confirm`, { title })
   );

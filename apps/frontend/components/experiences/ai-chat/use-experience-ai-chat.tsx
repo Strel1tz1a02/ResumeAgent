@@ -15,14 +15,15 @@ import {
   closeExperienceConversation,
   createExperienceConversation,
   eventExperienceDetail,
-  resolveExperienceProposal,
+  eventExperienceProposal,
+  resolveExperienceInteraction,
   streamExperienceMessage,
   streamExperienceOpening,
-  type ExperienceChatEvent,
   type ExperienceChatScope,
   type ExperienceChangeScope,
   type ExperienceProposal,
 } from '@/lib/api/experience-ai-chat';
+import type { RuntimeEvent } from '@/lib/api/runtime-events';
 import { writeExperienceDetail } from '@/lib/queries/experiences/cache';
 
 export type ChatPhase = 'idle' | 'generating' | 'ready' | 'approval';
@@ -35,7 +36,8 @@ interface ExperienceAiChatValue {
   proposal: ExperienceProposal | null;
   input: string;
   error: string | null;
-  lastBusinessEvent: ExperienceChatEvent | null;
+  lastBusinessEvent: RuntimeEvent | null;
+  lastBusinessResult: Record<string, unknown> | null;
   setInput: (value: string) => void;
   start: (scope: ExperienceChatScope) => Promise<void>;
   send: () => Promise<void>;
@@ -70,21 +72,21 @@ export function ExperienceAiChatProvider({
   const [proposal, setProposal] = useState<ExperienceProposal | null>(null);
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [lastBusinessEvent, setLastBusinessEvent] = useState<ExperienceChatEvent | null>(null);
+  const [lastBusinessEvent, setLastBusinessEvent] = useState<RuntimeEvent | null>(null);
   const streamRef = useRef<AbortController | null>(null);
   const conversationRef = useRef<number | null>(null);
 
   const applyEvent = useCallback(
-    (event: ExperienceChatEvent) => {
-      if (event.event === 'assistant.started') {
+    (event: RuntimeEvent) => {
+      if (event.type === 'run.started') {
         setMessages((current) => [
           ...current,
           { id: clientId('assistant'), role: 'assistant', content: '' },
         ]);
         return;
       }
-      if (event.event === 'assistant.delta') {
-        const text = typeof event.data.text === 'string' ? event.data.text : '';
+      if (event.type === 'output.delta') {
+        const text = typeof event.payload.text === 'string' ? event.payload.text : '';
         setMessages((current) => {
           const next = [...current];
           const last = next.at(-1);
@@ -94,15 +96,16 @@ export function ExperienceAiChatProvider({
         });
         return;
       }
-      if (event.event === 'assistant.completed') {
+      if (event.type === 'run.completed') {
         setPhase('ready');
         return;
       }
-      if (event.event === 'proposal.resolved') {
+      if (event.type === 'interaction.resolved') {
         setProposal(null);
         return;
       }
-      if (event.event.endsWith('.requested')) {
+      const requested = eventExperienceProposal(event);
+      if (requested) {
         streamRef.current?.abort();
         setMessages((current) => {
           const last = current.at(-1);
@@ -110,18 +113,18 @@ export function ExperienceAiChatProvider({
             ? current.slice(0, -1)
             : current;
         });
-        setProposal(event.data as unknown as ExperienceProposal);
+        setProposal(requested);
         setPhase('approval');
         return;
       }
-      if (/\.(applied|rejected|invalidated)$/.test(event.event)) {
+      if (event.type === 'result.available' && event.payload.kind === 'tool_result') {
         const detail = eventExperienceDetail(event);
         if (detail) writeExperienceDetail(queryClient, detail);
         setLastBusinessEvent(event);
         setProposal(null);
         return;
       }
-      if (event.event === 'chat.error') {
+      if (event.type === 'run.failed') {
         setError('response_failed');
         setPhase('ready');
       }
@@ -131,10 +134,10 @@ export function ExperienceAiChatProvider({
 
   const consume = useCallback(
     async (
-      events: AsyncGenerator<ExperienceChatEvent>,
+      events: AsyncGenerator<RuntimeEvent>,
       controller: AbortController,
       silentError = false,
-      onEvent?: (event: ExperienceChatEvent) => void
+      onEvent?: (event: RuntimeEvent) => void
     ) => {
       try {
         for await (const event of events) {
@@ -142,7 +145,7 @@ export function ExperienceAiChatProvider({
           applyEvent(event);
           // 同一个网络包里可能包含多个 delta。让出一个浏览器任务，避免 React
           // 将它们全部批处理成一次最终渲染，保证文本仍然逐段可见。
-          if (event.event === 'assistant.delta') await yieldToRenderer();
+          if (event.type === 'output.delta') await yieldToRenderer();
         }
       } catch (reason) {
         if (!controller.signal.aborted) {
@@ -227,8 +230,9 @@ export function ExperienceAiChatProvider({
       const controller = new AbortController();
       streamRef.current = controller;
       await consume(
-        resolveExperienceProposal(
-          currentProposal.proposal_id,
+        resolveExperienceInteraction(
+          currentProposal.run_id,
+          currentProposal.interaction_id,
           decision,
           clientId('resolution'),
           controller.signal
@@ -236,7 +240,7 @@ export function ExperienceAiChatProvider({
         controller,
         true,
         (event) => {
-          if (event.event === 'proposal.resolved') accepted = true;
+          if (event.type === 'interaction.resolved') accepted = true;
         }
       );
       if (!controller.signal.aborted) setPhase(accepted ? 'ready' : 'approval');
@@ -246,8 +250,11 @@ export function ExperienceAiChatProvider({
 
   useEffect(() => () => void close('left_page'), [close]);
 
-  const value = useMemo<ExperienceAiChatValue>(
-    () => ({
+  const value = useMemo<ExperienceAiChatValue>(() => {
+    const result = lastBusinessEvent?.payload.result;
+    const lastBusinessResult =
+      result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+    return {
       phase,
       scope,
       messages,
@@ -255,6 +262,7 @@ export function ExperienceAiChatProvider({
       input,
       error,
       lastBusinessEvent,
+      lastBusinessResult,
       setInput,
       start,
       send,
@@ -262,9 +270,20 @@ export function ExperienceAiChatProvider({
       close,
       isScopeLocked: (candidate) =>
         phase === 'approval' && sameChangeScope(proposal?.proposal.scope ?? null, candidate),
-    }),
-    [close, error, input, lastBusinessEvent, messages, phase, proposal, resolve, send, start, scope]
-  );
+    };
+  }, [
+    close,
+    error,
+    input,
+    lastBusinessEvent,
+    messages,
+    phase,
+    proposal,
+    resolve,
+    send,
+    start,
+    scope,
+  ]);
   return (
     <ExperienceAiChatContext.Provider value={value}>{children}</ExperienceAiChatContext.Provider>
   );

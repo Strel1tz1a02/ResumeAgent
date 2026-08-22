@@ -7,27 +7,33 @@ import json
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
-from types import SimpleNamespace
-from typing import NotRequired, get_origin, get_type_hints
+from typing import get_type_hints
 
 import pytest
 from langchain_core.messages import AIMessageChunk
 from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.checkpoint import CheckpointLifecycle
+from app.ai_chat.context import ContextAssembler
 from app.ai_chat.errors import (
     IdempotencyConflictError,
-    ProposalStateError,
+    InteractionStateError,
     RunInProgressError,
     ToolProtocolError,
 )
-from app.ai_chat.graph.runner import GraphRecovery, GraphRunner
+from app.ai_chat.graph import GraphRecovery, LangGraphDriver
+from app.ai_chat.graph.runner import GraphRunner
 from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.protocol import (
+    GraphOutcome,
+    InteractionRequest,
+    ResolveInteractionCommand,
+)
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.repositories.run_repository import RunRepository
 from app.ai_chat.services import AiChatService, ToolService
 from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
-from app.ai_chat.streaming.events import AiChatEvent, tool_result_event
+from app.ai_chat.streaming.events import RuntimeEvent, tool_result_event
 from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
 from app.ai_chat.tools.operation import RegisteredTool
 from app.ai_chat.tools.types import (
@@ -93,8 +99,21 @@ class _PassthroughMemoryService:
         return '{"memory":{},"runs":[]}'
 
 
+def _context() -> ContextAssembler:
+    return ContextAssembler(_PassthroughMemoryService())  # type: ignore[arg-type]
+
+
 def _tool_service(session_factory, repositories):  # type: ignore[no-untyped-def]
     return ToolService(ToolCallStore(session_factory, repositories))
+
+
+def _model_context():  # type: ignore[no-untyped-def]
+    return {
+        "instructions": "test",
+        "domain_sections": [],
+        "messages": [],
+        "pending_tool_results": [],
+    }
 
 
 class _ConversationModel:
@@ -174,7 +193,7 @@ class _ProposalStateFailingOperation(ContentChangeOperation):
 
     async def execute(self, context, prepared_data):  # type: ignore[no-untyped-def]
         self.execute_count += 1
-        raise ProposalStateError("executor checkpoint state is invalid")
+        raise InteractionStateError("executor checkpoint state is invalid")
 
 
 @dataclass(frozen=True)
@@ -211,7 +230,7 @@ async def _start_graph_harness(
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, repositories),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)
@@ -240,8 +259,37 @@ async def _request_proposal(harness: _GraphHarness, message_id: str) -> int:
             message_id,
         )
     ]
-    proposal = next(event for event in events if event.event == "proposal.requested")
-    return int(proposal.data["proposal_id"])
+    requested = next(event for event in events if event.type == "interaction.requested")
+    assert requested.payload["kind"] == "approval"
+    return int(requested.payload["interaction_id"])
+
+
+async def _interaction_run_id(harness: _GraphHarness, interaction_id: int) -> int:
+    from app import database as database_module
+
+    async with database_module.db.session() as session:
+        row = await harness.repositories.create(session).tool_calls.get(interaction_id)
+    assert row is not None
+    return row.run_id
+
+
+async def _resolve_approval(
+    harness: _GraphHarness,
+    interaction_id: int,
+    decision: str,
+    resolution_id: str,
+):  # type: ignore[no-untyped-def]
+    run_id = await _interaction_run_id(harness, interaction_id)
+    async for event in harness.service.resolve_interaction(
+        ResolveInteractionCommand(
+            run_id=run_id,
+            interaction_id=interaction_id,
+            kind="approval",
+            client_resolution_id=resolution_id,
+            payload={"decision": decision},
+        )
+    ):
+        yield event
 
 
 class _ResultOnlyResumeRunner:
@@ -249,28 +297,31 @@ class _ResultOnlyResumeRunner:
 
     proposal_id: int | None = None
 
-    async def resume_value(self, **kwargs):  # type: ignore[no-untyped-def]
-        assert kwargs["value"]["decision"] == "reject"
-        assert kwargs["value"]["client_resolution_id"] == "future-resolution"
-        yield AiChatEvent(
-            "proposal.resolved",
-            {"proposal_id": kwargs["value"]["tool_call_id"], "decision": "reject"},
+    async def resume(self, **kwargs):  # type: ignore[no-untyped-def]
+        command = kwargs["command"]
+        assert command.interaction_id == self.proposal_id
+        yield RuntimeEvent(
+            "result.available",
+            {
+                "kind": "tool_result",
+                "tool_call_id": command.interaction_id,
+                "outcome": "rejected",
+                "result": {"outcome": "rejected"},
+            },
         )
-        yield AiChatEvent("content_change.rejected", {"outcome": "rejected"})
+        yield GraphOutcome.completed()
 
-    async def get_state(self, **kwargs):  # type: ignore[no-untyped-def]
-        return SimpleNamespace(
-            values={
-                "tool_call": {
-                    "tool_call_id": self.proposal_id,
-                    "status": "awaiting_approval",
-                },
-                "approval": None,
-            }
+    async def recover(self, **kwargs):  # type: ignore[no-untyped-def]
+        assert self.proposal_id is not None
+        return GraphRecovery(
+            outcome=GraphOutcome.waiting(
+                InteractionRequest(
+                    interaction_id=self.proposal_id,
+                    kind="approval",
+                    payload={"proposal": {}},
+                )
+            )
         )
-
-    async def advance_to_boundary(self, **kwargs):  # type: ignore[no-untyped-def]
-        return GraphRecovery(interrupted=True)
 
 
 async def test_create_initializes_states_and_group_revision(isolated_db) -> None:
@@ -640,7 +691,9 @@ async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> No
             "pending_tool_results": [],
         }
     )
-    assert f'"id": {evidence.id}' in str(state["model_messages"][1]["content"])
+    assert str(evidence.id) in str(
+        state["model_context"]["domain_sections"][0]["data"]
+    )
     assert state["revision_snapshot"] == {
         "scope": "evidence",
         "collection_revision": 1,
@@ -656,7 +709,7 @@ async def test_graph_separates_validator_guard_approval_and_executor(
     runtime = AiChatRuntime(
         _UnusedModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, RepositoryFactory()),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
     graph = adapter.build_graph(runtime)
     assert tuple(adapter.get_tools()) == ("content_change",)
@@ -723,7 +776,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
         )
         assert await repositories.tool_calls.save_validation(
             row,
-            proposal_payload={"suggested_content": "新背景"},
+            interaction_payload={"suggested_content": "新背景"},
             guard_payload={"trusted": True},
         )
         await session.commit()
@@ -744,7 +797,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
     medium_runtime = AiChatRuntime(
         _UnusedModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, RepositoryFactory()),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     ).bind_tools(
         {"content_change": RegisteredTool(ContentChangeOperation())},
         ToolApprovalPolicy({"content_change": ToolRisk.MEDIUM}),
@@ -757,7 +810,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={},
-        model_messages=[],
+        model_context=_model_context(),
         raw_tool_call=None,
         tool_call=checkpoint_call,
     )
@@ -793,7 +846,7 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, RepositoryFactory()),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     ).bind_tools(
         {handler.name: RegisteredTool(handler)},
         ToolApprovalPolicy({handler.name: ToolRisk.LOW}),
@@ -813,17 +866,24 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
                 run_kind="user_turn",
                 tools_enabled=True,
                 revision_snapshot={"scope": "field", "revision": revision},
-                model_messages=[],
+                model_context=_model_context(),
                 tool_call=None,
-                approval=None,
             ),
             stream_mode=["custom", "updates"],
             version="v2",
         )
     ]
-    events = [part["data"]["event"] for part in parts if part.get("type") == "custom"]
-    assert "proposal.requested" not in events
-    assert "content_change.applied" in events
+    events = [
+        item
+        for part in parts
+        if isinstance((item := LangGraphDriver.normalize(part)), RuntimeEvent)
+    ]
+    assert not any(event.type == "interaction.requested" for event in events)
+    assert any(
+        event.type == "result.available"
+        and event.payload.get("outcome") == "applied"
+        for event in events
+    )
     async with isolated_db.session() as session:
         detail = await ExperienceService(session).get(created.experience_id)
         row = (
@@ -864,7 +924,7 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, RepositoryFactory()),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
     graph = build_experience_graph(runtime).compile()
     state = ExperienceState(
@@ -875,9 +935,8 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": revision},
-        model_messages=[],
+        model_context=_model_context(),
         tool_call=None,
-        approval=None,
     )
     parts = [
         part
@@ -888,9 +947,10 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
         )
     ]
     assert any(
-        part.get("type") == "custom"
-        and part.get("data", {}).get("event") == "content_change.no_change"
-        and isinstance(part["data"]["data"]["tool_call_id"], int)
+        isinstance((item := LangGraphDriver.normalize(part)), RuntimeEvent)
+        and item.type == "result.available"
+        and item.payload.get("outcome") == "no_change"
+        and isinstance(item.payload.get("tool_call_id"), int)
         for part in parts
     )
 
@@ -944,7 +1004,7 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
         )
         assert await repos.tool_calls.save_validation(
             call,
-            proposal_payload={"suggested_content": "不会被应用"},
+            interaction_payload={"suggested_content": "不会被应用"},
             guard_payload={},
         )
         assert await repos.tool_calls.claim_approval_request(call.id)
@@ -954,15 +1014,20 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
 
     events = [
         event
-        async for event in service.resolve_proposal(
-            proposal_id,
-            "reject",
-            "future-resolution",
+        async for event in service.resolve_interaction(
+            ResolveInteractionCommand(
+                run_id=run.id,
+                interaction_id=proposal_id,
+                kind="approval",
+                client_resolution_id="future-resolution",
+                payload={"decision": "reject"},
+            )
         )
     ]
-    assert [event.event for event in events] == [
-        "proposal.resolved",
-        "content_change.rejected",
+    assert [event.type for event in events] == [
+        "interaction.resolved",
+        "result.available",
+        "run.completed",
     ]
     async with isolated_db.session() as session:
         repos = repositories.create(session)
@@ -983,9 +1048,8 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": 0},
-        model_messages=[],
+        model_context=_model_context(),
         tool_call=None,
-        approval=None,
     )
     handler = ContentChangeOperation()
     assert state["revision_snapshot"]["revision"] == 0
@@ -1004,10 +1068,9 @@ def test_experience_state_has_only_the_unified_tool_fields() -> None:
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": 0},
-        model_messages=[],
+        model_context=_model_context(),
         raw_tool_call=None,
         tool_call=None,
-        approval=None,
     )
     assert json.loads(json.dumps(state)) == state
     hints = get_type_hints(ExperienceState, include_extras=True)
@@ -1018,7 +1081,7 @@ def test_experience_state_has_only_the_unified_tool_fields() -> None:
         "tool_security",
         "tool_finished",
     }.intersection(hints)
-    assert get_origin(hints["approval"]) is NotRequired
+    assert "approval" not in hints
 
 
 def test_dsml_compatibility_recovers_atomic_tool_call() -> None:
@@ -1080,9 +1143,8 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         run_kind="user_turn",
         tools_enabled=True,
         revision_snapshot={"scope": "field", "revision": revision},
-        model_messages=[],
+        model_context=_model_context(),
         tool_call=None,
-        approval=None,
     )
 
     async def requested_id(provider_id: str) -> int:
@@ -1090,7 +1152,7 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         runtime = AiChatRuntime(
             _ConversationModel(provider_id),  # type: ignore[arg-type]
             _tool_service(isolated_db.session, RepositoryFactory()),
-            _PassthroughMemoryService(),  # type: ignore[arg-type]
+            _context(),
         ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
         graph = build_experience_graph(runtime).compile()
         parts = [
@@ -1101,13 +1163,13 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
                 version="v2",
             )
         ]
-        requested = next(
-            part
+        outcome = next(
+            item
             for part in parts
-            if part.get("type") == "custom"
-            and part.get("data", {}).get("event") == "proposal.requested"
+            if isinstance((item := LangGraphDriver.normalize(part)), GraphOutcome)
         )
-        return int(requested["data"]["data"]["proposal_id"])
+        assert outcome.interaction is not None
+        return outcome.interaction.interaction_id
 
     first_id = await requested_id("first-provider-id")
     replay_id = await requested_id("retry-generated-id")
@@ -1221,6 +1283,8 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(
             "2026_08_13_jd_import_origin",
             "2026_08_14_ai_chat_tool_input_state",
             "2026_08_16_ai_chat_tool_call_origin",
+            "2026_08_17_ai_chat_interaction_payload",
+            "2026_08_17_resume_generation_run_lifecycle",
         }
     assert evidence_field_keys == {"background", "action", "result"}
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
@@ -1414,7 +1478,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, repositories),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)
@@ -1428,13 +1492,13 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         events = []
         async for event in stream:
             events.append(event)
-            if event.event == "proposal.requested":
+            if event.type == "interaction.requested":
                 break
         await stream.aclose()
         proposal = next(
-            event for event in events if event.event == "proposal.requested"
+            event for event in events if event.type == "interaction.requested"
         )
-        proposal_id = int(proposal.data["proposal_id"])
+        proposal_id = int(proposal.payload["interaction_id"])
         async with isolated_db.session() as session:
             current_run = (
                 await RepositoryFactory().create(session).runs.current(conversation_id)
@@ -1443,20 +1507,31 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         assert current_run.status == "suspended"
         continued = [
             event
-            async for event in service.resolve_proposal(
-                proposal_id, "approve", "resolution-1"
+            async for event in service.resolve_interaction(
+                ResolveInteractionCommand(
+                    run_id=current_run.id,
+                    interaction_id=proposal_id,
+                    kind="approval",
+                    client_resolution_id="resolution-1",
+                    payload={"decision": "approve"},
+                )
             )
         ]
-        assert any(event.event == "proposal.resolved" for event in continued)
+        assert any(event.type == "interaction.resolved" for event in continued)
         resolution = next(
-            event for event in continued if event.event == "proposal.resolved"
+            event for event in continued if event.type == "interaction.resolved"
         )
-        assert resolution.data == {
-            "proposal_id": proposal_id,
-            "decision": "approve",
+        assert resolution.payload == {
+            "interaction_id": proposal_id,
+            "kind": "approval",
+            "outcome": "approve",
         }
-        assert any(event.event == "content_change.applied" for event in continued)
-        assert not any(event.event.startswith("assistant.") for event in continued)
+        assert any(
+            event.type == "result.available"
+            and event.payload.get("outcome") == "applied"
+            for event in continued
+        )
+        assert not any(event.type == "output.delta" for event in continued)
         graph = runner._compiled(adapter)
         snapshot = await graph.aget_state(
             {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
@@ -1464,11 +1539,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         checkpoint_call = snapshot.values["tool_call"]
         assert "decision" not in checkpoint_call
         assert "client_resolution_id" not in checkpoint_call
-        assert snapshot.values["approval"] == {
-            "tool_call_id": proposal_id,
-            "decision": "approve",
-            "client_resolution_id": "resolution-1",
-        }
+        assert "approval" not in snapshot.values
         async with isolated_db.session() as session:
             detail = await ExperienceService(session).get(created.experience_id)
         assert detail.background == "新背景"
@@ -1492,24 +1563,24 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             await session.rollback()
         replayed_resolution = [
             event
-            async for event in service.resolve_proposal(
-                proposal_id,
-                "approve",
-                "resolution-1",
+            async for event in service.resolve_interaction(
+                ResolveInteractionCommand(
+                    run_id=current_run.id,
+                    interaction_id=proposal_id,
+                    kind="approval",
+                    client_resolution_id="resolution-1",
+                    payload={"decision": "approve"},
+                )
             )
         ]
-        assert [event.event for event in replayed_resolution] == ["proposal.resolved"]
-        assert replayed_resolution[0].data == {
-            "proposal_id": proposal_id,
-            "decision": "approve",
-        }
+        assert [event.type for event in replayed_resolution] == ["command.replayed"]
         follow_up = [
             event
             async for event in service.stream_message(
                 conversation_id, "继续", "message-2"
             )
         ]
-        assert any(event.event == "assistant.completed" for event in follow_up)
+        assert any(event.type == "run.completed" for event in follow_up)
         async with isolated_db.session() as session:
             delivered_call = (
                 await RepositoryFactory().create(session).tool_calls.get(proposal_id)
@@ -1535,7 +1606,7 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
     runtime = AiChatRuntime(
         _ConversationModel(),  # type: ignore[arg-type]
         _tool_service(isolated_db.session, repositories),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _context(),
     )
     runner = GraphRunner(registry, saver, runtime)
     service = AiChatService(registry, runner, repositories)
@@ -1554,24 +1625,31 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
             )
         ]
         proposal = next(
-            event for event in events if event.event == "proposal.requested"
+            event for event in events if event.type == "interaction.requested"
         )
-        proposal_id = int(proposal.data["proposal_id"])
+        proposal_id = int(proposal.payload["interaction_id"])
+        assert isinstance(proposal.run_id, int)
         resolved = [
             event
-            async for event in service.resolve_proposal(
-                proposal_id,
-                "reject",
-                "reject-resolution",
+            async for event in service.resolve_interaction(
+                ResolveInteractionCommand(
+                    run_id=proposal.run_id,
+                    interaction_id=proposal_id,
+                    kind="approval",
+                    client_resolution_id="reject-resolution",
+                    payload={"decision": "reject"},
+                )
             )
         ]
-        assert [event.event for event in resolved] == [
-            "proposal.resolved",
-            "content_change.rejected",
+        assert [event.type for event in resolved] == [
+            "interaction.resolved",
+            "result.available",
+            "run.completed",
         ]
-        assert resolved[0].data == {
-            "proposal_id": proposal_id,
-            "decision": "reject",
+        assert resolved[0].payload == {
+            "interaction_id": proposal_id,
+            "kind": "approval",
+            "outcome": "reject",
         }
         async with isolated_db.session() as session:
             detail = await ExperienceService(session).get(created.experience_id)
@@ -1603,14 +1681,15 @@ async def test_failed_executor_second_identical_approval_heals(
         proposal_id = await _request_proposal(harness, "retry-identical-message")
         first = [
             event
-            async for event in harness.service.resolve_proposal(
+            async for event in _resolve_approval(
+                harness,
                 proposal_id,
                 "approve",
                 "r1",
             )
         ]
-        assert [event.event for event in first] == ["run.failed"]
-        assert first[0].data == {"code": "proposal_finalize_failed"}
+        assert [event.type for event in first] == ["interaction.resolved", "run.failed"]
+        assert first[-1].payload == {"code": "interaction_finalize_failed"}
         async with isolated_db.session() as session:
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
         assert row is not None
@@ -1622,19 +1701,22 @@ async def test_failed_executor_second_identical_approval_heals(
 
         second = [
             event
-            async for event in harness.service.resolve_proposal(
+            async for event in _resolve_approval(
+                harness,
                 proposal_id,
                 "approve",
                 "r1",
             )
         ]
-        assert [event.event for event in second] == [
-            "proposal.resolved",
-            "content_change.applied",
+        assert [event.type for event in second] == [
+            "interaction.resolved",
+            "result.available",
+            "run.completed",
         ]
-        assert second[0].data == {
-            "proposal_id": proposal_id,
-            "decision": "approve",
+        assert second[0].payload == {
+            "interaction_id": proposal_id,
+            "kind": "approval",
+            "outcome": "approve",
         }
         assert handler.execute_count == 2
         async with isolated_db.session() as session:
@@ -1662,19 +1744,21 @@ async def test_failed_executor_second_different_resolution_conflicts(
         proposal_id = await _request_proposal(harness, "retry-conflict-message")
         first = [
             event
-            async for event in harness.service.resolve_proposal(
+            async for event in _resolve_approval(
+                harness,
                 proposal_id,
                 "approve",
                 "r1",
             )
         ]
-        assert [event.event for event in first] == ["run.failed"]
+        assert [event.type for event in first][-1] == "run.failed"
         assert handler.execute_count == 1
 
         with pytest.raises(IdempotencyConflictError):
             _ = [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "reject",
                     "r2",
@@ -1711,15 +1795,15 @@ async def test_repeated_executor_failures_each_yield_one_run_failed(
         for _ in range(2):
             events = [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
                 )
             ]
-            assert [(event.event, event.data) for event in events] == [
-                ("run.failed", {"code": "proposal_finalize_failed"})
-            ]
+            assert events[-1].type == "run.failed"
+            assert events[-1].payload == {"code": "interaction_finalize_failed"}
         assert handler.execute_count == 2
         async with isolated_db.session() as session:
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
@@ -1729,95 +1813,17 @@ async def test_repeated_executor_failures_each_yield_one_run_failed(
         await harness.checkpoints.close()
 
 
-async def test_recovery_rejects_incomplete_checkpoint_approval(
-    isolated_db,
-    tmp_path,
-) -> None:
-    """自动推进前拒绝缺少任一审批身份字段的检查点。"""
-    handler = _FailingContentChangeOperation(failures=0)
-    harness = await _start_graph_harness(
-        isolated_db,
-        tmp_path / "incomplete-checkpoint-approval.db",
-        handler=handler,
-    )
-    try:
-        proposal_id = await _request_proposal(harness, "incomplete-approval-message")
-        graph = harness.runner._compiled(harness.adapter)
-        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
-        await graph.aupdate_state(
-            config,
-            {
-                "approval": {
-                    "tool_call_id": proposal_id,
-                    "decision": "approve",
-                },
-            },
-            as_node="executor",
-        )
-        snapshot = await harness.runner.get_state(
-            adapter_name=harness.adapter.adapter_name(),
-            conversation_id=harness.conversation_id,
-        )
-        with pytest.raises(IdempotencyConflictError):
-            harness.service._validate_approval_checkpoint(
-                snapshot,
-                {
-                    "tool_call_id": proposal_id,
-                    "decision": "approve",
-                    "client_resolution_id": "r1",
-                },
-            )
-        assert handler.execute_count == 0
-    finally:
-        await harness.checkpoints.close()
-
-
-async def test_recovery_rejects_different_checkpoint_approval_before_executor(
-    isolated_db,
-    tmp_path,
-) -> None:
-    """检查点中的 approve/r1 不能被传入的 reject/r2 自动执行。"""
-    handler = _FailingContentChangeOperation(failures=0)
-    harness = await _start_graph_harness(
-        isolated_db,
-        tmp_path / "different-checkpoint-approval.db",
-        handler=handler,
-    )
-    try:
-        proposal_id = await _request_proposal(harness, "different-approval-message")
-        graph = harness.runner._compiled(harness.adapter)
-        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
-        await graph.aupdate_state(
-            config,
-            {
-                "approval": {
-                    "tool_call_id": proposal_id,
-                    "decision": "approve",
-                    "client_resolution_id": "r1",
-                },
-            },
-            as_node="executor",
-        )
-        snapshot = await harness.runner.get_state(
-            adapter_name=harness.adapter.adapter_name(),
-            conversation_id=harness.conversation_id,
-        )
-        with pytest.raises(IdempotencyConflictError):
-            harness.service._validate_approval_checkpoint(
-                snapshot,
-                {
-                    "tool_call_id": proposal_id,
-                    "decision": "reject",
-                    "client_resolution_id": "r2",
-                },
-            )
-        assert handler.execute_count == 0
-        async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
-        assert row is not None
-        assert row.status == "awaiting_approval"
-    finally:
-        await harness.checkpoints.close()
+def test_runtime_never_interprets_domain_checkpoint_fields() -> None:
+    """恢复只依赖结构化 Interrupt；Runtime 不认识 approval 等领域 State key。"""
+    source = (
+        Path(__file__).parents[2]
+        / "app"
+        / "ai_chat"
+        / "services"
+        / "ai_chat_service.py"
+    ).read_text(encoding="utf-8")
+    assert "_validate_approval_checkpoint" not in source
+    assert 'values["approval"]' not in source
 
 
 @pytest.mark.parametrize("run_status", ["running", "failed"])
@@ -1835,39 +1841,42 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
     )
     try:
         proposal_id = await _request_proposal(harness, "undelivered-event-message")
-        approval = {
-            "tool_call_id": proposal_id,
-            "decision": "approve",
-            "client_resolution_id": "r1",
-        }
+        run_id = await _interaction_run_id(harness, proposal_id)
+        command = ResolveInteractionCommand(
+            run_id=run_id,
+            interaction_id=proposal_id,
+            kind="approval",
+            client_resolution_id="r1",
+            payload={"decision": "approve"},
+        )
+        resolution = await harness.adapter.resolve_interaction(
+            harness.service._tool_calls(harness.adapter.adapter_name()),
+            command,
+        )
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
-            assert row is not None
             assert await repositories.runs.transition(
-                row.run_id,
+                run_id,
                 from_statuses={"suspended"},
                 to_status="running",
             )
             await session.commit()
 
         undelivered = [
-            event
-            async for event in harness.runner.resume_value(
+            item
+            async for item in harness.runner.resume(
                 adapter_name=harness.adapter.adapter_name(),
                 conversation_id=harness.conversation_id,
-                value=approval,
+                command=resolution.resume,
             )
         ]
-        assert [event.event for event in undelivered] == [
-            "proposal.requested",
-            "proposal.resolved",
-            "content_change.applied",
-        ]
-        assert undelivered[1].data == {
-            "proposal_id": proposal_id,
-            "decision": "approve",
-        }
+        assert isinstance(undelivered[-1], GraphOutcome)
+        result_event = next(
+            item
+            for item in undelivered
+            if isinstance(item, RuntimeEvent) and item.type == "result.available"
+        )
+        assert result_event.payload["outcome"] == "applied"
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
@@ -1884,23 +1893,20 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
 
         replayed = [
             event
-            async for event in harness.service.resolve_proposal(
+            async for event in _resolve_approval(
+                harness,
                 proposal_id,
                 "approve",
                 "r1",
             )
         ]
-        assert [event.event for event in replayed] == [
-            "proposal.resolved",
-            "content_change.applied",
+        assert [event.type for event in replayed] == [
+            "interaction.resolved",
+            "result.available",
+            "run.completed",
         ]
-        assert replayed[0].data == {
-            "proposal_id": proposal_id,
-            "decision": "approve",
-        }
-        assert replayed[1].data == undelivered[2].data
-        assert replayed[1].data["tool_call_id"] == proposal_id
-        assert replayed[1].data["outcome"] == "applied"
+        assert replayed[1].payload == result_event.payload
+        assert replayed[1].payload["tool_call_id"] == proposal_id
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             row = await harness.repositories.create(session).tool_calls.get(proposal_id)
@@ -1916,7 +1922,7 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
     isolated_db,
     tmp_path,
 ) -> None:
-    """暂停态检查点的身份冲突应在运行转为执行中之前失败。"""
+    """命令的 Run 身份冲突应在持久化 Resolution 之前失败。"""
     handler = _FailingContentChangeOperation(failures=0)
     harness = await _start_graph_harness(
         isolated_db,
@@ -1925,27 +1931,19 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
     )
     try:
         proposal_id = await _request_proposal(harness, "suspended-conflict-message")
-        graph = harness.runner._compiled(harness.adapter)
-        config = {"configurable": {"thread_id": f"ai-chat:{harness.conversation_id}"}}
-        snapshot = await graph.aget_state(config)
-        checkpoint_call = dict(snapshot.values["tool_call"])
-        await graph.aupdate_state(
-            config,
-            {
-                "tool_call": {
-                    **checkpoint_call,
-                    "tool_call_id": proposal_id + 100,
-                }
-            },
-        )
+        run_id = await _interaction_run_id(harness, proposal_id)
 
         with pytest.raises(IdempotencyConflictError):
             _ = [
                 event
-                async for event in harness.service.resolve_proposal(
-                    proposal_id,
-                    "approve",
-                    "r1",
+                async for event in harness.service.resolve_interaction(
+                    ResolveInteractionCommand(
+                        run_id=run_id + 1,
+                        interaction_id=proposal_id,
+                        kind="approval",
+                        client_resolution_id="r1",
+                        payload={"decision": "approve"},
+                    )
                 )
             ]
         assert handler.execute_count == 0
@@ -1968,8 +1966,10 @@ def test_tool_result_event_uses_persisted_tool_call_identity() -> None:
         tool_call_id=7,
         result={"outcome": "applied", "tool_call_id": 999},
     )
-    assert event.event == "content_change.applied"
-    assert event.data == {"outcome": "applied", "tool_call_id": 7}
+    assert event.type == "result.available"
+    assert event.payload["tool_call_id"] == 7
+    assert event.payload["outcome"] == "applied"
+    assert event.payload["result"] == {"outcome": "applied", "tool_call_id": 999}
 
 
 async def test_cancelled_resolution_converges_claimed_run(
@@ -1986,10 +1986,11 @@ async def test_cancelled_resolution_converges_claimed_run(
     try:
         proposal_id = await _request_proposal(harness, "cancelled-resolution-message")
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
@@ -2026,7 +2027,7 @@ async def test_second_cancellation_cannot_interrupt_run_cleanup(
         tmp_path / "second-cancel-cleanup.db",
         handler=handler,
     )
-    task: asyncio.Task[list[AiChatEvent]] | None = None
+    task: asyncio.Task[list[RuntimeEvent]] | None = None
     release_cleanup = asyncio.Event()
     try:
         proposal_id = await _request_proposal(harness, "second-cancel-cleanup")
@@ -2059,10 +2060,11 @@ async def test_second_cancellation_cannot_interrupt_run_cleanup(
                 error_code=error_code,
             )
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
@@ -2109,11 +2111,11 @@ async def test_active_running_owner_blocks_second_resolution(
         tmp_path / "active-running-owner.db",
         handler=handler,
     )
-    task_a: asyncio.Task[list[AiChatEvent]] | None = None
+    task_a: asyncio.Task[list[RuntimeEvent]] | None = None
     release_a_resume = asyncio.Event()
     try:
         proposal_id = await _request_proposal(harness, "active-running-owner")
-        original_resume = harness.runner.resume_value
+        original_resume = harness.runner.resume
         a_before_resume = asyncio.Event()
 
         async def paused_resume(**kwargs):  # type: ignore[no-untyped-def]
@@ -2123,22 +2125,23 @@ async def test_active_running_owner_blocks_second_resolution(
             async for event in original_resume(**kwargs):
                 yield event
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
                 )
             ]
 
-        monkeypatch.setattr(harness.runner, "resume_value", paused_resume)
+        monkeypatch.setattr(harness.runner, "resume", paused_resume)
         task_a = asyncio.create_task(resolve(), name="active-resolution-owner-a")
         await a_before_resume.wait()
 
         blocked = False
-        second_events: list[AiChatEvent] = []
+        second_events: list[RuntimeEvent] = []
         try:
             second_events = await resolve()
         except RunInProgressError:
@@ -2149,9 +2152,9 @@ async def test_active_running_owner_blocks_second_resolution(
             row = await repositories.tool_calls.get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
-        assert blocked, [event.event for event in second_events]
+        assert blocked, [event.type for event in second_events]
         assert handler.execute_count == 0
-        assert row.status == "awaiting_approval"
+        assert row.status == "approved"
         assert run is not None
         assert run.status == "running"
     finally:
@@ -2175,8 +2178,8 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         tmp_path / "cancelled-uncommitted-claim.db",
         handler=handler,
     )
-    task_a: asyncio.Task[list[AiChatEvent]] | None = None
-    task_b: asyncio.Task[list[AiChatEvent]] | None = None
+    task_a: asyncio.Task[list[RuntimeEvent]] | None = None
+    task_b: asyncio.Task[list[RuntimeEvent]] | None = None
     release_a_commit = asyncio.Event()
     release_b_resume = asyncio.Event()
     try:
@@ -2184,7 +2187,7 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         original_commit = AsyncSession.commit
         original_close = AsyncSession.close
         original_transition = RunRepository.transition
-        original_resume = harness.runner.resume_value
+        original_resume = harness.runner.resume
         a_commit_entered = asyncio.Event()
         a_session_closed = asyncio.Event()
         b_before_resume = asyncio.Event()
@@ -2237,10 +2240,11 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
             async for event in original_resume(**kwargs):
                 yield event
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
@@ -2250,7 +2254,7 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         monkeypatch.setattr(AsyncSession, "commit", controlled_commit)
         monkeypatch.setattr(AsyncSession, "close", tracked_close)
         monkeypatch.setattr(RunRepository, "transition", controlled_transition)
-        monkeypatch.setattr(harness.runner, "resume_value", paused_resume)
+        monkeypatch.setattr(harness.runner, "resume", paused_resume)
 
         task_a = asyncio.create_task(resolve(), name="cancelled-claim-owner-a")
         await a_commit_entered.wait()
@@ -2269,7 +2273,8 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
             row = await repositories.tool_calls.get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
-        assert row.status == "awaiting_approval"
+        # Resolution 先于 Run claim 持久化；B 已拥有可重放的决定。
+        assert row.status == "approved"
         assert run is not None
         assert run.status == "running"
     finally:
@@ -2297,7 +2302,7 @@ async def test_cancelled_committed_claim_converges_its_run(
         tmp_path / "cancelled-committed-claim.db",
         handler=handler,
     )
-    task: asyncio.Task[list[AiChatEvent]] | None = None
+    task: asyncio.Task[list[RuntimeEvent]] | None = None
     release_commit = asyncio.Event()
     try:
         proposal_id = await _request_proposal(harness, "cancelled-claim-success")
@@ -2313,10 +2318,11 @@ async def test_cancelled_committed_claim_converges_its_run(
                 await release_commit.wait()
             await original_commit(session)
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
@@ -2339,7 +2345,8 @@ async def test_cancelled_committed_claim_converges_its_run(
             run = await repositories.runs.get(row.run_id)
         assert row.status == "awaiting_approval"
         assert run is not None
-        assert run.status == "cancelled"
+        # 取消发生在 Resolution 提交阶段，Graph 尚未认领 Run。
+        assert run.status == "suspended"
     finally:
         release_commit.set()
         if task is not None and not task.done():
@@ -2363,7 +2370,7 @@ async def test_durable_claim_survives_session_close_failure(
         tmp_path / "claim-close-failure.db",
         handler=handler,
     )
-    task: asyncio.Task[list[AiChatEvent]] | None = None
+    task: asyncio.Task[list[RuntimeEvent]] | None = None
     release_close = asyncio.Event()
     try:
         proposal_id = await _request_proposal(harness, "claim-close-failure")
@@ -2385,10 +2392,11 @@ async def test_durable_claim_survives_session_close_failure(
                 await release_close.wait()
                 raise RuntimeError("simulated claim session close failure")
 
-        async def resolve() -> list[AiChatEvent]:
+        async def resolve() -> list[RuntimeEvent]:
             return [
                 event
-                async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                     proposal_id,
                     "approve",
                     "r1",
@@ -2403,7 +2411,7 @@ async def test_durable_claim_survives_session_close_failure(
             task.cancel()
         release_close.set()
 
-        events: list[AiChatEvent] = []
+        events: list[RuntimeEvent] = []
         if cancel_outer:
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -2418,15 +2426,15 @@ async def test_durable_claim_survives_session_close_failure(
         if cancel_outer:
             assert events == []
             assert run is not None
-            assert run.status == "cancelled"
+            assert run.status == "suspended"
+            assert handler.execute_count == 0
+            assert row.status in {"awaiting_approval", "approved"}
         else:
-            assert [(event.event, event.data) for event in events] == [
-                ("run.failed", {"code": "proposal_finalize_failed"})
-            ]
+            assert events[-1].type == "run.completed"
             assert run is not None
-            assert run.status == "failed"
-        assert handler.execute_count == 0
-        assert row.status == "awaiting_approval"
+            assert run.status == "completed"
+            assert handler.execute_count == 1
+            assert row.status == "resolved"
     finally:
         release_close.set()
         if task is not None and not task.done():
@@ -2436,7 +2444,7 @@ async def test_durable_claim_survives_session_close_failure(
         await harness.checkpoints.close()
 
 
-async def test_postclaim_proposal_state_error_yields_one_run_failed(
+async def test_postclaim_interaction_state_error_yields_one_run_failed(
     isolated_db,
     tmp_path,
 ) -> None:
@@ -2451,15 +2459,15 @@ async def test_postclaim_proposal_state_error_yields_one_run_failed(
         proposal_id = await _request_proposal(harness, "postclaim-state-message")
         events = [
             event
-            async for event in harness.service.resolve_proposal(
+                async for event in _resolve_approval(
+                    harness,
                 proposal_id,
                 "approve",
                 "r1",
             )
         ]
-        assert [(event.event, event.data) for event in events] == [
-            ("run.failed", {"code": "proposal_finalize_failed"})
-        ]
+        assert events[-1].type == "run.failed"
+        assert events[-1].payload == {"code": "interaction_finalize_failed"}
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)

@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.ai_chat.protocol import RunStatus
 from app.schemas.models import ResumeData
 
 Importance = Literal["must", "should", "nice"]
@@ -266,7 +267,8 @@ class ResumeValidation(BaseModel):
 
 class ResumeGenerationPreview(BaseModel):
     run_id: str
-    status: Literal["previewed"] = "previewed"
+    status: Literal["completed"] = "completed"
+    artifact_status: Literal["previewed"] = "previewed"
     plan: ResumePlan
     resume_data: ResumeData
     provenance: ResumeProvenance
@@ -275,7 +277,8 @@ class ResumeGenerationPreview(BaseModel):
 
 class ResumeGenerationRunResponse(BaseModel):
     run_id: str
-    status: Literal["running", "previewed", "failed", "confirmed"]
+    status: RunStatus
+    artifact_status: Literal["pending", "previewed", "confirmed"]
     jd_information_id: int
     request: ResumeGenerationRequest
     jd_snapshot: JDAnalysisSnapshot | None = None
@@ -303,5 +306,6 @@ class ResumeGenerationConfirmRequest(BaseModel):
 
 class ResumeGenerationConfirmResponse(BaseModel):
     run_id: str
-    status: Literal["confirmed"] = "confirmed"
+    status: Literal["completed"] = "completed"
+    artifact_status: Literal["confirmed"] = "confirmed"
     resume_id: str

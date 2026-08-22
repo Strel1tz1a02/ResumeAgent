@@ -25,10 +25,9 @@ const chatApi = vi.hoisted(() => ({
   closeExperienceConversation: vi.fn(),
   streamExperienceOpening: vi.fn(),
   streamExperienceMessage: vi.fn(),
-  resolveExperienceProposal: vi.fn(),
-  eventExperienceDetail: vi.fn((event: { data: { experience?: unknown } }) =>
-    event.data.experience ? event.data.experience : null
-  ),
+  resolveExperienceInteraction: vi.fn(),
+  eventExperienceProposal: vi.fn(() => null),
+  eventExperienceDetail: vi.fn(() => null),
 }));
 
 const translate = vi.hoisted(
@@ -201,13 +200,14 @@ describe('ExperienceLibraryPage', () => {
     );
     chatApi.createExperienceConversation.mockResolvedValue({
       conversation_id: 12,
-      target: { key: 'background', ref_id: null },
+      scope: { field: 'background' },
       field_status: 'incomplete',
       revision: 0,
     });
     chatApi.closeExperienceConversation.mockResolvedValue(undefined);
     chatApi.streamExperienceOpening.mockImplementation(async function* () {
-      yield { event: 'assistant.completed', data: {} };
+      yield { type: 'run.started', run_id: 1, sequence: 1, payload: {} };
+      yield { type: 'run.completed', run_id: 1, sequence: 2, payload: {} };
     });
   });
 
@@ -291,7 +291,7 @@ describe('ExperienceLibraryPage', () => {
     api.fetchExperience.mockResolvedValue(detail);
     chatApi.createExperienceConversation.mockResolvedValue({
       conversation_id: 13,
-      target: { key: 'evidence', ref_id: null },
+      scope: { field: 'evidence' },
       field_status: 'complete',
       revision: 2,
     });

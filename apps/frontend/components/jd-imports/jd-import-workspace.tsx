@@ -22,13 +22,13 @@ import {
   updateJDImport,
   updateJDRequirement,
   type JDImport,
-  type JDImportEvent,
   type JDQuestionAnswer,
   type JDQuestionBatch,
   type JDRequirement,
   type JDRequirementPriority,
   type JDStatus,
 } from '@/lib/api/jd-imports';
+import type { RuntimeEvent } from '@/lib/api/runtime-events';
 import { useTranslations } from '@/lib/i18n';
 
 type WorkspaceView = 'import' | 'library';
@@ -68,14 +68,29 @@ function metadataDraft(item: JDImport): MetadataDraft {
   };
 }
 
-function eventQuestionBatch(event: JDImportEvent): JDQuestionBatch | null {
-  if (event.event !== 'jd.questions.requested') return null;
-  return event.data as unknown as JDQuestionBatch;
+function eventQuestionBatch(event: RuntimeEvent): JDQuestionBatch | null {
+  if (
+    event.type !== 'interaction.requested' ||
+    event.payload.kind !== 'question_batch' ||
+    typeof event.run_id !== 'number' ||
+    typeof event.payload.interaction_id !== 'number'
+  ) {
+    return null;
+  }
+  const request = event.payload.request;
+  if (!request || typeof request !== 'object') return null;
+  return {
+    ...(request as Omit<JDQuestionBatch, 'run_id' | 'interaction_id'>),
+    run_id: event.run_id,
+    interaction_id: event.payload.interaction_id,
+  };
 }
 
-function eventPersistedIds(event: JDImportEvent): number[] | null {
-  if (event.event !== 'jd.import.completed') return null;
-  const ids = event.data.persisted_ids;
+function eventPersistedIds(event: RuntimeEvent): number[] | null {
+  if (event.type !== 'result.available' || event.payload.kind !== 'jd_import') return null;
+  const result = event.payload.result;
+  const ids =
+    result && typeof result === 'object' ? (result as Record<string, unknown>).persisted_ids : null;
   return Array.isArray(ids) ? ids.filter((id): id is number => typeof id === 'number') : [];
 }
 
@@ -123,7 +138,7 @@ function ImportPanel({ onImported }: { onImported: (ids: number[]) => Promise<vo
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const consume = async (events: AsyncGenerator<JDImportEvent>) => {
+  const consume = async (events: AsyncGenerator<RuntimeEvent>) => {
     for await (const event of events) {
       const nextBatch = eventQuestionBatch(event);
       if (nextBatch) {
@@ -145,7 +160,7 @@ function ImportPanel({ onImported }: { onImported: (ids: number[]) => Promise<vo
         setState('completed');
         await onImported(persistedIds);
       }
-      if (event.event === 'run.failed' || event.event === 'jd.import.failed') {
+      if (event.type === 'run.failed') {
         throw new Error(t('jdImports.import.errors.execution'));
       }
     }
@@ -193,7 +208,8 @@ function ImportPanel({ onImported }: { onImported: (ids: number[]) => Promise<vo
     try {
       await consume(
         resolveJDQuestions(
-          conversationId,
+          batch.run_id,
+          batch.interaction_id,
           batch.batch_id,
           payload,
           clientId('jd-answer'),

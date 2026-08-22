@@ -97,7 +97,6 @@ def test_validate_batch_answer_requires_exact_question_set() -> None:
             batch,
             QuestionBatchAnswer(
                 batch_id="wrong",
-                client_resolution_id="resolution-1",
                 answers=[],
             ),
         )
@@ -106,7 +105,6 @@ def test_validate_batch_answer_requires_exact_question_set() -> None:
             batch,
             QuestionBatchAnswer(
                 batch_id=batch.batch_id,
-                client_resolution_id="resolution-1",
                 answers=[QuestionAnswer(question_id=first.question_id, value="jd-1")],
             ),
         )
@@ -123,7 +121,6 @@ def test_validate_batch_answer_creates_sources_and_ignores_skips() -> None:
     assert batch is not None
     answers = QuestionBatchAnswer(
         batch_id=batch.batch_id,
-        client_resolution_id="resolution-1",
         answers=[
             QuestionAnswer(question_id=batch.questions[0].question_id, value="Acme"),
             QuestionAnswer(question_id=batch.questions[1].question_id, skipped=True),

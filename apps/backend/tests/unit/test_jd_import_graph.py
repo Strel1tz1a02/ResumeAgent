@@ -2,10 +2,10 @@
 
 import json
 
-from langchain_core.messages import AIMessageChunk
-
+from app.ai_chat.context import ContextAssembler
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
+from app.ai_chat.protocol import GraphResumeCommand
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services.tool_service import ToolService
 from app.ai_chat.tools.store import ToolCallStore
@@ -16,6 +16,7 @@ from app.jd_import.agent.state import initial_state
 from app.jd_import.agent.types import CandidateJD, EvidenceFact, RequirementFact
 from app.jd_import.graph import JDImportGraphDependencies, build_jd_import_graph
 from app.jd_import.sources import PageSourceResult, UrlPolicy
+from langchain_core.messages import AIMessageChunk
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -61,6 +62,20 @@ class FakeExtractionModel:
 class FakePages:
     async def fetch(self, url):  # type: ignore[no-untyped-def]
         return PageSourceResult(status="fetched", final_url=url.url, text="extra")
+
+
+class EmptyPages:
+    async def fetch(self, url):  # type: ignore[no-untyped-def]
+        return PageSourceResult(
+            status="failed",
+            final_url=url.url,
+            error_code="source_empty_content",
+        )
+
+
+class NoExtractionOnEmptyModel(FakeExtractionModel):
+    async def extract(self, request):  # type: ignore[no-untyped-def]
+        raise AssertionError("empty URL source must not invoke extraction")
 
 
 class NoPlanningModel:
@@ -173,7 +188,11 @@ async def test_mixed_input_happy_path_completes(isolated_db) -> None:  # type: i
     tools = ToolService(
         ToolCallStore(isolated_db.session, RepositoryFactory())
     ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    runtime = AiChatRuntime(NoPlanningModel(), tools, MemoryService())  # type: ignore[arg-type]
+    runtime = AiChatRuntime(
+        NoPlanningModel(),  # type: ignore[arg-type]
+        tools,
+        ContextAssembler(MemoryService()),
+    )
     graph = build_jd_import_graph(runtime, dependencies).compile()
     raw = "Acme Engineer full-time Remote Python https://example.com/job"
     state = initial_state(
@@ -185,6 +204,55 @@ async def test_mixed_input_happy_path_completes(isolated_db) -> None:  # type: i
     result = await graph.ainvoke(state)
     assert len(result["result"]["persisted_ids"]) == 1
     assert result["result"]["errors"] == []
+
+
+async def test_empty_url_snapshot_finishes_with_source_error(isolated_db) -> None:  # type: ignore[no-untyped-def]
+    async with isolated_db.session() as session:
+        repositories = RepositoryFactory().create(session)
+        conversation = await repositories.conversations.create(
+            adapter="JDImportAdapter",
+            subject={"type": "jd_import", "id": "new"},
+            scope={},
+            language="zh",
+        )
+        run = await repositories.runs.create(
+            conversation_id=conversation.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        await session.commit()
+
+    dependencies = JDImportGraphDependencies(
+        model=NoExtractionOnEmptyModel(),
+        page_sources=EmptyPages(),
+        url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
+    )
+    adapter = JDImportAdapter(dependencies)
+    tools = ToolService(
+        ToolCallStore(isolated_db.session, RepositoryFactory())
+    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
+    runtime = AiChatRuntime(
+        NoPlanningModel(),  # type: ignore[arg-type]
+        tools,
+        ContextAssembler(MemoryService()),
+    )
+    graph = build_jd_import_graph(runtime, dependencies).compile()
+    raw = "https://jobs.example.com/1"
+    state = initial_state(
+        conversation_id=conversation.id,
+        run_id=run.id,
+        raw_input=raw,
+        parsed=parse_mixed_input(raw),
+    )
+
+    result = await graph.ainvoke(state)
+
+    assert result["result"] == {
+        "persisted_ids": [],
+        "errors": [{"code": "source_empty_content", "jd_key": None}],
+    }
+    assert result["sources"][0]["url_status"] == "failed"
+    assert result["sources"][0]["url_error_code"] == "source_empty_content"
 
 
 async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> None:  # type: ignore[no-untyped-def]
@@ -212,7 +280,11 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
     tools = ToolService(
         ToolCallStore(isolated_db.session, RepositoryFactory())
     ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    runtime = AiChatRuntime(QuestionPlanningModel(), tools, MemoryService())  # type: ignore[arg-type]
+    runtime = AiChatRuntime(
+        QuestionPlanningModel(),  # type: ignore[arg-type]
+        tools,
+        ContextAssembler(MemoryService()),
+    )
     graph = build_jd_import_graph(runtime, dependencies).compile(
         checkpointer=MemorySaver()
     )
@@ -229,7 +301,7 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
     snapshot = await graph.aget_state(config)
     tool_call_id = snapshot.values["question_tool_call_id"]
     call = await tools.get_call(tool_call_id)
-    batch = call["proposal_payload"]
+    batch = call["interaction_payload"]
     assert call["status"] == "awaiting_input"
     assert call["provider_id"] == "jd-import:questions:1"
 
@@ -237,9 +309,7 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
         tool_call_id,
         "answer-1",
         {
-            "type": "question_batch_answer",
             "batch_id": batch["batch_id"],
-            "client_resolution_id": "answer-1",
             "answers": [
                 {
                     "question_id": batch["questions"][0]["question_id"],
@@ -250,7 +320,12 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
         },
     )
     result = await graph.ainvoke(
-        Command(resume={"tool_call_id": tool_call_id}), config=config
+        Command(
+            resume=GraphResumeCommand(
+                run_id=state["run_id"], interaction_id=tool_call_id
+            ).resume_value()
+        ),
+        config=config,
     )
 
     assert len(result["result"]["persisted_ids"]) == 1

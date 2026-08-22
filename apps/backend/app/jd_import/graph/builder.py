@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -11,8 +11,11 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from app.ai_chat.context import ModelContext
 from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
+from app.ai_chat.protocol import GraphResumeCommand, InteractionRequest
+from app.ai_chat.streaming.events import RuntimeEvent
 from app.ai_chat.streaming.model import complete_tool_calls
 from app.ai_chat.tools.types import ToolContext
 from app.jd_import.agent.evidence import assess_candidates
@@ -38,6 +41,8 @@ from app.jd_import.agent.types import (
 )
 from app.jd_import.sources import PageSourceProvider, UrlPolicy
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class JDImportGraphDependencies:
@@ -47,7 +52,7 @@ class JDImportGraphDependencies:
 
 
 def _emit(event: str, data: dict[str, Any]) -> None:
-    get_stream_writer()({"event": event, "data": data})
+    get_stream_writer()(RuntimeEvent(event, data))
 
 
 def _tool_context(state: JDImportState, adapter_context: dict[str, Any]) -> ToolContext:
@@ -122,11 +127,41 @@ def build_jd_import_graph(
                     deps.url_policy.validate(source.source_url or "")
                 )
                 source.url_status = fetched.status
+                source.url_error_code = fetched.error_code
                 source.content = fetched.text
                 source.source_url = fetched.final_url or source.source_url
-            except ValueError:
+                if fetched.status != "fetched":
+                    logger.warning(
+                        "JD URL source unavailable: source_id=%s status=%s error_code=%s",
+                        source.source_id,
+                        fetched.status,
+                        fetched.error_code,
+                    )
+            except ValueError as error:
                 source.url_status = "blocked"
+                source.url_error_code = str(error)
+                logger.warning(
+                    "JD URL source blocked: source_id=%s error_code=%s",
+                    source.source_id,
+                    error,
+                )
         return {"sources": [item.model_dump(mode="json") for item in sources]}
+
+    def route_sources(state: JDImportState) -> Literal["extract", "source_failure"]:
+        sources = [ImportSource.model_validate(item) for item in state["sources"]]
+        return "extract" if any(item.content.strip() for item in sources) else "source_failure"
+
+    async def source_failure(state: JDImportState) -> dict[str, Any]:
+        sources = [ImportSource.model_validate(item) for item in state["sources"]]
+        error_code = next(
+            (item.url_error_code for item in sources if item.url_error_code),
+            "source_content_unavailable",
+        )
+        payload = ImportResult(
+            errors=[ImportErrorItem(code=error_code)]
+        ).model_dump(mode="json")
+        _emit("result.available", {"kind": "jd_import", "result": payload})
+        return {"result": payload}
 
     async def extract(state: JDImportState) -> dict[str, Any]:
         result = await deps.model.extract(
@@ -169,19 +204,20 @@ def build_jd_import_graph(
             "round": state["questions"]["round"],
             "asked_question_keys": state["questions"]["asked_question_keys"],
         }
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Review the complete JD state. Call ask_jd_questions once if "
-                    "clarification is useful; otherwise return without a Tool Call."
-                ),
-            },
-            {"role": "user", "content": json.dumps(snapshot, ensure_ascii=False)},
-        ]
+        context: ModelContext = {
+            "instructions": (
+                "Review the complete JD state. Call ask_jd_questions once if "
+                "clarification is useful; otherwise return without a Tool Call."
+            ),
+            "domain_sections": [{"name": "jd_import_state", "data": snapshot}],
+            "messages": [],
+            "pending_tool_results": [],
+        }
         response = AIMessageChunk(content="")
         async for chunk in planning_runtime.stream_model(
-            messages=messages, tools_enabled=True, max_tokens=4096
+            run_id=state["run_id"],
+            context=context,
+            tools_enabled=True,
         ):
             response += chunk
         calls = complete_tool_calls(response)
@@ -205,7 +241,7 @@ def build_jd_import_graph(
             expected_name="ask_jd_questions",
         )
         waiting = await planning_runtime.tools.request_input(call["tool_call_id"])
-        batch = QuestionBatch.model_validate(waiting["proposal_payload"])
+        batch = QuestionBatch.model_validate(waiting["interaction_payload"])
         questions = dict(state["questions"])
         questions["round"] = batch.round
         questions["asked_question_keys"] = [
@@ -226,10 +262,17 @@ def build_jd_import_graph(
             return {}
         if call["status"] != "awaiting_input":
             raise ToolProtocolError("Question Tool Call is not awaiting input")
-        batch = QuestionBatch.model_validate(call["proposal_payload"])
-        _emit("jd.questions.requested", batch.model_dump(mode="json"))
-        resumed = interrupt({"type": "question_batch", "batch_id": batch.batch_id})
-        if not isinstance(resumed, dict) or resumed.get("tool_call_id") != tool_call_id:
+        batch = QuestionBatch.model_validate(call["interaction_payload"])
+        resumed = GraphResumeCommand.from_value(
+            interrupt(
+                InteractionRequest(
+                    interaction_id=tool_call_id,
+                    kind="question_batch",
+                    payload=batch.model_dump(mode="json"),
+                ).interrupt_value()
+            )
+        )
+        if resumed.run_id != state["run_id"] or resumed.interaction_id != tool_call_id:
             raise ToolProtocolError("Question resume identity does not match")
         return {}
 
@@ -240,7 +283,7 @@ def build_jd_import_graph(
         call = await runtime.tools.get_call(tool_call_id)
         if call["status"] != "resolved" or call["result"] is None:
             raise ToolProtocolError("Question Tool Call has no durable answer")
-        batch = QuestionBatch.model_validate(call["proposal_payload"])
+        batch = QuestionBatch.model_validate(call["interaction_payload"])
         answer = QuestionBatchAnswer.model_validate(call["result"])
         additions = validate_batch_answer(batch, answer)
         await runtime.tools.consume_result(tool_call_id)
@@ -288,13 +331,14 @@ def build_jd_import_graph(
                 )
         result = ImportResult(persisted_ids=ids, errors=errors)
         payload = result.model_dump(mode="json")
-        _emit("jd.import.completed", payload)
+        _emit("result.available", {"kind": "jd_import", "result": payload})
         return {"result": payload}
 
     graph = StateGraph(JDImportState)
     for name, node in (
         ("parse_input", parse_input),
         ("resolve_urls", resolve_urls),
+        ("source_failure", source_failure),
         ("extract", extract),
         ("assess", assess),
         ("plan_questions", plan_questions),
@@ -305,7 +349,8 @@ def build_jd_import_graph(
         graph.add_node(name, node)
     graph.add_edge(START, "parse_input")
     graph.add_edge("parse_input", "resolve_urls")
-    graph.add_edge("resolve_urls", "extract")
+    graph.add_conditional_edges("resolve_urls", route_sources)
+    graph.add_edge("source_failure", END)
     graph.add_edge("extract", "assess")
     graph.add_conditional_edges("assess", route_assessment)
     graph.add_conditional_edges("plan_questions", route_planning)

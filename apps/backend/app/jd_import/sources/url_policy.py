@@ -24,8 +24,14 @@ def _system_resolver(host: str) -> Iterable[str]:
 
 
 class UrlPolicy:
-    def __init__(self, resolver: Resolver = _system_resolver) -> None:
+    def __init__(
+        self,
+        resolver: Resolver = _system_resolver,
+        *,
+        resolve_hostnames: bool = True,
+    ) -> None:
         self._resolver = resolver
+        self._resolve_hostnames = resolve_hostnames
 
     def validate(self, url: str) -> ValidatedUrl:
         parsed = urlsplit(url.strip())
@@ -49,11 +55,14 @@ class UrlPolicy:
             direct_ip = ipaddress.ip_address(host)
             addresses = (str(direct_ip),)
         except ValueError:
-            try:
-                addresses = tuple(dict.fromkeys(self._resolver(host)))
-            except OSError as error:
-                raise ValueError("url_dns_failed") from error
-        if not addresses:
+            if not self._resolve_hostnames:
+                addresses = ()
+            else:
+                try:
+                    addresses = tuple(dict.fromkeys(self._resolver(host)))
+                except OSError as error:
+                    raise ValueError("url_dns_failed") from error
+        if self._resolve_hostnames and not addresses:
             raise ValueError("url_dns_failed")
         for address in addresses:
             ip = ipaddress.ip_address(address)

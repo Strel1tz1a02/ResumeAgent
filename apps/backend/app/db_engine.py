@@ -83,6 +83,9 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_ai_chat_tool_call_origin import (
         migrate as migrate_ai_chat_tool_call_origin,
     )
+    from app.scripts.migrate_ai_chat_interaction_payload import (
+        migrate as migrate_ai_chat_interaction_payload,
+    )
     from app.scripts.migrate_evidence_background import (
         migrate as migrate_evidence_background,
     )
@@ -102,6 +105,9 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_remove_ai_chat_run_result import (
         migrate as migrate_remove_ai_chat_run_result,
     )
+    from app.scripts.migrate_resume_generation_run_lifecycle import (
+        migrate as migrate_resume_generation_run_lifecycle,
+    )
     from app.scripts.migrate_unified_experience_revision_units import (
         migrate as migrate_unified_experience_revision_units,
     )
@@ -115,11 +121,13 @@ def init_models_sync(engine: Engine) -> None:
     migrate_ai_chat_tool_call_state(engine)
     migrate_ai_chat_tool_input_state(engine)
     migrate_ai_chat_tool_call_origin(engine)
+    migrate_ai_chat_interaction_payload(engine)
     migrate_ai_chat_conversation_scope(engine)
     migrate_experience_chat_scope_field(engine)
     migrate_ai_chat_memory_background(engine)
     migrate_remove_ai_chat_run_result(engine)
     migrate_jd_import_origin(engine)
+    migrate_resume_generation_run_lifecycle(engine)
 
     # ``create_all`` 不会修改既有 SQLite 表，因此增量迁移必须保持幂等，
     # 使旧版数据库仍能安全加载简历。

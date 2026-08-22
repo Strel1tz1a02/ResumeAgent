@@ -5,8 +5,8 @@
 ```
 
 脚本默认使用 `E:\MiniConda` 下的 `resume-matcher` 环境；它会创建缺失的
-`.env`/`.env.local`，按需启动 Docker Desktop，并启动 Redis、Qdrant、后端、
-Memory Worker、Resume Index Worker 和前端。若 Redis/Qdrant 已由其他方式运行：
+`.env`/`.env.local`，按需启动 Docker Desktop，并启动 Redis、Qdrant、受限出口的
+Playwright MCP、后端、Memory Worker、Resume Index Worker 和前端。若这些基础设施已由其他方式运行：
 
 ```bash
 .\start-dev.ps1 -SkipInfrastructure
@@ -15,7 +15,7 @@ Memory Worker、Resume Index Worker 和前端。若 Redis/Qdrant 已由其他方
 手动启动时，先启动基础设施：
 
 ```bash
-docker compose up -d redis qdrant
+docker compose up -d redis qdrant playwright-mcp-gateway
 ```
 
 然后分别启动以下进程：

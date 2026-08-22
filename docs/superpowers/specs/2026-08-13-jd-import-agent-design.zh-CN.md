@@ -1,5 +1,9 @@
 # JD 导入与提取 Agent 设计
 
+> **历史领域设计说明：** JD 提取与补问规则仍有效；本文中的问题回答信封和恢复 HTTP
+> 路径已由统一 `ResolveInteractionCommand` 取代，当前口径见
+> [Agent Runtime 统一设计](./2026-08-17-agent-runtime-unification-design.zh-CN.md)。
+
 ## 1. 目标与边界
 
 本阶段用一个 LangGraph 完成 `JD 导入 -> JD 提取 -> 补问 -> 落库`。输入可以同时包含普通文本和 URL，用户不需要声明导入方式。一次输入可以识别多个 JD；无法判断内容归属、来源事实冲突或多个 URL 疑似指向同一 JD 时，不允许猜测，必须通过合并问题批次让用户裁定。

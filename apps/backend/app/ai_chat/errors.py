@@ -49,19 +49,13 @@ class ToolCallNotFoundError(AiChatError):
     code = "tool_call_not_found"
 
 
-class ProposalStateError(AiChatError):
-    """工具调用无法接受审批决定时抛出。"""
+class InteractionStateError(AiChatError):
+    """Interaction 或所属 Run 不在可接受当前命令的状态时抛出。"""
 
-    code = "proposal_state_error"
+    code = "interaction_state_error"
 
 
 class ToolProtocolError(AiChatError):
     """模型工具调用传输数据格式错误时抛出。"""
 
     code = "tool_protocol_error"
-
-
-class GraphExecutionError(AiChatError):
-    """业务图无法完成运行时抛出。"""
-
-    code = "graph_execution_error"

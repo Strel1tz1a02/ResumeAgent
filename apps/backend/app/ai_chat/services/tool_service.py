@@ -139,10 +139,6 @@ class ToolService:
         """委托外部输入模块创建等待状态。"""
         return await self.inputs.request(tool_call_id)
 
-    async def find_awaiting_input(self, run_id: int) -> ToolCall | None:
-        """委托外部输入模块查找等待中的调用。"""
-        return await self.inputs.find_awaiting(run_id)
-
     async def resolve_input(
         self,
         tool_call_id: int,
@@ -151,14 +147,6 @@ class ToolService:
     ) -> ToolResult:
         """委托外部输入模块固化输入结果。"""
         return await self.inputs.resolve(tool_call_id, client_resolution_id, payload)
-
-    async def get_call_by_run_identity(
-        self,
-        run_id: int,
-        identity: str,
-    ) -> ToolCall:
-        """按服务端稳定身份加载调用。"""
-        return await self.queries.get_by_run_identity(run_id, identity)
 
     async def consume_result(self, tool_call_id: int) -> None:
         """在模型成功接收结果后持久化消费状态。"""

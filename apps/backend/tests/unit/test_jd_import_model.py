@@ -32,6 +32,11 @@ async def test_url_selection_repairs_once_and_rejects_unknown_sources() -> None:
 
     assert result.selected_source_ids == ["source:url:0"]
     assert completion.await_count == 2
+    first_call = completion.await_args_list[0]
+    assert "UNTRUSTED_DOMAIN_DATA name=jd_import_input" in first_call.args[0]
+    assert "https://example.com/job" not in first_call.kwargs["system_prompt"]
+    assert "EXPECTED_OUTPUT_SCHEMA" in first_call.kwargs["system_prompt"]
+    assert "selected_source_ids" in first_call.kwargs["system_prompt"]
 
     bad_model = LangChainJDImportModel(
         completion=AsyncMock(

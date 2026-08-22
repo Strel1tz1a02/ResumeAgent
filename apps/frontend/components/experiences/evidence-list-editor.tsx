@@ -97,7 +97,7 @@ export function EvidenceListEditor({
     setEditorState((current) => {
       if (fullReset) return { drafts: serverBaseline, baseline: serverBaseline };
       const next: Record<number, EvidenceDraft> = {};
-      const appliedScope = chat.lastBusinessEvent?.data.scope as
+      const appliedScope = chat.lastBusinessResult?.scope as
         | {
             field?: string;
             evidence_id?: number | null;
@@ -128,14 +128,14 @@ export function EvidenceListEditor({
     if (fullReset) {
       setNewEvidence({ background: '', action: '', result: '' });
     } else if (
-      chat.lastBusinessEvent?.data.created === true &&
-      (chat.lastBusinessEvent.data.scope as { field?: string } | undefined)?.field === 'evidence'
+      chat.lastBusinessResult?.created === true &&
+      (chat.lastBusinessResult.scope as { field?: string } | undefined)?.field === 'evidence'
     ) {
       setNewEvidence({ background: '', action: '', result: '' });
     }
     loadedExperienceIdRef.current = experience.experience_id;
     loadedResetSignalRef.current = resetSignal;
-  }, [chat.lastBusinessEvent, experience.experience_id, experience.evidence_items, resetSignal]);
+  }, [chat.lastBusinessResult, experience.experience_id, experience.evidence_items, resetSignal]);
 
   const dirty =
     newEvidence.background !== '' ||

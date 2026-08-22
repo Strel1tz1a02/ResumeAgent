@@ -5,25 +5,28 @@ from __future__ import annotations
 from typing import Literal, cast
 
 from langchain_core.messages import AIMessageChunk, ToolCall as LangChainToolCall
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.ai_chat.errors import ProposalStateError, ToolProtocolError
+from app.ai_chat.errors import InteractionStateError, ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.streaming.events import tool_result_event
+from app.ai_chat.protocol import GraphResumeCommand, InteractionRequest
+from app.ai_chat.streaming.events import (
+    RuntimeEvent,
+    output_delta_event,
+    tool_result_event,
+)
 from app.ai_chat.streaming.model import complete_tool_calls
-from app.ai_chat.tools.types import ApprovalDecision, ToolCall, ToolContext, ToolResult
+from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
-from app.experience.graph.context import prepare_request_messages
 from app.experience.graph.state import ExperienceState
 
 
 def _emit(event: str, data: JsonObject) -> None:
     """向通用图执行器发出一个内部业务事件。"""
     writer = get_stream_writer()
-    writer({"event": event, "data": data})
+    writer(RuntimeEvent(event, data))
 
 
 def _emit_result(result: ToolResult) -> None:
@@ -35,21 +38,11 @@ def _emit_result(result: ToolResult) -> None:
         tool_call_id=result.tool_call_id,
         result=result.payload,
     )
-    _emit(event.event, event.data)
+    _emit(event.type, event.payload)
 
 
 def _emit_completion(result: ToolResult) -> None:
-    """先解除审批，再发送对应的工具业务事件。"""
-    if result.decision is not None:
-        if result.tool_call_id is None:
-            raise ToolProtocolError("Approved Tool Result has no durable identity")
-        _emit(
-            "proposal.resolved",
-            {
-                "proposal_id": result.tool_call_id,
-                "decision": result.decision,
-            },
-        )
+    """发送工具结果；Interaction 生命周期事件由 Runtime 统一产生。"""
     _emit_result(result)
 
 
@@ -111,25 +104,14 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         """流式执行模型，并在结束后暴露 LangChain 工具调用。"""
         response = AIMessageChunk(content="")
         tools_enabled = state["tools_enabled"] and state["run_kind"] != "opening"
-        tools = runtime.tools.model_tools
-        tool_definitions = (
-            [convert_to_openai_tool(tool) for tool in tools.values()]
-            if tools_enabled and tools
-            else None
-        )
-        request_messages = await prepare_request_messages(
-            run_id=state["run_id"],
-            messages=state["model_messages"],
-            memory=runtime.memory,
-            tools=tool_definitions,
-        )
         async for chunk in runtime.stream_model(
-            messages=request_messages,
+            run_id=state["run_id"],
+            context=state["model_context"],
             tools_enabled=tools_enabled,
         ):
             response += chunk
             if isinstance(chunk.content, str) and chunk.content:
-                _emit("assistant.delta", {"text": chunk.content})
+                get_stream_writer()(output_delta_event(chunk.content))
         calls = complete_tool_calls(response)
         if len(calls) > 1:
             raise ValueError("experience chat accepts at most one Tool Call per turn")
@@ -138,7 +120,6 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             "raw_tool_call": model_call,
             "raw_tool_call_index": call_index,
             "tool_call": None,
-            "approval": None,
         }
 
     def route_after_llm(state: ExperienceState) -> Literal["validation", "done"]:
@@ -202,25 +183,30 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             return {"tool_call": call}
         if call["status"] != "awaiting_approval":
             raise ToolProtocolError("Approver did not receive an approval request")
-        proposal = call["proposal_payload"]
+        proposal = call["interaction_payload"]
         if proposal is None:
             raise ToolProtocolError("Approval Tool Call has no proposal")
-        _emit(
-            "proposal.requested",
-            {
-                "proposal_id": call["tool_call_id"],
-                "tool_name": call["name"],
-                "proposal": proposal,
-            },
+        resumed = GraphResumeCommand.from_value(
+            interrupt(
+                InteractionRequest(
+                    interaction_id=call["tool_call_id"],
+                    kind="approval",
+                    payload={
+                        "tool_name": call["name"],
+                        "proposal": proposal,
+                    },
+                ).interrupt_value()
+            )
         )
-        approval = cast(
-            ApprovalDecision,
-            interrupt({"proposal_id": call["tool_call_id"]}),
-        )
-        if approval.get("tool_call_id") != call["tool_call_id"]:
-            raise ProposalStateError("Approval Tool Call does not match interrupt")
-        decided = await runtime.tools.record_decision(approval)
-        return {"tool_call": decided, "approval": approval}
+        if (
+            resumed.run_id != state["run_id"]
+            or resumed.interaction_id != call["tool_call_id"]
+        ):
+            raise InteractionStateError("Approval Tool Call does not match interrupt")
+        decided = await runtime.tools.get_call(call["tool_call_id"])
+        if decided["status"] not in {"approved", "resolved"}:
+            raise InteractionStateError("Approval decision is not durable")
+        return {"tool_call": decided}
 
     def route_after_approval(state: ExperienceState) -> Literal["execution"]:
         call = _get_tool_call(state)

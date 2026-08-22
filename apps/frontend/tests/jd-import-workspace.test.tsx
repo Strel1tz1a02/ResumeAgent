@@ -56,7 +56,7 @@ describe('JDImportWorkspace', () => {
     );
 
     expect(await screen.findByText('Backend Engineer')).toBeInTheDocument();
-    const company = screen.getByLabelText('jdImports.fields.company');
+    const company = await screen.findByLabelText('jdImports.fields.company');
     fireEvent.change(company, { target: { value: 'OpenAI' } });
     fireEvent.click(screen.getByRole('button', { name: 'jdImports.library.saveMetadata' }));
 

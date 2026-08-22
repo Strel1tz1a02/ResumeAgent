@@ -164,7 +164,7 @@ export function ExperienceEditor({
       setBaseline(server);
       patchMutation.reset();
     } else {
-      const appliedScope = chat.lastBusinessEvent?.data.scope as
+      const appliedScope = chat.lastBusinessResult?.scope as
         { field?: string; evidence_id?: number | null } | undefined;
       setDraft((current) => {
         const next = { ...current };
@@ -184,7 +184,7 @@ export function ExperienceEditor({
     loadedResetSignalRef.current = resetSignal;
     // 上方合并逻辑需要以前一次服务端快照作为基准。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chat.lastBusinessEvent, experience, resetSignal]);
+  }, [chat.lastBusinessResult, experience, resetSignal]);
 
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
 

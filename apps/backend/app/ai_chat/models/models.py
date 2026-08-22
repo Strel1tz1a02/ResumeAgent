@@ -123,7 +123,7 @@ class AiChatMessage(Base):
 
 
 class AiChatToolCall(Base):
-    """持久化的工具调用，以及可选的提案、决定和工具结果。"""
+    """持久化工具调用，以及可选的交互载荷、决定和工具结果。"""
 
     __tablename__ = "ai_chat_tool_calls"
 
@@ -141,7 +141,9 @@ class AiChatToolCall(Base):
     )
     tool_name: Mapped[str] = mapped_column(String(160))
     arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
-    proposal_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    interaction_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
     guard_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="received", index=True)
     decision: Mapped[str | None] = mapped_column(String(16), nullable=True)

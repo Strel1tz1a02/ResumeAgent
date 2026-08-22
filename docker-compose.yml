@@ -23,6 +23,7 @@ services:
       # Defaults are defined in apps/backend/app/config.py
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-32768}
       # Optional Docker Secret file path (same behavior as Postgres-style *_FILE)
       #- LLM_API_KEY_FILE=${LLM_API_KEY_FILE:-/run/secrets/llm_api_key}
       - LLM_API_KEY=${LLM_API_KEY:-}
@@ -31,8 +32,17 @@ services:
       - LLM_API_BASE=${LLM_API_BASE:-}
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_URL=http://qdrant:6333
+      - PLAYWRIGHT_MCP_URL=http://playwright-mcp:8931/mcp
+      - PLAYWRIGHT_MCP_EGRESS_SECURED=true
+      - PLAYWRIGHT_MCP_TIMEOUT_SECONDS=${PLAYWRIGHT_MCP_TIMEOUT_SECONDS:-45}
       # CORS origins (JSON array format). FRONTEND_BASE_URL is auto-included.
       #- CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+    networks:
+      - default
+      - mcp-private
+    depends_on:
+      playwright-mcp:
+        condition: service_healthy
     restart: unless-stopped
 
   memory-worker:
@@ -47,6 +57,7 @@ services:
       - LOG_LLM=${LOG_LLM:-WARNING}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}
       - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-32768}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_API_BASE=${LLM_API_BASE:-}
       - REDIS_URL=redis://redis:6379/0
@@ -110,6 +121,71 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
+  # The browser has no direct route to the Internet. All HTTP(S) traffic must
+  # pass through the egress proxy, which rejects loopback, private, link-local, multicast,
+  # and reserved destinations before connecting.
+  playwright-mcp:
+    image: mcr.microsoft.com/playwright/mcp:v0.0.79
+    command:
+      - --port
+      - "8931"
+      - --host
+      - 0.0.0.0
+      - --allowed-hosts
+      - 127.0.0.1,localhost,playwright-mcp
+      - --proxy-server
+      - http://mcp-egress-proxy:3128
+      - --isolated
+    networks:
+      - mcp-private
+    depends_on:
+      mcp-egress-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('net').connect(8931,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    shm_size: 1gb
+    restart: unless-stopped
+
+  playwright-mcp-gateway:
+    image: mcr.microsoft.com/playwright/mcp:v0.0.79
+    entrypoint: ["node"]
+    command: ["/gateway/mcp-http-gateway.mjs"]
+    volumes:
+      - ./docker/mcp-http-gateway.mjs:/gateway/mcp-http-gateway.mjs:ro
+    ports:
+      - "127.0.0.1:${PLAYWRIGHT_MCP_PORT:-8931}:8931"
+    networks:
+      - default
+      - mcp-private
+    depends_on:
+      playwright-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('net').connect(8931,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mcp-egress-proxy:
+    image: mcr.microsoft.com/playwright/mcp:v0.0.79
+    entrypoint: ["node"]
+    command: ["/proxy/mcp-egress-proxy.mjs"]
+    volumes:
+      - ./docker/mcp-egress-proxy.mjs:/proxy/mcp-egress-proxy.mjs:ro
+    networks:
+      - default
+      - mcp-private
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('net').connect(3128,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
 #secrets:
 #  llm_api_key:
 #    file: ./secrets/llm_api_key
@@ -121,3 +197,7 @@ volumes:
     driver: local
   qdrant-data:
     driver: local
+
+networks:
+  mcp-private:
+    internal: true

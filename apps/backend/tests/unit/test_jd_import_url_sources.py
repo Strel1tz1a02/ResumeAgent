@@ -25,6 +25,20 @@ def test_url_policy_accepts_only_public_http_urls() -> None:
             UrlPolicy(lambda _host: ["127.0.0.1"]).validate(url)
 
 
+def test_url_policy_delegates_hostname_dns_but_still_blocks_literal_private_ip() -> None:
+    policy = UrlPolicy(
+        lambda _host: ["198.18.0.29"],
+        resolve_hostnames=False,
+    )
+
+    validated = policy.validate("https://jobs.example.com/1")
+
+    assert validated.url == "https://jobs.example.com/1"
+    assert validated.addresses == ()
+    with pytest.raises(ValueError, match="url_address_not_public"):
+        policy.validate("https://198.18.0.29/1")
+
+
 class FakeClient:
     def __init__(self, snapshot_text: str = "Page URL: https://jobs.example.com/1\nBackend Engineer") -> None:
         self.calls: list[tuple[str, dict[str, str]]] = []
@@ -50,7 +64,12 @@ async def test_provider_uses_only_navigation_and_snapshot_and_truncates() -> Non
 
     policy = UrlPolicy(lambda _host: ["93.184.216.34"])
     provider = PlaywrightMCPSourceProvider(
-        "http://mcp", egress_secured=True, policy=policy, max_chars=20, client_factory=factory
+        "http://mcp",
+        egress_secured=True,
+        policy=policy,
+        max_chars=20,
+        settle_seconds=0,
+        client_factory=factory,
     )
     result = await provider.fetch(policy.validate("https://jobs.example.com/1"))
     assert result.status == "fetched"
@@ -66,6 +85,37 @@ async def test_provider_fails_closed_without_egress_boundary() -> None:
     assert result.error_code == "source_security_unavailable"
 
 
+async def test_provider_rejects_page_metadata_with_empty_snapshot() -> None:
+    snapshot = (
+        "### Page\n"
+        "- Page URL: https://jobs.example.com/1\n"
+        "- Page Title: Jobs\n"
+        "- Console: 3 errors, 0 warnings\n"
+        "### Snapshot\n"
+        "```yaml\n\n```"
+    )
+    client = FakeClient(snapshot)
+
+    @asynccontextmanager
+    async def factory(_endpoint: str):
+        yield client
+
+    policy = UrlPolicy(lambda _host: ["93.184.216.34"])
+    provider = PlaywrightMCPSourceProvider(
+        "http://mcp",
+        egress_secured=True,
+        policy=policy,
+        settle_seconds=0,
+        client_factory=factory,
+    )
+
+    result = await provider.fetch(policy.validate("https://jobs.example.com/1"))
+
+    assert result.status == "failed"
+    assert result.error_code == "source_empty_content"
+    assert result.text == ""
+
+
 async def test_provider_revalidates_redirect_and_maps_login_page() -> None:
     policy = UrlPolicy(lambda host: ["127.0.0.1"] if host == "internal.test" else ["93.184.216.34"])
 
@@ -74,7 +124,11 @@ async def test_provider_revalidates_redirect_and_maps_login_page() -> None:
         yield FakeClient("Page URL: http://internal.test/private")
 
     provider = PlaywrightMCPSourceProvider(
-        "http://mcp", egress_secured=True, policy=policy, client_factory=redirect_factory
+        "http://mcp",
+        egress_secured=True,
+        policy=policy,
+        settle_seconds=0,
+        client_factory=redirect_factory,
     )
     assert (await provider.fetch(policy.validate("https://example.com/job"))).status == "blocked"
 
@@ -83,7 +137,11 @@ async def test_provider_revalidates_redirect_and_maps_login_page() -> None:
         yield FakeClient("Page URL: https://example.com/login\nSign in to continue")
 
     provider = PlaywrightMCPSourceProvider(
-        "http://mcp", egress_secured=True, policy=policy, client_factory=login_factory
+        "http://mcp",
+        egress_secured=True,
+        policy=policy,
+        settle_seconds=0,
+        client_factory=login_factory,
     )
     result = await provider.fetch(policy.validate("https://example.com/job"))
     assert result.status == "blocked"

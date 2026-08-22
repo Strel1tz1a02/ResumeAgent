@@ -14,6 +14,11 @@ from app.jd_import.sources.url_policy import UrlPolicy, ValidatedUrl
 
 _PAGE_URL = re.compile(r"(?:Page URL:|URL:)\s*(https?://\S+)", re.IGNORECASE)
 _BLOCKED_MARKERS = ("captcha", "sign in", "log in", "access denied", "机器人验证", "登录")
+_SNAPSHOT_SECTION = re.compile(r"###\s+Snapshot\b(?P<body>.*)\Z", re.IGNORECASE | re.DOTALL)
+_SNAPSHOT_FENCE = re.compile(
+    r"```(?:ya?ml)?\s*(?P<body>.*?)```", re.IGNORECASE | re.DOTALL
+)
+_SNAPSHOT_LINK = re.compile(r"(?:-\s*)?\[Snapshot\]\([^)]+\)\s*", re.IGNORECASE)
 
 
 class PageSourceResult(BaseModel):
@@ -79,6 +84,20 @@ def _reported_url(*results: Any) -> str | None:
     return None
 
 
+def _has_usable_snapshot(text: str) -> bool:
+    """Ignore MCP page metadata when the actual accessibility snapshot is empty."""
+    match = _SNAPSHOT_SECTION.search(text)
+    if match is None:
+        return bool(text.strip())
+    body = match.group("body").strip()
+    fenced = _SNAPSHOT_FENCE.search(body)
+    if fenced is not None:
+        return bool(fenced.group("body").strip())
+    if _SNAPSHOT_LINK.fullmatch(body):
+        return False
+    return bool(body)
+
+
 class PlaywrightMCPSourceProvider:
     def __init__(
         self,
@@ -88,6 +107,7 @@ class PlaywrightMCPSourceProvider:
         policy: UrlPolicy | None = None,
         timeout_seconds: float = 20.0,
         max_chars: int = 100_000,
+        settle_seconds: float = 1.0,
         client_factory: ClientFactory = _official_client,
     ) -> None:
         self._endpoint = endpoint
@@ -95,6 +115,7 @@ class PlaywrightMCPSourceProvider:
         self._policy = policy or UrlPolicy()
         self._timeout = timeout_seconds
         self._max_chars = max_chars
+        self._settle_seconds = max(0.0, settle_seconds)
         self._client_factory = client_factory
 
     async def fetch(self, url: ValidatedUrl) -> PageSourceResult:
@@ -117,17 +138,26 @@ class PlaywrightMCPSourceProvider:
             if not required.issubset(names):
                 raise RuntimeError("required Playwright MCP tools unavailable")
             navigation = await client.call_tool("browser_navigate", {"url": url.url})
+            if self._settle_seconds:
+                await asyncio.sleep(self._settle_seconds)
             snapshot = await client.call_tool("browser_snapshot", {})
 
         final_url = _reported_url(snapshot, navigation)
         if final_url is None:
             raise ValueError("source_final_url_missing")
         validated_final = self._policy.validate(final_url)
-        text = "\n".join(_text_blocks(snapshot))[: self._max_chars]
-        if any(marker in text.lower() for marker in _BLOCKED_MARKERS):
+        raw_text = "\n".join(_text_blocks(snapshot))
+        if any(marker in raw_text.lower() for marker in _BLOCKED_MARKERS):
             return PageSourceResult(
                 status="blocked",
                 final_url=validated_final.url,
                 error_code="source_interaction_required",
             )
+        if not _has_usable_snapshot(raw_text):
+            return PageSourceResult(
+                status="failed",
+                final_url=validated_final.url,
+                error_code="source_empty_content",
+            )
+        text = raw_text[: self._max_chars]
         return PageSourceResult(status="fetched", final_url=validated_final.url, text=text)

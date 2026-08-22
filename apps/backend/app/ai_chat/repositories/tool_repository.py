@@ -187,7 +187,7 @@ class ToolCallRepository:
         self,
         row: AiChatToolCall,
         *,
-        proposal_payload: dict[str, Any],
+        interaction_payload: dict[str, Any],
         guard_payload: dict[str, Any],
     ) -> bool:
         """保存业务准备步骤生成的可信执行依据，但不决定是否审批。"""
@@ -198,7 +198,7 @@ class ToolCallRepository:
                 AiChatToolCall.status == "received",
             )
             .values(
-                proposal_payload=proposal_payload,
+                interaction_payload=interaction_payload,
                 guard_payload=guard_payload,
                 status="validated",
                 updated_at=utcnow_iso(),
@@ -232,18 +232,6 @@ class ToolCallRepository:
         )
         await self._session.flush()
         return result.rowcount == 1
-
-    async def get_awaiting_input_for_run(self, run_id: int) -> AiChatToolCall | None:
-        result = await self._session.execute(
-            select(AiChatToolCall).where(
-                AiChatToolCall.run_id == run_id,
-                AiChatToolCall.status == "awaiting_input",
-            )
-        )
-        rows = list(result.scalars().all())
-        if len(rows) > 1:
-            raise ToolProtocolError("Run has multiple awaiting-input Tool Calls")
-        return rows[0] if rows else None
 
     async def resolve_input(
         self,

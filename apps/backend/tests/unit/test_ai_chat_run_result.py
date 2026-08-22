@@ -2,14 +2,22 @@
 
 import sqlite3
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 from app.ai_chat.adapters import AdapterRegistry
+from app.ai_chat.errors import ConversationEndedError
+from app.ai_chat.graph import GraphRecovery
+from app.ai_chat.protocol import (
+    GraphOutcome,
+    InteractionRequest,
+    ResolveInteractionCommand,
+)
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services.ai_chat_service import AiChatService
 from app.ai_chat.services.tool_service import ToolService
 from app.ai_chat.tools.store import ToolCallStore
-from app.ai_chat.streaming.events import AiChatEvent
+from app.ai_chat.streaming.events import RuntimeEvent
 from app.ai_chat.tools.types import ToolContext
 from app.jd_import.adapters import JDImportAdapter
 from app.jd_import.agent.types import Assessment, CandidateJD
@@ -52,20 +60,32 @@ def test_result_column_is_removed_idempotently(tmp_path: Path) -> None:
 
 class _QuestionRunner:
     def __init__(self, run_id: int, tool_call_id: int, batch_id: str) -> None:
-        self.values = {
-            "run_id": run_id,
-            "question_tool_call_id": tool_call_id,
-            "questions": {"answers": []},
-        }
+        self.run_id = run_id
+        self.tool_call_id = tool_call_id
         self.batch_id = batch_id
 
-    async def get_state(self, **kwargs):  # type: ignore[no-untyped-def]
-        return SimpleNamespace(values=self.values)
+    async def recover(self, **kwargs):  # type: ignore[no-untyped-def]
+        return GraphRecovery(
+            outcome=GraphOutcome.waiting(
+                InteractionRequest(
+                    interaction_id=self.tool_call_id,
+                    kind="question_batch",
+                    payload={"batch_id": self.batch_id},
+                )
+            )
+        )
 
-    async def resume_value(self, **kwargs):  # type: ignore[no-untyped-def]
-        self.values["question_tool_call_id"] = None
-        self.values["questions"]["answers"].append({"batch_id": self.batch_id})
-        yield AiChatEvent("jd.import.completed", {"persisted_ids": [1], "errors": []})
+    async def resume(self, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["command"].run_id == self.run_id
+        assert kwargs["command"].interaction_id == self.tool_call_id
+        yield RuntimeEvent(
+            "result.available",
+            {
+                "kind": "jd_import",
+                "result": {"persisted_ids": [1], "errors": []},
+            },
+        )
+        yield GraphOutcome.completed()
 
 
 async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> None:  # type: ignore[no-untyped-def]
@@ -126,11 +146,10 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
         },
     )
     call = await tools.request_input(call["tool_call_id"])
-    batch = call["proposal_payload"]
+    batch = call["interaction_payload"]
     runner = _QuestionRunner(run.id, call["tool_call_id"], batch["batch_id"])
     service = AiChatService(registry, runner, repositories)  # type: ignore[arg-type]
     answer = {
-        "type": "question_batch_answer",
         "batch_id": batch["batch_id"],
         "client_resolution_id": "answer-1",
         "answers": [
@@ -141,24 +160,103 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
             }
         ],
     }
-    await tools.resolve_input(
-        call["tool_call_id"], "answer-1", answer
-    )
-
     events = [
         event
-        async for event in service.resolve_question_batch(
-            conversation.id, batch["batch_id"], answer
+        async for event in service.resolve_interaction(
+            ResolveInteractionCommand(
+                run_id=run.id,
+                interaction_id=call["tool_call_id"],
+                kind="question_batch",
+                client_resolution_id="answer-1",
+                payload={
+                    key: value
+                    for key, value in answer.items()
+                    if key != "client_resolution_id"
+                },
+            )
         )
     ]
     replay = [
         event
-        async for event in service.resolve_question_batch(
-            conversation.id, batch["batch_id"], answer
+        async for event in service.resolve_interaction(
+            ResolveInteractionCommand(
+                run_id=run.id,
+                interaction_id=call["tool_call_id"],
+                kind="question_batch",
+                client_resolution_id="answer-1",
+                payload={
+                    key: value
+                    for key, value in answer.items()
+                    if key != "client_resolution_id"
+                },
+            )
         )
     ]
 
-    assert [event.event for event in events] == ["jd.import.completed"]
-    assert [event.event for event in replay] == ["message.replayed"]
+    assert [event.type for event in events] == [
+        "interaction.resolved",
+        "result.available",
+        "run.completed",
+    ]
+    assert [event.type for event in replay] == ["command.replayed"]
     resolved = await tools.get_call(call["tool_call_id"])
     assert resolved["status"] == "resolved"
+
+    await service.close_conversation(conversation.id, "user_closed")
+    with pytest.raises(ConversationEndedError):
+        _ = [
+            event
+            async for event in service.resolve_interaction(
+                ResolveInteractionCommand(
+                    run_id=run.id,
+                    interaction_id=call["tool_call_id"],
+                    kind="question_batch",
+                    client_resolution_id="answer-1",
+                    payload={
+                        key: value
+                        for key, value in answer.items()
+                        if key != "client_resolution_id"
+                    },
+                )
+            )
+        ]
+
+
+async def test_close_conversation_settles_run_and_message_through_lifecycle(
+    isolated_db,
+) -> None:  # type: ignore[no-untyped-def]
+    repositories = RepositoryFactory()
+    async with isolated_db.session() as session:
+        repos = repositories.create(session)
+        conversation = await repos.conversations.create(
+            adapter="unused",
+            subject={"type": "test", "id": "1"},
+            scope={},
+            language="zh",
+        )
+        run = await repos.runs.create(
+            conversation_id=conversation.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        message = await repos.messages.create(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            role="assistant",
+            content="partial",
+            status="generating",
+        )
+        await session.commit()
+
+    service = AiChatService(AdapterRegistry(), object(), repositories)  # type: ignore[arg-type]
+    await service.close_conversation(conversation.id, "user_closed")
+
+    async with isolated_db.session() as session:
+        repos = repositories.create(session)
+        stored_conversation = await repos.conversations.get(conversation.id)
+        stored_run = await repos.runs.get(run.id)
+        stored_message = await session.get(type(message), message.id)
+        assert stored_conversation is not None
+        assert stored_conversation.status == "ended"
+        assert stored_run is not None and stored_run.status == "cancelled"
+        assert stored_message is not None and stored_message.status == "cancelled"

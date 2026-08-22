@@ -10,6 +10,8 @@ from app.ai_chat.types import AdapterInput, ScopeRef, SubjectRef, ValidatedBindi
 
 if TYPE_CHECKING:
     from app.ai_chat.graph.runtime import AiChatRuntime
+    from app.ai_chat.protocol import InteractionResolution, ResolveInteractionCommand
+    from app.ai_chat.services.tool_service import ToolService
     from app.ai_chat.tools.approval import ToolApprovalPolicy
     from app.ai_chat.tools.operation import RegisteredTool
 
@@ -48,3 +50,38 @@ class BaseAdapter(ABC, Generic[StateT]):
     @abstractmethod
     def get_tool_approval_policy(self) -> "ToolApprovalPolicy":
         """返回此业务的无状态工具审批策略。"""
+
+    async def resolve_interaction(
+        self,
+        tools: "ToolService",
+        command: "ResolveInteractionCommand",
+    ) -> "InteractionResolution":
+        """固化通用审批；领域外部输入由具体 Adapter 覆盖。"""
+        from app.ai_chat.errors import ToolProtocolError
+        from app.ai_chat.protocol import GraphResumeCommand, InteractionResolution
+
+        call = await tools.get_call(command.interaction_id)
+        decision = command.payload.get("decision")
+        if command.kind != "approval":
+            raise ToolProtocolError("Adapter does not support this interaction kind")
+        if call["status"] not in {"awaiting_approval", "approved", "resolved"}:
+            raise ToolProtocolError("Interaction is not an approval")
+        if set(command.payload) != {"decision"} or decision not in {
+            "approve",
+            "reject",
+        }:
+            raise ToolProtocolError("Approval interaction has an invalid payload")
+        decided = await tools.record_decision(
+            {
+                "tool_call_id": command.interaction_id,
+                "decision": decision,
+                "client_resolution_id": command.client_resolution_id,
+            }
+        )
+        return InteractionResolution(
+            resume=GraphResumeCommand(
+                run_id=command.run_id,
+                interaction_id=command.interaction_id,
+            ),
+            replayed=decided["replayed"],
+        )

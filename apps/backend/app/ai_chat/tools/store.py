@@ -52,7 +52,7 @@ class ToolCallStore:
         if row.status == "received" and any(
             value is not None
             for value in (
-                row.proposal_payload,
+                row.interaction_payload,
                 row.guard_payload,
                 row.decision,
                 row.client_resolution_id,
@@ -67,7 +67,7 @@ class ToolCallStore:
             "awaiting_approval",
             "awaiting_input",
             "approved",
-        } and (row.proposal_payload is None or row.guard_payload is None):
+        } and (row.interaction_payload is None or row.guard_payload is None):
             raise ToolProtocolError("Tool Call has no trusted payload")
         if row.status in {"validated", "awaiting_approval", "awaiting_input"} and (
             row.tool_result is not None
@@ -90,7 +90,7 @@ class ToolCallStore:
             if row.decision not in (None, "approve", "reject"):
                 raise ToolProtocolError("Resolved Tool Call has an unsupported decision")
             if row.decision is not None:
-                if row.proposal_payload is None or row.guard_payload is None:
+                if row.interaction_payload is None or row.guard_payload is None:
                     raise ToolProtocolError(
                         "Resolved approval Tool Call has incomplete trusted state"
                     )
@@ -101,7 +101,7 @@ class ToolCallStore:
                     raise ToolProtocolError(
                         "Resolved Tool Call has no resolution identity"
                     )
-            elif (row.proposal_payload is None) != (row.guard_payload is None):
+            elif (row.interaction_payload is None) != (row.guard_payload is None):
                 raise ToolProtocolError(
                     "Resolved Tool Call has incomplete trusted state"
                 )
@@ -142,9 +142,9 @@ class ToolCallStore:
             "name": row.tool_name,
             "arguments": dict(row.arguments),
             "status": status,
-            "proposal_payload": (
-                dict(row.proposal_payload)
-                if row.proposal_payload is not None
+            "interaction_payload": (
+                dict(row.interaction_payload)
+                if row.interaction_payload is not None
                 else None
             ),
             "should_execute": should_execute,

@@ -8,12 +8,12 @@ from langgraph.graph import StateGraph
 
 from app import database as database_module
 from app.ai_chat.adapters.base import BaseAdapter
+from app.ai_chat.context import ModelContext
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
 from app.ai_chat.tools.operation import RegisteredTool
 from app.ai_chat.types import AdapterInput, JsonObject, ScopeRef, SubjectRef, ValidatedBinding
 from app.experience.graph import ExperienceState, build_experience_graph
-from app.experience.graph.context import build_model_messages
 from app.experience.prompts.ai_chat import system_prompt
 from app.experience.repositories.experience_repository import ExperienceRepository
 from app.experience.schemas.ai_chat import ExperienceChatScope
@@ -98,15 +98,23 @@ class ExperienceAdapter(BaseAdapter[ExperienceState]):
             else {"scope": "field", "revision": snapshot.revision}
         )
         prompt = system_prompt(value["language"], field)
-        messages = build_model_messages(
-            prompt=prompt,
-            detail=detail_json,
-            scope=dict(value["scope"]),
-            scope_status=snapshot.status,
-            scope_revision=snapshot.revision,
-            history=list(value["messages"]),
-            pending=list(value["pending_tool_results"]),
-        )
+        model_context: ModelContext = {
+            "instructions": prompt,
+            "domain_sections": [
+                {
+                    "name": "saved_experience",
+                    "data": {
+                        "experience": detail_json,
+                        # ref_id 只用于前端和持久化绑定，不暴露为模型参数。
+                        "scope": {"field": value["scope"].get("field")},
+                        "scope_status": snapshot.status,
+                        "scope_revision": snapshot.revision,
+                    },
+                }
+            ],
+            "messages": list(value["messages"]),
+            "pending_tool_results": list(value["pending_tool_results"]),
+        }
         return ExperienceState(
             conversation_id=value["conversation_id"],
             run_id=value["run_id"],
@@ -115,7 +123,7 @@ class ExperienceAdapter(BaseAdapter[ExperienceState]):
             run_kind=value["run_kind"],
             tools_enabled=value["tools_enabled"],
             revision_snapshot=revision_snapshot,
-            model_messages=messages,
+            model_context=model_context,
             raw_tool_call=None,
             tool_call=None,
         )

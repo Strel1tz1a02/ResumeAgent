@@ -3,14 +3,13 @@
 from unittest.mock import patch
 
 import pytest
-from langchain_core.messages import AIMessage
-
 from app.experience.schemas.experiences import ExperienceGlobalSave
 from app.experience.services.experience_text_extractor import (
     ExperienceTextExtractionError,
     ExperienceTextExtractor,
 )
 from app.llm import LLMConfig
+from langchain_core.messages import AIMessage
 
 
 class _StructuredModel:
@@ -74,9 +73,13 @@ async def test_extractor_requests_typed_object() -> None:
     assert result is expected
     assert model.schema is ExperienceGlobalSave
     assert model.include_raw is True
-    assert get_model.call_args.kwargs["max_tokens"] == 8_192
-    assert get_model.call_args.kwargs["timeout"] == 360
+    assert get_model.call_args.kwargs["max_tokens"] == 16_384
+    assert get_model.call_args.kwargs["timeout"] == 720
     assert "做了一个解析器" in structured.calls[0][1]["content"]  # type: ignore[index]
+    assert "UNTRUSTED_DOMAIN_DATA name=experience_import_text" in structured.calls[0][1][
+        "content"
+    ]  # type: ignore[index]
+    assert "做了一个解析器" not in structured.calls[0][0]["content"]  # type: ignore[index]
 
 
 async def test_extractor_retries_invalid_structured_output() -> None:

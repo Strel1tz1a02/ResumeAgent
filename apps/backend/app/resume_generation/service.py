@@ -7,6 +7,10 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai_chat.graph import GraphDriver, LangGraphDriver
+from app.ai_chat.protocol import GraphOutcome
+from app.ai_chat.streaming.events import RuntimeEvent
+from app.ai_chat.run_state import RunStateMachine
 from app.config import settings
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository
@@ -67,6 +71,7 @@ class ResumeGenerationService:
         llm_model: ResumeGenerationModel | None = None,
         deterministic_model: ResumeGenerationModel | None = None,
         retriever: EvidenceRetriever | None = None,
+        graph_driver: GraphDriver | None = None,
     ) -> None:
         self._session = session
         self._runs = ResumeGenerationRepository(session)
@@ -85,6 +90,7 @@ class ResumeGenerationService:
             sparse_model=settings.qdrant_sparse_model,
             timeout_seconds=settings.qdrant_timeout_seconds,
         )
+        self._graph_driver = graph_driver or LangGraphDriver()
 
     async def preview(
         self, request: ResumeGenerationRequest
@@ -108,21 +114,42 @@ class ResumeGenerationService:
             ResumeGenerationGraphDependencies(model=model, retriever=self._retriever)
         ).compile()
         try:
-            state = await graph.ainvoke(
-                {
+            result: dict | None = None
+            outcome: GraphOutcome | None = None
+            async for item in self._graph_driver.stream(
+                graph=graph,
+                graph_input={
                     "jd_source": jd_source,
                     "experiences": experiences,
                     "constraints": request.constraints,
-                }
+                },
+            ):
+                if isinstance(item, GraphOutcome):
+                    outcome = item
+                elif (
+                    isinstance(item, RuntimeEvent)
+                    and item.type == "result.available"
+                    and item.payload.get("kind") == "resume_generation"
+                    and isinstance(item.payload.get("result"), dict)
+                ):
+                    result = dict(item.payload["result"])
+            if outcome != GraphOutcome.completed() or result is None:
+                raise RuntimeError("resume generation Graph returned no completed result")
+            analysis = JDAnalysisSnapshot.model_validate(result["analysis"])
+            plan = ResumePlan.model_validate(result["plan"])
+            resume_data = ResumeData.model_validate(result["resume_data"])
+            provenance = ResumeProvenance.model_validate(result["provenance"])
+            validation = ResumeValidation.model_validate(result["validation"])
+            transitioned = await RunStateMachine(self._runs).transition(
+                run_id,
+                from_statuses={"running"},
+                to_status="completed",
             )
-            analysis = JDAnalysisSnapshot.model_validate(state["analysis"])
-            plan = ResumePlan.model_validate(state["plan"])
-            resume_data = ResumeData.model_validate(state["resume_data"])
-            provenance = ResumeProvenance.model_validate(state["provenance"])
-            validation = ResumeValidation.model_validate(state["validation"])
+            if not transitioned:
+                raise RuntimeError("resume generation Run is no longer running")
             await self._runs.update(
                 run,
-                status="previewed",
+                artifact_status="previewed",
                 jd_snapshot_json=analysis.model_dump(mode="json"),
                 experience_snapshots_json=[
                     item.model_dump(mode="json") for item in experiences
@@ -144,7 +171,12 @@ class ResumeGenerationService:
             await self._session.rollback()
             run = await self._runs.get(run_id)
             if run is not None:
-                await self._runs.update(run, status="failed", error=str(error))
+                await RunStateMachine(self._runs).transition(
+                    run_id,
+                    from_statuses={"running"},
+                    to_status="failed",
+                    error_code=str(error),
+                )
                 await self._session.commit()
             raise ResumeGenerationError(f"resume generation failed: {error}") from error
 
@@ -170,7 +202,7 @@ class ResumeGenerationService:
             return ResumeGenerationConfirmResponse(
                 run_id=run_id, resume_id=row.generated_resume_id
             )
-        if row.status != "previewed":
+        if row.status != "completed" or row.artifact_status != "previewed":
             raise ResumeGenerationConflictError(
                 f"run {run_id} must be previewed before confirmation"
             )
@@ -201,7 +233,7 @@ class ResumeGenerationService:
             )
         await self._runs.update(
             row,
-            status="confirmed",
+            artifact_status="confirmed",
             generated_resume_id=resume_id,
         )
         try:
@@ -216,7 +248,7 @@ class ResumeGenerationService:
             if recovered_run.generated_resume_id is None:
                 await self._runs.update(
                     recovered_run,
-                    status="confirmed",
+                    artifact_status="confirmed",
                     generated_resume_id=resume_id,
                 )
                 await self._session.commit()
@@ -314,6 +346,7 @@ class ResumeGenerationService:
         return ResumeGenerationRunResponse(
             run_id=row.run_id,
             status=row.status,
+            artifact_status=row.artifact_status,
             jd_information_id=row.jd_information_id,
             request=ResumeGenerationRequest.model_validate(row.request_json),
             jd_snapshot=(

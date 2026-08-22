@@ -1,5 +1,9 @@
 # JD Import Tool Call 持久化设计
 
+> **历史领域设计说明：** Tool Call 持久化原则仍有效；问题批次现通过统一
+> `InteractionRequest` / `ResolveInteractionCommand` 暂停和恢复，当前口径见
+> [Agent Runtime 统一设计](./2026-08-17-agent-runtime-unification-design.zh-CN.md)。
+
 ## 1. 目标
 
 JD Import Graph 的两类持久化交互统一使用现有 `AiChatToolCall`：

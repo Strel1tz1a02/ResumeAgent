@@ -1,4 +1,5 @@
 import { apiPost, apiStream } from './client';
+import { parseRuntimeSse, type RuntimeEvent } from './runtime-events';
 import type { ExperienceDetail } from './experiences';
 
 export interface ExperienceChatScope {
@@ -17,13 +18,9 @@ export interface ExperienceConversation {
   revision: number;
 }
 
-export interface ExperienceChatEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
-
 export interface ExperienceProposal {
-  proposal_id: number;
+  run_id: number;
+  interaction_id: number;
   tool_name: 'content_change';
   proposal: {
     scope: ExperienceChangeScope;
@@ -52,39 +49,6 @@ export async function createExperienceConversation(
   );
 }
 
-async function* parseSse(response: Response): AsyncGenerator<ExperienceChatEvent> {
-  if (!response.ok || !response.body) {
-    throw new Error(`AI chat stream failed (${response.status})`);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = buffer.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        let event = 'message';
-        const data: string[] = [];
-        for (const line of block.split('\n')) {
-          if (line.startsWith('event:')) event = line.slice(6).trim();
-          if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
-        }
-        if (data.length) {
-          yield { event, data: JSON.parse(data.join('\n')) as Record<string, unknown> };
-        }
-        boundary = buffer.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 function streamPost(endpoint: string, body: unknown, signal: AbortSignal) {
   return apiStream(endpoint, {
     method: 'POST',
@@ -97,8 +61,8 @@ function streamPost(endpoint: string, body: unknown, signal: AbortSignal) {
 export async function* streamExperienceOpening(
   conversationId: number,
   signal: AbortSignal
-): AsyncGenerator<ExperienceChatEvent> {
-  yield* parseSse(
+): AsyncGenerator<RuntimeEvent> {
+  yield* parseRuntimeSse(
     await streamPost(`/experience-ai-chat/conversations/${conversationId}/opening`, {}, signal)
   );
 }
@@ -108,8 +72,8 @@ export async function* streamExperienceMessage(
   content: string,
   clientMessageId: string,
   signal: AbortSignal
-): AsyncGenerator<ExperienceChatEvent> {
-  yield* parseSse(
+): AsyncGenerator<RuntimeEvent> {
+  yield* parseRuntimeSse(
     await streamPost(
       `/experience-ai-chat/conversations/${conversationId}/messages`,
       { content, client_message_id: clientMessageId },
@@ -118,15 +82,16 @@ export async function* streamExperienceMessage(
   );
 }
 
-export async function* resolveExperienceProposal(
-  proposalId: number,
+export async function* resolveExperienceInteraction(
+  runId: number,
+  interactionId: number,
   decision: 'approve' | 'reject',
   clientResolutionId: string,
   signal: AbortSignal
-): AsyncGenerator<ExperienceChatEvent> {
-  yield* parseSse(
+): AsyncGenerator<RuntimeEvent> {
+  yield* parseRuntimeSse(
     await streamPost(
-      `/experience-ai-chat/proposals/${proposalId}/resolve`,
+      `/experience-ai-chat/runs/${runId}/interactions/${interactionId}/resolve`,
       { decision, client_resolution_id: clientResolutionId },
       signal
     )
@@ -143,7 +108,37 @@ export async function closeExperienceConversation(
   if (!response.ok) throw new Error(`Failed to close AI conversation (${response.status})`);
 }
 
-export function eventExperienceDetail(event: ExperienceChatEvent): ExperienceDetail | null {
-  const detail = event.data.experience;
+export function eventExperienceDetail(event: RuntimeEvent): ExperienceDetail | null {
+  if (event.type !== 'result.available' || event.payload.kind !== 'tool_result') return null;
+  const result = event.payload.result;
+  const detail =
+    result && typeof result === 'object' ? (result as Record<string, unknown>).experience : null;
   return detail && typeof detail === 'object' ? (detail as ExperienceDetail) : null;
+}
+
+export function eventExperienceProposal(event: RuntimeEvent): ExperienceProposal | null {
+  if (
+    event.type !== 'interaction.requested' ||
+    event.payload.kind !== 'approval' ||
+    typeof event.run_id !== 'number' ||
+    typeof event.payload.interaction_id !== 'number'
+  ) {
+    return null;
+  }
+  const request = event.payload.request;
+  if (!request || typeof request !== 'object') return null;
+  const value = request as Record<string, unknown>;
+  if (
+    value.tool_name !== 'content_change' ||
+    !value.proposal ||
+    typeof value.proposal !== 'object'
+  ) {
+    return null;
+  }
+  return {
+    run_id: event.run_id,
+    interaction_id: event.payload.interaction_id,
+    tool_name: 'content_change',
+    proposal: value.proposal as ExperienceProposal['proposal'],
+  };
 }

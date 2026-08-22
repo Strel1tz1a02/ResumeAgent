@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessageChunk
-
+from app.ai_chat.context import ModelContext
 from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.tools.store import ToolCallStore
 from app.ai_chat.streaming.model import AiChatModel, complete_tool_calls
 from app.ai_chat.tools.operation import RegisteredTool
+from app.ai_chat.tools.store import ToolCallStore
 from app.experience import ExperienceAdapter
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeOperation,
 )
+from langchain_core.messages import AIMessageChunk
 
 
 class _ChunkModel:
@@ -51,18 +50,37 @@ class _RecordingModel:
     def __init__(self) -> None:
         self.tools = None
         self.messages = None
+        self.max_tokens = None
 
     async def stream(  # type: ignore[no-untyped-def]
         self, *, tools, messages, **_kwargs
     ):
         self.tools = tools
         self.messages = messages
+        self.max_tokens = _kwargs.get("max_tokens")
         yield AIMessageChunk(content="", response_metadata={"finish_reason": "stop"})
 
 
-class _PassthroughMemoryService:
-    async def get_history_prompt(self, _run_id, _occupied_token):  # type: ignore[no-untyped-def]
-        raise AssertionError("runtime must not assemble module context")
+class _RecordingContextAssembler:
+    def __init__(self) -> None:
+        self.run_id = None
+        self.context = None
+        self.tools = None
+
+    async def assemble(self, *, run_id, context, tools):  # type: ignore[no-untyped-def]
+        self.run_id = run_id
+        self.context = context
+        self.tools = tools
+        return list(context["messages"])
+
+
+def _model_context(messages: list[dict]) -> ModelContext:  # type: ignore[type-arg]
+    return {
+        "instructions": "test instructions",
+        "domain_sections": [],
+        "messages": messages,
+        "pending_tool_results": [],
+    }
 
 
 async def test_runtime_binding_is_an_immutable_snapshot(isolated_db) -> None:
@@ -72,7 +90,7 @@ async def test_runtime_binding_is_an_immutable_snapshot(isolated_db) -> None:
     base = AiChatRuntime(
         _RecordingModel(),  # type: ignore[arg-type]
         ToolService(ToolCallStore(isolated_db.session, RepositoryFactory())),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _RecordingContextAssembler(),  # type: ignore[arg-type]
     )
 
     bound = base.bind_tools(source)
@@ -89,28 +107,31 @@ async def test_runtime_exposes_only_registered_tools_to_model(isolated_db) -> No
     runtime = AiChatRuntime(
         model,
         tools,
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        _RecordingContextAssembler(),  # type: ignore[arg-type]
     ).bind_tools(ExperienceAdapter().get_tools())
 
     _ = [
         event
         async for event in runtime.stream_model(
-            messages=[],
+            run_id=1,
+            context=_model_context([]),
             tools_enabled=True,
         )
     ]
 
     assert model.tools == runtime.tools.model_tools
+    assert model.max_tokens == 32_768
 
 
-async def test_runtime_forwards_module_assembled_context(isolated_db) -> None:
-    """Runtime 直接转发业务模块已经组装好的上下文。"""
+async def test_runtime_always_assembles_context_before_model(isolated_db) -> None:
+    """业务只能提交 ModelContext，最终消息必须经过统一组装器。"""
 
     model = _RecordingModel()
+    assembler = _RecordingContextAssembler()
     runtime = AiChatRuntime(
         model,  # type: ignore[arg-type]
         ToolService(ToolCallStore(isolated_db.session, RepositoryFactory())),
-        _PassthroughMemoryService(),  # type: ignore[arg-type]
+        assembler,  # type: ignore[arg-type]
     ).bind_tools(ExperienceAdapter().get_tools())
     messages = [
         {"role": "system", "content": "domain context"},
@@ -120,12 +141,16 @@ async def test_runtime_forwards_module_assembled_context(isolated_db) -> None:
     _ = [
         event
         async for event in runtime.stream_model(
-            messages=messages,
+            run_id=9,
+            context=_model_context(messages),
             tools_enabled=True,
         )
     ]
 
     assert model.messages == messages
+    assert assembler.run_id == 9
+    assert assembler.context == _model_context(messages)
+    assert assembler.tools is not None
 
 
 async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:

@@ -48,7 +48,13 @@ def _register_business_adapters() -> None:
     global _business_adapters_registered
     if not _business_adapters_registered:
         register_adapter(ExperienceAdapter())
-        policy = UrlPolicy()
+        # The secured browser container is the authoritative DNS/IP boundary.
+        # Avoid resolving hostnames again on the host, where Clash/Docker may
+        # legitimately return a synthetic 198.18/15 address. Literal private
+        # or reserved IP URLs remain blocked by UrlPolicy.
+        policy = UrlPolicy(
+            resolve_hostnames=not settings.playwright_mcp_egress_secured
+        )
         register_adapter(JDImportAdapter(JDImportGraphDependencies(
             model=LangChainJDImportModel(),
             page_sources=PlaywrightMCPSourceProvider(

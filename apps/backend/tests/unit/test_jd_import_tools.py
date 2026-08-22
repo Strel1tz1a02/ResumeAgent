@@ -87,9 +87,9 @@ async def test_question_tool_builds_server_owned_batch(isolated_db) -> None:
         },
     )
     assert call["status"] == "validated"
-    assert call["proposal_payload"]["round"] == 1  # type: ignore[index]
-    assert call["proposal_payload"]["batch_id"].startswith("batch-")  # type: ignore[index,union-attr]
-    assert call["proposal_payload"]["questions"][0]["question_id"].startswith(  # type: ignore[index]
+    assert call["interaction_payload"]["round"] == 1  # type: ignore[index]
+    assert call["interaction_payload"]["batch_id"].startswith("batch-")  # type: ignore[index,union-attr]
+    assert call["interaction_payload"]["questions"][0]["question_id"].startswith(  # type: ignore[index]
         "question-"
     )
 

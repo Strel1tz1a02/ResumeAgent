@@ -176,14 +176,14 @@ class ToolCallPreparationService:
                     prepared,
                     message="Tool preparation returned non-finite data",
                 )
-                proposal = self.approval.proposal(tool_name, prepared)
+                interaction_payload = self.approval.proposal(tool_name, prepared)
                 ensure_finite_json(
-                    proposal,
+                    interaction_payload,
                     message="Tool approval projection returned a non-finite proposal",
                 )
                 saved = await uow.calls.save_validation(
                     row,
-                    proposal_payload=proposal,
+                    interaction_payload=interaction_payload,
                     guard_payload=dict(prepared),
                 )
             else:

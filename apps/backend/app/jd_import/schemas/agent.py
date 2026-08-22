@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.jd_import.agent.types import QuestionAnswer
+from app.jd_import.agent.types import QuestionBatchAnswer
 
 
 class JDConversationResponse(BaseModel):
@@ -21,7 +21,7 @@ class JDImportAgentRequest(BaseModel):
         return value
 
 
-class JDQuestionResolutionRequest(BaseModel):
-    type: str = "question_batch_answer"
+class JDQuestionResolutionRequest(QuestionBatchAnswer):
+    """领域回答载荷加上传输层幂等身份。"""
+
     client_resolution_id: str = Field(min_length=1, max_length=200)
-    answers: list[QuestionAnswer]

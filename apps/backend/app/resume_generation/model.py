@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.ai_chat.context import ContextAssembler
 from app.llm import complete_json
 from app.resume_generation.planner import critique_plan
 from app.resume_generation.retriever import tokenize
@@ -311,21 +311,24 @@ class LangChainResumeGenerationModel:
         payload: dict[str, Any],
         response_type: type[ResponseT],
     ) -> ResponseT:
-        prompt = (
-            f"{instruction}\n\nINPUT JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+        context = ContextAssembler.assemble_structured(
+            instructions=f"{SYSTEM_PROMPT}\n{instruction}",
+            domain_sections=[
+                {"name": "resume_generation_input", "data": payload}
+            ],
         )
         try:
             result = await self._completion(
-                prompt,
-                system_prompt=SYSTEM_PROMPT,
+                context.prompt,
+                system_prompt=context.system_prompt,
                 retries=0,
                 schema_type="resume_generation",
             )
             return response_type.model_validate(result)
         except ValidationError as error:
             result = await self._completion(
-                f"{prompt}\n\n上次输出未通过校验，请只修复结构：{error.json()}",
-                system_prompt=SYSTEM_PROMPT,
+                f"{context.prompt}\n\n上次输出未通过校验，请只修复结构：{error.json()}",
+                system_prompt=context.system_prompt,
                 retries=0,
                 schema_type="resume_generation",
             )

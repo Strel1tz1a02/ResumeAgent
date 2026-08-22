@@ -74,8 +74,8 @@ describe('JD import API client', () => {
   it('parses JD-specific SSE events from the import stream', async () => {
     fetchMock.mockResolvedValue(
       new Response(
-        'event: jd.questions.requested\ndata: {"batch_id":"b1","round":1,"questions":[]}\n\n' +
-          'event: jd.import.completed\ndata: {"persisted_ids":[12],"errors":[]}\n\n',
+        'event: interaction.requested\ndata: {"type":"interaction.requested","run_id":9,"sequence":1,"payload":{"interaction_id":7,"kind":"question_batch","request":{"batch_id":"b1","round":1,"questions":[]}}}\n\n' +
+          'event: result.available\ndata: {"type":"result.available","run_id":9,"sequence":2,"payload":{"kind":"jd_import","result":{"persisted_ids":[12],"errors":[]}}}\n\n',
         { headers: { 'Content-Type': 'text/event-stream' } }
       )
     );
@@ -88,10 +88,10 @@ describe('JD import API client', () => {
     )) {
       events.push(event);
     }
-    expect(events.map((event) => event.event)).toEqual([
-      'jd.questions.requested',
-      'jd.import.completed',
+    expect(events.map((event) => event.type)).toEqual([
+      'interaction.requested',
+      'result.available',
     ]);
-    expect(events[1].data.persisted_ids).toEqual([12]);
+    expect((events[1].payload.result as { persisted_ids: number[] }).persisted_ids).toEqual([12]);
   });
 });

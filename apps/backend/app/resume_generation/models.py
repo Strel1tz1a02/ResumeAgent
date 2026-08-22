@@ -16,8 +16,12 @@ class ResumeGenerationRun(Base):
     __tablename__ = "resume_generation_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running', 'previewed', 'failed', 'confirmed')",
+            "status IN ('running', 'suspended', 'completed', 'failed', 'cancelled')",
             name="ck_resume_generation_run_status",
+        ),
+        CheckConstraint(
+            "artifact_status IN ('pending', 'previewed', 'confirmed')",
+            name="ck_resume_generation_artifact_status",
         ),
     )
 
@@ -31,6 +35,9 @@ class ResumeGenerationRun(Base):
     provenance_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     validation_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    artifact_status: Mapped[str] = mapped_column(
+        String(16), default="pending", index=True
+    )
     generated_resume_id: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)

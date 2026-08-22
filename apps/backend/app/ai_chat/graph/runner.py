@@ -1,159 +1,118 @@
-"""编译并执行业务定义的 LangGraph。"""
+"""将 Adapter Graph 接到与业务拓扑无关的统一 Driver。"""
+
+from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.types import Command
 
 from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
+from app.ai_chat.graph.driver import (
+    GraphDriver,
+    GraphRecovery,
+    GraphStreamItem,
+    LangGraphDriver,
+)
 from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.streaming.events import AiChatEvent
+from app.ai_chat.protocol import GraphResumeCommand
 from app.ai_chat.types import AdapterInput
 
-
-@dataclass(frozen=True)
-class GraphRecovery:
-    """把异常运行推进到下一持久边界后的结果。"""
-
-    interrupted: bool
-    events: tuple[AiChatEvent, ...] = ()
+__all__ = ["GraphRunner"]
 
 
 class GraphRunner:
-    """缓存已编译业务图，并规范化其 v2 流输出。"""
+    """负责 Adapter 解析/编译；Graph 执行语义全部委托给 Driver。"""
 
     def __init__(
         self,
         registry: AdapterRegistry,
         checkpointer: AsyncSqliteSaver,
         runtime: AiChatRuntime,
+        driver: GraphDriver | None = None,
     ) -> None:
-        """保存共享依赖和按适配器名称索引的业务图缓存。"""
         self._registry = registry
         self._checkpointer = checkpointer
         self._runtime = runtime
+        self._driver = driver or LangGraphDriver()
         self._graphs: dict[str, Any] = {}
 
     def _compiled(self, adapter: BaseAdapter) -> Any:
-        """在当前进程中仅编译一次适配器业务图。"""
+        """按 Adapter 缓存业务自有的 Graph 拓扑。"""
         name = adapter.adapter_name()
         if name not in self._graphs:
             runtime = self._runtime.bind_tools(
                 adapter.get_tools(),
                 adapter.get_tool_approval_policy(),
             )
-            self._graphs[name] = adapter.build_graph(runtime).compile(checkpointer=self._checkpointer)
+            self._graphs[name] = adapter.build_graph(runtime).compile(
+                checkpointer=self._checkpointer
+            )
         return self._graphs[name]
+
+    @staticmethod
+    def _config(conversation_id: int) -> dict[str, Any]:
+        return {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
 
     async def stream(
         self,
         *,
         adapter_name: str,
         value: AdapterInput,
-    ) -> AsyncIterator[AiChatEvent]:
-        """使用稳定的会话线程 ID 启动业务图。"""
+    ) -> AsyncIterator[GraphStreamItem]:
         adapter = self._registry.get(adapter_name)
-        graph = self._compiled(adapter)
         graph_input: Any = await adapter.parse_input(value)
-        # 检查点只能接收可由 JSON 序列化的状态。
         json.dumps(graph_input, ensure_ascii=False)
-        config = {
-            "configurable": {
-                # 检查点器使用稳定的线程标识存取同一会话的检查点。
-                "thread_id": f"ai-chat:{value['conversation_id']}",
-            }
-        }
-        async for part in graph.astream(
-            graph_input,
-            config=config,
-            stream_mode=["updates", "custom"],
-            version="v2",
+        async for item in self._driver.stream(
+            graph=self._compiled(adapter),
+            graph_input=graph_input,
+            config=self._config(value["conversation_id"]),
         ):
-            event = self._normalize(part)
-            if event is not None:
-                yield event
+            yield item
 
-    async def resume_value(
-        self, *, adapter_name: str, conversation_id: int, value: dict[str, Any]
-    ) -> AsyncIterator[AiChatEvent]:
-        """使用可序列化为 JSON 的领域值恢复检查点。"""
+    async def resume(
+        self,
+        *,
+        adapter_name: str,
+        conversation_id: int,
+        command: GraphResumeCommand,
+    ) -> AsyncIterator[GraphStreamItem]:
         adapter = self._registry.get(adapter_name)
-        graph = self._compiled(adapter)
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
-        }
-        async for part in graph.astream(
-            Command(resume=value),
-            config=config,
-            stream_mode=["updates", "custom"],
-            version="v2",
+        async for item in self._driver.resume(
+            graph=self._compiled(adapter),
+            command=command,
+            config=self._config(conversation_id),
         ):
-            event = self._normalize(part)
-            if event is not None:
-                yield event
+            yield item
 
-    async def get_state(self, *, adapter_name: str, conversation_id: int) -> Any:
+    async def continue_run(
+        self,
+        *,
+        adapter_name: str,
+        conversation_id: int,
+    ) -> AsyncIterator[GraphStreamItem]:
+        """在 Runtime 已重新认领 Run 后继续失败或崩溃的 checkpoint。"""
         adapter = self._registry.get(adapter_name)
-        graph = self._compiled(adapter)
-        return await graph.aget_state(
-            {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
-        )
-
-    @staticmethod
-    def _normalize(part: Any) -> AiChatEvent | None:
-        """将 v2 自定义事件和中断片段规范化为内部事件。"""
-        if isinstance(part, AiChatEvent):
-            return part
-        if not isinstance(part, dict):
-            return None
-        event_type = part.get("type")
-        data = part.get("data")
-        if event_type == "custom":
-            if isinstance(data, AiChatEvent):
-                return data
-            if isinstance(data, dict) and isinstance(data.get("event"), str):
-                payload = data.get("data")
-                return AiChatEvent(data["event"], payload if isinstance(payload, dict) else {})
-
-        if event_type == "updates" and isinstance(data, dict):
-            interrupts = data.get("__interrupt__")
-            if interrupts:
-                return AiChatEvent("_graph.interrupted", {})
-        return None
+        async for item in self._driver.stream(
+            graph=self._compiled(adapter),
+            graph_input=None,
+            config=self._config(conversation_id),
+        ):
+            yield item
 
     async def delete_thread(self, conversation_id: int) -> None:
-        """删除一个会话的全部检查点。"""
         await self._checkpointer.adelete_thread(f"ai-chat:{conversation_id}")
 
-    async def advance_to_boundary(
+    async def recover(
         self,
         *,
         adapter_name: str,
         conversation_id: int,
     ) -> GraphRecovery:
-        """把图推进到中断或完成边界，并保留期间产生的事件。"""
+        """只读识别当前 checkpoint 边界，不执行任何业务节点。"""
         adapter = self._registry.get(adapter_name)
-        graph = self._compiled(adapter)
-        config = {
-            "configurable": {"thread_id": f"ai-chat:{conversation_id}"},
-        }
-        snapshot = await graph.aget_state(config)
-        if any(getattr(task, "interrupts", ()) for task in snapshot.tasks):
-            return GraphRecovery(interrupted=True)
-        events: list[AiChatEvent] = []
-        async for part in graph.astream(
-            None,
-            config=config,
-            stream_mode=["updates", "custom"],
-            version="v2",
-        ):
-            event = self._normalize(part)
-            if event is None:
-                continue
-            if event.event == "_graph.interrupted":
-                return GraphRecovery(interrupted=True)
-            events.append(event)
-        return GraphRecovery(interrupted=False, events=tuple(events))
+        return await self._driver.recover(
+            graph=self._compiled(adapter),
+            config=self._config(conversation_id),
+        )

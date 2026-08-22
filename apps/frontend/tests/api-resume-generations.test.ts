@@ -16,7 +16,8 @@ describe('resume generation API client', () => {
       new Response(
         JSON.stringify({
           run_id: 'run-1',
-          status: 'previewed',
+          status: 'completed',
+          artifact_status: 'previewed',
           plan: {},
           resume_data: {},
           provenance: {},
@@ -46,7 +47,8 @@ describe('resume generation API client', () => {
       new Response(
         JSON.stringify({
           run_id: 'run-1',
-          status: 'confirmed',
+          status: 'completed',
+          artifact_status: 'confirmed',
           resume_id: 'resume-generation-run-1',
         })
       )
@@ -54,7 +56,8 @@ describe('resume generation API client', () => {
 
     await expect(confirmResumeGeneration('run-1', 'Example - Engineer')).resolves.toEqual({
       run_id: 'run-1',
-      status: 'confirmed',
+      status: 'completed',
+      artifact_status: 'confirmed',
       resume_id: 'resume-generation-run-1',
     });
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];

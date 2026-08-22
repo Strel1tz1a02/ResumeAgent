@@ -1,9 +1,10 @@
 # 经历适配器与字段对话设计 SPEC
 
-> **状态：** 待实施  
+> **状态：** 历史领域设计（已实施，控制面协议已升级）
 > **日期：** 2026-08-01  
 > **依赖：** [通用 AI Chat 功能边界设计](./2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md)  
 > **后续可靠性工作：** [AI 对话失败处理与可靠性后续工作](./2026-07-30-ai-chat-future-work.zh-CN.md)
+> **当前控制面：** [Agent Runtime 统一设计](./2026-08-17-agent-runtime-unification-design.zh-CN.md)；本文中的旧事件名、恢复命令和 HTTP 路径仅保留为演进记录。
 
 ## 1. 目标
 

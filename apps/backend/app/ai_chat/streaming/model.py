@@ -10,7 +10,7 @@ from langchain_core.tools import BaseTool
 from app.ai_chat.errors import ToolProtocolError
 from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
 from app.ai_chat.types import JsonObject
-from app.llm import get_chat_model
+from app.llm import DEFAULT_JSON_MAX_TOKENS, get_chat_model
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
@@ -85,7 +85,7 @@ class AiChatModel:
         messages: list[JsonObject],
         tools: Mapping[str, BaseTool],
         tools_enabled: bool,
-        max_tokens: int = 4096,
+        max_tokens: int = DEFAULT_JSON_MAX_TOKENS,
     ) -> AsyncIterator[AIMessageChunk]:
         """直接流式返回 LangChain 消息，并过滤正文中的兼容协议。"""
         model, _ = get_chat_model(max_tokens=max_tokens)

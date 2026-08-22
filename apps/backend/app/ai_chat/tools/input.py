@@ -43,15 +43,6 @@ class ToolInputService:
                 await uow.session.rollback()
         return await self.store.load_call(tool_call_id, replayed=not claimed)
 
-    async def find_awaiting(self, run_id: int) -> ToolCall | None:
-        """返回指定 Run 中唯一等待外部输入的调用。"""
-        async with self.store.transaction() as uow:
-            row = await uow.calls.get_awaiting_input_for_run(run_id)
-            if row is None:
-                return None
-            self.registry.get(row.tool_name)
-            return self.store.call_from_row(row, replayed=True)
-
     async def resolve(
         self,
         tool_call_id: int,

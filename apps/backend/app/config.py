@@ -216,6 +216,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-5-nano-2025-08-07"
     llm_api_key: str = ""
     llm_api_base: str | None = None  # For Ollama or custom endpoints
+    llm_max_tokens: int = 32_768
     log_llm: Literal["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"] = "WARNING"
 
     # 简历生成召回：Qdrant 原生 dense + BM25 sparse + RRF。
@@ -233,6 +234,18 @@ class Settings(BaseSettings):
         if not v or (isinstance(v, str) and not v.strip()):
             return "openai"
         return v
+
+    @field_validator("llm_max_tokens", mode="before")
+    @classmethod
+    def clamp_llm_max_tokens(cls, v: Any) -> int:
+        """统一模型输出预算，并容忍本地环境中的空值或非法值。"""
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return 32_768
+        try:
+            tokens = int(float(str(v).strip()))
+        except (TypeError, ValueError, OverflowError):
+            return 32_768
+        return max(1_024, min(131_072, tokens))
 
     @field_validator("log_llm", mode="before")
     @classmethod

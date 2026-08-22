@@ -33,7 +33,7 @@ class ToolCall(TypedDict):
     name: str
     arguments: JsonObject
     status: ToolCallStatus
-    proposal_payload: JsonObject | None
+    interaction_payload: JsonObject | None
     should_execute: bool | None
     result: JsonObject | None
     replayed: bool

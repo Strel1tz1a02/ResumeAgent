@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.ai_chat.errors import (
     IdempotencyConflictError,
-    ProposalStateError,
+    InteractionStateError,
     ToolCallNotFoundError,
     ToolProtocolError,
 )
@@ -76,7 +76,7 @@ class ToolApprovalService:
             self.registry.get(row.tool_name)
             call = self.store.call_from_row(row, replayed=True)
             if call["status"] not in {"approved", "resolved"}:
-                raise ProposalStateError(str(tool_call_id))
+                raise InteractionStateError(str(tool_call_id))
             if (
                 row.decision != approval["decision"]
                 or row.client_resolution_id != resolution_id
@@ -107,7 +107,7 @@ class ToolApprovalService:
                     raise IdempotencyConflictError(resolution_id)
                 return call
             if call["status"] != "awaiting_approval":
-                raise ProposalStateError(str(tool_call_id))
+                raise InteractionStateError(str(tool_call_id))
             owner = await uow.calls.get_by_resolution_id(
                 row.conversation_id,
                 resolution_id,

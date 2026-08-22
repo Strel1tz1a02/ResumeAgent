@@ -217,6 +217,7 @@ No .env.example or .env.template found. Identify required environment variables 
 None found.
 
 === GIT RECENT COMMITS (last 20) ===
+3e0de4c 工具模块重构
 ec2316c 简历生成模块
 27b64f5 JD导入前端
 4e9c147 1
@@ -236,42 +237,41 @@ e933a66 对话记忆模块
 4e56d56 merge: add standalone AI chat memory module
 f1335c9 refactor(ai-chat): keep memory implementation self-contained
 b74d3c8 工具模块系统化改造
-0140a12 refactor(ai-chat): isolate conversation memory module
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
+  21 apps/backend/tests/unit/test_experience_ai_chat.py
   21 apps/frontend/tests/experience-library-page.test.tsx
-  20 apps/backend/tests/unit/test_experience_ai_chat.py
   16 apps/frontend/components/experiences/experience-library-page.tsx
   15 apps/backend/tests/integration/test_experiences_api.py
-  13 apps/backend/app/db_engine.py
+  14 apps/backend/app/db_engine.py
+  13 apps/backend/tests/unit/test_tool_call_service.py
+  12 apps/backend/tests/unit/test_ai_chat_model.py
   12 apps/backend/app/ai_chat/repositories/tool_call_repository.py
-  12 apps/backend/tests/unit/test_tool_call_service.py
+  11 apps/backend/app/ai_chat/graph/runner.py
+  11 docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md
   11 apps/frontend/messages/en.json
   11 apps/frontend/messages/zh.json
-  11 apps/backend/tests/unit/test_ai_chat_model.py
   11 apps/backend/app/ai_chat/services/service.py
-  10 apps/backend/app/ai_chat/graph/runner.py
+  10 apps/backend/app/ai_chat/graph/runtime.py
+  10 apps/backend/app/ai_chat/tools/handler.py
+  10 apps/backend/app/experience/graph/builder.py
+  10 apps/backend/app/main.py
   10 apps/backend/tests/unit/test_experience_repositories.py
   10 apps/frontend/components/experiences/evidence-list-editor.tsx
-  10 docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md
-   9 apps/backend/app/main.py
-   9 apps/backend/app/ai_chat/tools/handler.py
-   9 apps/backend/app/ai_chat/graph/runtime.py
-   9 apps/backend/app/experience/graph/builder.py
-   9 apps/frontend/components/experiences/experience-editor.tsx
+   9 apps/backend/app/ai_chat/container.py
 
 === MONOREPO SIGNALS ===
 Sub-package directory found: apps/
 
 === CODE METRICS ===
-Total files scanned: 1406
-Total lines of code: 206150
+Total files scanned: 1430
+Total lines of code: 207792
 
 Files by language:
-  Other: 552
-  Python: 492
+  Other: 561
+  Python: 506
   TypeScript/React: 246
-  TypeScript: 116
+  TypeScript: 117
 
 Top 10 largest files:
 .git-upstream-backup\objects\pack\pack-9587087f5c56b90d9db7869aff0b4001bf6390df.pack: 162727.6KB
@@ -283,7 +283,7 @@ assets\Resume_Matcher_Video.mp4: 10857.5KB
 assets\Resume_Matcher_Demo_2.gif: 9474.4KB
 .worktrees\ai-chat-memory\assets\page_2.png: 1708.2KB
 assets\page_2.png: 1708.2KB
-.worktrees\ai-chat-memory\assets\installing_resume_matcher.png: 1209.0KB
+apps\backend\data\logs\backend.log: 1347.8KB
 
 === CI/CD PIPELINES ===
 CI/CD: GitHub Actions

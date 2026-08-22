@@ -1,4 +1,5 @@
 import { apiDelete, apiFetch, apiPatch, apiPost, apiStream } from './client';
+import { parseRuntimeSse, type RuntimeEvent } from './runtime-events';
 
 export type JDStatus = 'incomplete' | 'confirmed';
 export type JDRequirementPriority = 'required' | 'preferred' | 'normal';
@@ -42,6 +43,8 @@ export interface JDQuestion {
 }
 
 export interface JDQuestionBatch {
+  run_id: number;
+  interaction_id: number;
   batch_id: string;
   round: number;
   questions: JDQuestion[];
@@ -51,11 +54,6 @@ export interface JDQuestionAnswer {
   question_id: string;
   value?: string;
   skipped?: boolean;
-}
-
-export interface JDImportEvent {
-  event: string;
-  data: Record<string, unknown>;
 }
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -142,40 +140,6 @@ export async function createJDConversation(): Promise<number> {
   return result.conversation_id;
 }
 
-async function* parseSse(response: Response): AsyncGenerator<JDImportEvent> {
-  if (!response.ok || !response.body) {
-    const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
-    throw new Error(payload?.detail || `JD import stream failed (${response.status})`);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
-      let boundary = buffer.indexOf('\n\n');
-      while (boundary >= 0) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        let event = 'message';
-        const data: string[] = [];
-        for (const line of block.split('\n')) {
-          if (line.startsWith('event:')) event = line.slice(6).trim();
-          if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
-        }
-        if (data.length) {
-          yield { event, data: JSON.parse(data.join('\n')) as Record<string, unknown> };
-        }
-        boundary = buffer.indexOf('\n\n');
-      }
-      if (done) break;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 function streamPost(endpoint: string, body: unknown, signal: AbortSignal): Promise<Response> {
   return apiStream(endpoint, {
     method: 'POST',
@@ -190,8 +154,8 @@ export async function* streamJDImport(
   content: string,
   clientMessageId: string,
   signal: AbortSignal
-): AsyncGenerator<JDImportEvent> {
-  yield* parseSse(
+): AsyncGenerator<RuntimeEvent> {
+  yield* parseRuntimeSse(
     await streamPost(
       `/jd-imports/conversations/${conversationId}/imports`,
       { content, client_message_id: clientMessageId },
@@ -201,16 +165,21 @@ export async function* streamJDImport(
 }
 
 export async function* resolveJDQuestions(
-  conversationId: number,
+  runId: number,
+  interactionId: number,
   batchId: string,
   answers: JDQuestionAnswer[],
   clientResolutionId: string,
   signal: AbortSignal
-): AsyncGenerator<JDImportEvent> {
-  yield* parseSse(
+): AsyncGenerator<RuntimeEvent> {
+  yield* parseRuntimeSse(
     await streamPost(
-      `/jd-imports/conversations/${conversationId}/question-batches/${batchId}/resolve`,
-      { type: 'question_batch_answer', client_resolution_id: clientResolutionId, answers },
+      `/jd-imports/runs/${runId}/interactions/${interactionId}/resolve`,
+      {
+        batch_id: batchId,
+        client_resolution_id: clientResolutionId,
+        answers,
+      },
       signal
     )
   );

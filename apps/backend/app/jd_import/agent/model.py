@@ -8,6 +8,7 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.ai_chat.context import ContextAssembler
 from app.jd_import.agent.prompts import (
     EXTRACTION_PROMPT,
     SYSTEM_PROMPT,
@@ -78,26 +79,41 @@ class LangChainJDImportModel:
         request: BaseModel,
         response_type: type[ResponseT],
     ) -> ResponseT:
-        prompt = (
-            f"{instruction}\n\nINPUT JSON:\n"
-            f"{json.dumps(request.model_dump(mode='json'), ensure_ascii=False)}"
+        schema_json = json.dumps(
+            response_type.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        context = ContextAssembler.assemble_structured(
+            instructions=(
+                f"{SYSTEM_PROMPT}\n{instruction}\n"
+                "Match EXPECTED_OUTPUT_SCHEMA exactly. Do not add wrapper or extra keys; "
+                "use null only where the schema permits it.\n"
+                f"EXPECTED_OUTPUT_SCHEMA\n{schema_json}\nEND_EXPECTED_OUTPUT_SCHEMA"
+            ),
+            domain_sections=[
+                {
+                    "name": "jd_import_input",
+                    "data": request.model_dump(mode="json"),
+                }
+            ],
         )
         try:
             payload = await self._completion(
-                prompt,
-                system_prompt=SYSTEM_PROMPT,
+                context.prompt,
+                system_prompt=context.system_prompt,
                 retries=0,
                 schema_type="jd_import",
             )
             return response_type.model_validate(payload)
         except ValidationError as error:
             repair_prompt = (
-                f"{prompt}\n\nYour prior JSON failed schema validation. "
+                f"{context.prompt}\n\nYour prior JSON failed schema validation. "
                 f"Correct it once using these errors:\n{error.json()}"
             )
             payload = await self._completion(
                 repair_prompt,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=context.system_prompt,
                 retries=0,
                 schema_type="jd_import",
             )

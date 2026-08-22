@@ -31,6 +31,9 @@ from app.scripts.migrate_ai_chat_tool_call_state import (
 from app.scripts.migrate_ai_chat_tool_input_state import (
     migrate as migrate_ai_chat_tool_input_state,
 )
+from app.scripts.migrate_ai_chat_interaction_payload import (
+    migrate as migrate_ai_chat_interaction_payload,
+)
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.exc import IntegrityError
@@ -381,9 +384,6 @@ async def test_external_input_call_resolves_once_and_replays(isolated_db) -> Non
     )
     waiting = await service.request_input(call["tool_call_id"])
     assert waiting["status"] == "awaiting_input"
-    assert (await service.find_awaiting_input(run_id))["tool_call_id"] == call[  # type: ignore[index]
-        "tool_call_id"
-    ]
 
     first = await service.resolve_input(
         call["tool_call_id"], "client-input-1", {"answers": [{"value": "Python"}]}
@@ -394,7 +394,6 @@ async def test_external_input_call_resolves_once_and_replays(isolated_db) -> Non
     assert first.replayed is False
     assert replay.replayed is True
     assert replay.payload == {"answers": [{"value": "Python"}]}
-    assert await service.find_awaiting_input(run_id) is None
 
     with pytest.raises(IdempotencyConflictError):
         await service.resolve_input(
@@ -556,13 +555,14 @@ else:
 
 import app.ai_chat.tools as tools
 import app.ai_chat.tools.types as tool_types
+from app.ai_chat.context import ContextAssembler
 from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.services import ToolService
 from app.ai_chat.streaming.model import AiChatModel
 from app.ai_chat.tools.operation import RegisteredTool, ToolOperation
-from app.ai_chat.tools.repository import ToolCallRepository
+from app.ai_chat.repositories.tool_repository import ToolCallRepository
 from app.ai_chat.tools.store import ToolCallStore
 from app.database import db
 from app.experience import ExperienceAdapter
@@ -598,10 +598,12 @@ assert ToolOperation.__abstractmethods__ == {"prepare", "execute"}
 assert not hasattr(ContentChangeOperation, "security")
 assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
-assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "memory"}
+assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "context"}
 assert not hasattr(AiChatRuntime, "receive_tool_call")
 assert "decision" not in tool_types.ToolCall.__annotations__
 assert "client_resolution_id" not in tool_types.ToolCall.__annotations__
+assert "proposal_payload" not in tool_types.ToolCall.__annotations__
+assert "interaction_payload" in tool_types.ToolCall.__annotations__
 assert {"decision", "client_resolution_id"}.issubset(
     tool_types.ApprovalDecision.__annotations__
 )
@@ -611,7 +613,7 @@ service = ToolService(ToolCallStore(db.session, RepositoryFactory())).bind_tools
     adapter.get_tools(), adapter.get_tool_approval_policy()
 )
 graph = build_experience_graph(
-    AiChatRuntime(AiChatModel(), service, MemoryService())
+    AiChatRuntime(AiChatModel(), service, ContextAssembler(MemoryService()))
 )
 assert set(graph.nodes) == {
     "llm", "validator", "risk_assessment", "approver", "executor"
@@ -759,7 +761,7 @@ async def test_validate_call_rejects_corrupt_received_row_before_mutation(
             tool_name="demo",
             arguments={"value": "input"},
         )
-        row.proposal_payload = {"stale": "proposal"}
+        row.interaction_payload = {"stale": "proposal"}
         row.guard_payload = {"stale": "guard"}
         row.decision = "approve"
         row.client_resolution_id = "orphan-resolution"
@@ -782,7 +784,7 @@ async def test_validate_call_rejects_corrupt_received_row_before_mutation(
     assert durable.status == "received"
     assert durable.decision == "approve"
     assert durable.client_resolution_id == "orphan-resolution"
-    assert durable.proposal_payload == {"stale": "proposal"}
+    assert durable.interaction_payload == {"stale": "proposal"}
 
 
 async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db) -> None:
@@ -803,7 +805,7 @@ async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db)
         )
     assert row is not None
     assert row.status == "validated"
-    assert row.proposal_payload == {"value": "input"}
+    assert row.interaction_payload == {"value": "input"}
     assert row.guard_payload == {"value": "input", "trusted": "input"}
 
 
@@ -870,10 +872,10 @@ async def test_validate_call_concurrent_prepared_validation_keeps_one_durable_wi
         )
     assert row is not None
     assert row.status == "validated"
-    assert row.proposal_payload in ({"value": "input-1"}, {"value": "input-2"})
+    assert row.interaction_payload in ({"value": "input-1"}, {"value": "input-2"})
     assert row.guard_payload == {
-        "value": row.proposal_payload["value"],
-        "trusted": row.proposal_payload["value"],
+        "value": row.interaction_payload["value"],
+        "trusted": row.interaction_payload["value"],
     }
 
 
@@ -932,7 +934,7 @@ async def test_validate_call_maps_existing_durable_status(
             tool_name="demo",
             arguments={"value": "input"},
         )
-        row.proposal_payload = {"value": "input"}
+        row.interaction_payload = {"value": "input"}
         row.guard_payload = {"trusted": "input"}
         row.status = status
         if status == "approved":
@@ -955,7 +957,7 @@ async def test_validate_call_maps_existing_durable_status(
     assert "decision" not in dispatched
     assert "client_resolution_id" not in dispatched
     if status == "awaiting_approval":
-        assert dispatched["proposal_payload"] == {"value": "input"}
+        assert dispatched["interaction_payload"] == {"value": "input"}
     elif status == "approved":
         assert dispatched["should_execute"] is True
         assert row.decision == "approve"
@@ -991,7 +993,7 @@ async def test_validate_call_rejects_durable_decision_without_resolution_token(
             tool_name="demo",
             arguments={"value": "input"},
         )
-        row.proposal_payload = {"value": "input"}
+        row.interaction_payload = {"value": "input"}
         row.guard_payload = {"trusted": "input"}
         row.status = status
         row.decision = decision
@@ -1013,7 +1015,7 @@ async def test_validate_call_rejects_durable_decision_without_resolution_token(
         "status",
         "decision",
         "client_resolution_id",
-        "proposal_payload",
+        "interaction_payload",
         "guard_payload",
         "tool_result",
     ),
@@ -1045,7 +1047,7 @@ async def test_service_rejects_inconsistent_durable_tool_call_state(
     status: str,
     decision: str | None,
     client_resolution_id: str | None,
-    proposal_payload: dict[str, object] | None,
+    interaction_payload: dict[str, object] | None,
     guard_payload: dict[str, object] | None,
     tool_result: dict[str, object] | None,
 ) -> None:
@@ -1062,7 +1064,7 @@ async def test_service_rejects_inconsistent_durable_tool_call_state(
         row.status = status
         row.decision = decision
         row.client_resolution_id = client_resolution_id
-        row.proposal_payload = proposal_payload
+        row.interaction_payload = interaction_payload
         row.guard_payload = guard_payload
         row.tool_result = tool_result
         if status == "resolved":
@@ -1104,7 +1106,7 @@ async def test_service_rejects_incomplete_lifecycle_metadata(
             arguments={"value": "input"},
         )
         row.status = status
-        row.proposal_payload = {"value": "input"}
+        row.interaction_payload = {"value": "input"}
         row.guard_payload = {"trusted": "input"}
         row.delivery_status = delivery_status
         row.resolved_at = resolved_at
@@ -1135,7 +1137,7 @@ async def test_request_approval_is_durable_and_idempotent(isolated_db) -> None:
     assert replay["status"] == "awaiting_approval"
     assert request["replayed"] is False
     assert replay["replayed"] is True
-    assert request["proposal_payload"] == {"value": "input"}
+    assert request["interaction_payload"] == {"value": "input"}
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).tool_calls.get(
             prepared["tool_call_id"]
@@ -1525,7 +1527,7 @@ async def test_execute_call_uses_only_persisted_payloads_and_replays_result(
             prepared["tool_call_id"]
         )
         assert row is not None
-        row.proposal_payload = {"value": "persisted-proposal"}
+        row.interaction_payload = {"value": "persisted-proposal"}
         row.guard_payload = {
             "value": "persisted-proposal",
             "trusted": "persisted-guard",
@@ -1748,16 +1750,16 @@ async def test_repository_transition_persists_approval_before_execution(
         assert row is not None
         assert await repository.save_validation(
             row,
-            proposal_payload={"proposal": "trusted"},
+            interaction_payload={"proposal": "trusted"},
             guard_payload={"guard": "trusted"},
         ) is True
         assert row.status == "validated"
         assert await repository.save_validation(
             row,
-            proposal_payload={"proposal": "replacement"},
+            interaction_payload={"proposal": "replacement"},
             guard_payload={"guard": "replacement"},
         ) is False
-        assert row.proposal_payload == {"proposal": "trusted"}
+        assert row.interaction_payload == {"proposal": "trusted"}
         assert await repository.claim_approval_request(tool_call_id) is True
         assert await repository.claim_approval_request(tool_call_id) is False
         assert await repository.approve(tool_call_id, "approve-1") is True
@@ -1799,7 +1801,7 @@ async def test_repository_transition_rejects_or_executes_validated_call_once(
             assert row is not None
             await repository.save_validation(
                 row,
-                proposal_payload={"proposal": "trusted"},
+                interaction_payload={"proposal": "trusted"},
                 guard_payload={"guard": "trusted"},
             )
         assert await repository.claim_approval_request(rejected_id) is True
@@ -1951,6 +1953,8 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
     engine = create_engine(f"sqlite:///{path}")
     try:
         migrate_ai_chat_tool_call_state(engine)
+        migrate_ai_chat_tool_input_state(engine)
+        migrate_ai_chat_interaction_payload(engine)
     finally:
         engine.dispose()
 
@@ -1981,7 +1985,7 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
             row = await RepositoryFactory().create(session).tool_calls.get(1)
         assert row is not None
         assert row.status == "validated"
-        assert row.proposal_payload == {"proposal": 1}
+        assert row.interaction_payload == {"proposal": 1}
         assert row.guard_payload == {"guard": 1}
     finally:
         await database.close()
@@ -2011,7 +2015,7 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
         )
         assert await repositories.tool_calls.save_validation(
             row,
-            proposal_payload={"proposal": "trusted"},
+            interaction_payload={"proposal": "trusted"},
             guard_payload={"guard": "trusted"},
         ) is True
         await session.commit()
