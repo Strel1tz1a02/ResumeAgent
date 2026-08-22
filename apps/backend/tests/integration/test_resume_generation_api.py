@@ -1,6 +1,8 @@
 """简历生成 API 的确定性端到端闭环。"""
 
 import importlib
+import json
+import logging
 from typing import Any
 
 import pytest
@@ -21,6 +23,9 @@ resume_generation_router = importlib.import_module("app.resume_generation.router
 class _FakeRetriever:
     """API 测试隔离外部 Qdrant；原生查询契约由单元测试覆盖。"""
 
+    def __init__(self) -> None:
+        self.trace_calls: list[dict[str, Any]] = []
+
     async def retrieve(self, tasks, documents):
         return [
             RetrievedEvidence(
@@ -31,16 +36,36 @@ class _FakeRetriever:
             for document in documents
         ]
 
+    async def retrieve_with_trace(
+        self,
+        tasks,
+        documents,
+        *,
+        run_id,
+        search_round,
+    ):
+        """记录 Graph 传入的诊断上下文，再复用确定性召回结果。"""
+        self.trace_calls.append(
+            {
+                "run_id": run_id,
+                "search_round": search_round,
+            }
+        )
+        return await self.retrieve(tasks, documents)
+
 
 @pytest.fixture(autouse=True)
-def _replace_external_qdrant(monkeypatch: pytest.MonkeyPatch) -> None:
+def _replace_external_qdrant(monkeypatch: pytest.MonkeyPatch) -> _FakeRetriever:
+    retriever = _FakeRetriever()
+
     def build_service(session: Any) -> ResumeGenerationService:
         return ResumeGenerationService(
             session,
-            retriever=_FakeRetriever(),
+            retriever=retriever,
         )
 
     monkeypatch.setattr(resume_generation_router, "_service", build_service)
+    return retriever
 
 
 def _client() -> AsyncClient:
@@ -96,8 +121,16 @@ async def _seed_sources(isolated_db) -> tuple[int, int, int]:
         return jd.id, experience.experience_id, evidence.id
 
 
-async def test_preview_get_and_confirm_are_grounded_and_idempotent(isolated_db) -> None:
+async def test_preview_get_and_confirm_are_grounded_and_idempotent(
+    isolated_db,
+    caplog,
+    _replace_external_qdrant,
+) -> None:
     jd_id, experience_id, evidence_id = await _seed_sources(isolated_db)
+    caplog.set_level(
+        logging.INFO,
+        logger="app.resume_generation.observability",
+    )
 
     async with _client() as client:
         preview = await client.post(
@@ -129,6 +162,22 @@ async def test_preview_get_and_confirm_are_grounded_and_idempotent(isolated_db) 
     assert first_confirm.status_code == 200
     assert second_confirm.status_code == 200
     assert first_confirm.json()["resume_id"] == second_confirm.json()["resume_id"]
+    scoring_events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "app.resume_generation.observability"
+        and json.loads(record.getMessage()).get("event")
+        == "resume_generation.evidence_scoring"
+    ]
+    assert scoring_events
+    assert all(event["run_id"] == run_id for event in scoring_events)
+    assert scoring_events[0]["judgments"][0]["evidence_id"] == evidence_id
+    assert _replace_external_qdrant.trace_calls == [
+        {
+            "run_id": run_id,
+            "search_round": 1,
+        }
+    ]
 
     async with isolated_db.session() as session:
         assert (

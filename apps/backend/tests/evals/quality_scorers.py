@@ -1,4 +1,4 @@
-"""四项核心 AI 能力的纯确定性质量评分器。
+"""核心 AI 能力的纯确定性质量评分器。
 
 这些函数不调用模型，也不依赖数据库。真实能力 eval 与评分器测试共用它们，
 避免“测试代码”和“报告口径”各自定义一套质量标准。
@@ -74,6 +74,7 @@ class RetrievalQuality:
     precision_at_k: float
     recall_at_k: float
     reciprocal_rank: float
+    average_precision_at_k: float
     ndcg_at_k: float
     hit_at_k: bool
 
@@ -81,16 +82,35 @@ class RetrievalQuality:
 def score_retrieval(
     ranked_ids: list[int], relevant_ids: set[int], *, k: int
 ) -> RetrievalQuality:
-    """计算二元相关性的 Precision/Recall/MRR/nDCG。"""
+    """计算二元相关性的 Precision、Recall、RR、AP 与 nDCG。"""
     if k <= 0:
         raise ValueError("k must be positive")
     if not relevant_ids:
         raise ValueError("relevant_ids must not be empty")
 
-    deduplicated = list(dict.fromkeys(ranked_ids))[:k]
+    # 生产结果不应重复，但评分器仍需防止重复 ID 刷高指标。收满 K 个唯一
+    # 结果后立即停止，避免为很长的候选列表创建完整副本。
+    deduplicated: list[int] = []
+    seen: set[int] = set()
+    for evidence_id in ranked_ids:
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        deduplicated.append(evidence_id)
+        if len(deduplicated) == k:
+            break
+
     hits = [item in relevant_ids for item in deduplicated]
     hit_count = sum(hits)
     first_rank = next((index for index, hit in enumerate(hits, 1) if hit), None)
+    cumulative_hits = 0
+    precision_sum = 0.0
+    for index, hit in enumerate(hits, 1):
+        if not hit:
+            continue
+        cumulative_hits += 1
+        precision_sum += cumulative_hits / index
+    average_precision = precision_sum / min(len(relevant_ids), k)
     dcg = sum(1.0 / math.log2(index + 1) for index, hit in enumerate(hits, 1) if hit)
     ideal_hits = min(len(relevant_ids), k)
     ideal_dcg = sum(1.0 / math.log2(index + 1) for index in range(1, ideal_hits + 1))
@@ -98,6 +118,7 @@ def score_retrieval(
         precision_at_k=hit_count / k,
         recall_at_k=hit_count / len(relevant_ids),
         reciprocal_rank=0.0 if first_rank is None else 1.0 / first_rank,
+        average_precision_at_k=average_precision,
         ndcg_at_k=0.0 if ideal_dcg == 0 else dcg / ideal_dcg,
         hit_at_k=bool(hit_count),
     )

@@ -1,6 +1,6 @@
 # Eval 测评说明
 
-普通测试回答“代码是否按预期执行”，Eval 回答“模型输出的质量是否真的达标”。本目录覆盖旧版简历定制、会话记忆压缩，以及召回、经历导入、简历生成、经历改写四项核心能力。
+普通测试回答“代码是否按预期执行”，Eval 回答“模型输出的质量是否真的达标”。本目录覆盖旧版简历定制、会话记忆压缩，以及召回、JD 导入、经历导入、简历生成、经历改写五条核心能力链路。
 
 ## 两类测评
 
@@ -24,37 +24,37 @@
 
 简历定制测评由 LLM Judge 从相关性、真实性和格式三个维度评分。
 
-## 四项核心能力质量评测
+## 五项核心能力质量评测
 
-四项评测共用 `golden/quality_cases.py` 黄金集和 `quality_scorers.py` 评分口径：
+每项能力拥有独立的黄金样本和测试文件，共用 `quality_scorers.py` 评分口径、`quality_eval_support.py` 真实模型支持和 `quality_report.py` 报告输出：
 
-| 能力 | 客观指标 | 真实执行边界 |
-|---|---|---|
-| Evidence 召回 | Hit@3、Recall@3、MRR、nDCG@3 | 生产 dense/sparse 模型 + 内存 Qdrant + RRF |
-| JD 导入 | 字段/要求/优先级准确率、quote 接地率、禁止事实 | 生产 `LangChainJDImportModel` + Evidence assessor |
-| 经历导入 | 字段准确率、事实召回率、Evidence 数量、禁止事实命中 | 生产 `ExperienceTextExtractor` |
-| 简历生成 | 独立 JD 覆盖率、数字接地率、bullet 数、禁止事实、Judge | 生产 auto Graph；使用 oracle 候选隔离召回误差 |
-| 经历改写 | 事实召回率、数字接地率、目标类型、禁止事实、Judge | 生产 Prompt、ContextAssembler、Tool Schema 和流式 Tool Call |
+| 能力 | 黄金样本 | 测试文件 | 客观指标 | 真实执行边界 |
+|---|---|---|---|---|
+| Evidence 召回 | `golden/retrieval_cases.py` | `test_retrieval_quality.py` | Hit/MRR/nDCG@3、macro/micro Recall@5、MAP@5、切片指标 | 生产 dense/sparse 模型 + 内存 Qdrant + RRF |
+| JD 导入 | `golden/jd_import_cases.py` | `test_jd_import_quality.py` | 字段/要求/优先级准确率、quote 接地率、禁止事实 | 生产 `LangChainJDImportModel` + Evidence assessor |
+| 经历导入 | `golden/experience_import_cases.py` | `test_experience_import_quality.py` | 字段准确率、事实召回率、Evidence 数量、禁止事实命中 | 生产 `ExperienceTextExtractor` |
+| 简历生成 | `golden/resume_generation_cases.py` | `test_resume_generation_quality.py` | 独立 JD 覆盖率、数字接地率、bullet 数、禁止事实、Judge | 生产 auto Graph；使用 oracle 候选隔离召回误差 |
+| 经历改写 | `golden/experience_rewrite_cases.py` | `test_experience_rewrite_quality.py` | 事实召回率、数字接地率、目标类型、禁止事实、Judge | 生产 Prompt、ContextAssembler、Tool Schema 和流式 Tool Call |
 
 设计上刻意拆开两种误差：召回 eval 单测检索器；生成 eval 固定完整候选集，单测规划、证据判断和文案。否则生成失败时无法判断根因是“没找到”还是“不会写”。
 
-评分器反剧场测试默认执行，不触网、不调用模型：
+每个能力文件同时包含默认执行的确定性评分器测试，以及显式标记为 `eval` 的真实链路测试。默认执行不触网、不调用模型：
 
 ```powershell
-python -m pytest tests/evals/test_capability_quality_scorers.py -q
+python -m pytest tests/evals -q
 ```
 
-真实评测必须显式指定能力评测文件并选择 `eval`：
+真实能力评测必须显式选择 `eval`：
 
 ```powershell
-python -m pytest tests/evals/test_capability_quality_eval.py -m eval -s -q
+python -m pytest tests/evals/test_retrieval_quality.py tests/evals/test_jd_import_quality.py tests/evals/test_experience_import_quality.py tests/evals/test_resume_generation_quality.py tests/evals/test_experience_rewrite_quality.py -m eval -s -q
 ```
 
-首次召回评测可能下载配置中的 FastEmbed 模型。LLM 相关评测使用当前开发者配置；没有可用模型时安全跳过。所有样本均为人工虚构数据，不访问开发者业务数据库。
+首次召回评测可能下载配置中的 FastEmbed 模型。召回黄金集包含 24 条 Evidence 和 17 个查询，覆盖五类 Search Intent、多正例、中英文混合查询，以及共享父 Experience 上下文的难负例。LLM 相关评测使用当前开发者配置；没有可用模型时安全跳过。所有样本均为人工虚构数据，不访问开发者业务数据库。
 
 当前门槛：
 
-- 召回：Hit@3 = 100%，平均 MRR 与 nDCG@3 均不低于 0.80；
+- 召回：Hit@3 = 100%，MRR@3 不低于 0.80，nDCG@3 不低于 0.85；macro Recall@5 不低于 0.95、micro Recall@5 不低于 0.90、MAP@5 不低于 0.85；最差案例 Recall@5 不低于 0.50，多正例切片 macro Recall@5 不低于 0.80；
 - JD 导入：字段准确率 100%，要求召回率不低于 90%，优先级准确率不低于 75%，quote 接地率 100%，禁止事实为 0；
 - 经历导入：字段准确率和事实召回率均不低于 90%，Evidence 数量正确，禁止事实为 0；
 - 生成：独立 JD 覆盖率不低于 75%，数字接地率 100%，至少 2 条 bullet，Judge 的 grounding/overall 不低于 4/5；
@@ -72,6 +72,8 @@ tests/evals/results/quality/
 ```
 
 报告只记录 provider、model 和 reasoning effort，不写 API Key 或 API Base。
+
+召回文件是质量 Eval，不是生产性能基准。内存 Qdrant 不包含网络、磁盘、并发和服务冷启动成本，因此报告中的 pytest 总耗时不能用作延迟或吞吐 SLO；真实 Qdrant 的冷/热延迟与负载测试应使用独立性能套件。
 
 ## 会话记忆压缩测评
 
@@ -159,5 +161,10 @@ python -m pytest tests/evals/test_memory_compaction_eval.py -m eval -s -q
 
 - 简历定制样本：`golden/cases.py`
 - 记忆压缩样本：`golden/memory_cases.py`
+- Evidence 召回样本：`golden/retrieval_cases.py`
+- JD 导入样本：`golden/jd_import_cases.py`
+- 经历导入样本：`golden/experience_import_cases.py`
+- 简历生成样本：`golden/resume_generation_cases.py`
+- 经历改写样本：`golden/experience_rewrite_cases.py`
 
 新增样本时应追加新案例，不要改写已有案例。每个案例都需要明确标注应保留、应清除和禁止出现的信息，否则 Judge 的评分没有稳定依据。

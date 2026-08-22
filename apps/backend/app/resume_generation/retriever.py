@@ -14,6 +14,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 from qdrant_client import QdrantClient, models
 
+from app.resume_generation.observability import log_generation_trace
 from app.resume_generation.schemas import (
     EvidenceDocument,
     ExperienceSnapshot,
@@ -204,7 +205,77 @@ class QdrantEvidenceRetriever:
         documents: list[EvidenceDocument],
     ) -> list[RetrievedEvidence]:
         """对当前可用 Evidence ID 执行 Qdrant 原生混合查询。"""
+        return await self._retrieve(
+            tasks,
+            documents,
+            run_id=None,
+            search_round=None,
+            trace_enabled=False,
+        )
+
+    async def retrieve_with_trace(
+        self,
+        tasks: list[SearchTask],
+        documents: list[EvidenceDocument],
+        *,
+        run_id: str | None,
+        search_round: int | None,
+    ) -> list[RetrievedEvidence]:
+        """执行召回，并为完整生成链路附加 Run 与轮次上下文。
+
+        Args:
+            tasks: 本轮模型规划出的检索任务。
+            documents: 本次生成允许召回的 Evidence 文档。
+            run_id: 简历生成 Run ID。
+            search_round: 当前检索轮次。
+        """
+        return await self._retrieve(
+            tasks,
+            documents,
+            run_id=run_id,
+            search_round=search_round,
+            trace_enabled=True,
+        )
+
+    async def _retrieve(
+        self,
+        tasks: list[SearchTask],
+        documents: list[EvidenceDocument],
+        *,
+        run_id: str | None,
+        search_round: int | None,
+        trace_enabled: bool,
+    ) -> list[RetrievedEvidence]:
+        """执行逐问题召回，并按需在跨问题合并前保留诊断数据。
+
+        Args:
+            tasks: 本轮模型规划出的检索任务。
+            documents: 本次生成允许召回的 Evidence 文档。
+            run_id: 简历生成 Run ID。
+            search_round: 当前检索轮次。
+            trace_enabled: 是否记录包含经历正文的召回日志。
+        """
         if not tasks or not documents:
+            if trace_enabled:
+                log_generation_trace(
+                    "resume_generation.retrieval",
+                    run_id=run_id,
+                    search_round=search_round,
+                    payload={
+                        "status": "skipped",
+                        "skip_reason": (
+                            "no_search_tasks"
+                            if not tasks
+                            else "no_allowed_documents"
+                        ),
+                        "question": None,
+                        "retrieval_mode": "hybrid",
+                        "fusion": "rrf",
+                        "allowed_evidence_id_count": len(documents),
+                        "hit_count": 0,
+                        "hits": [],
+                    },
+                )
             return []
 
         store = await self._backend.ensure_store()
@@ -228,11 +299,75 @@ class QdrantEvidenceRetriever:
                 filter=query_filter,
                 hybrid_fusion=models.FusionQuery(fusion=models.Fusion.RRF),
             )
+            if trace_enabled:
+                self._log_task_results(
+                    task,
+                    found,
+                    run_id=run_id,
+                    search_round=search_round,
+                    allowed_evidence_id_count=len(evidence_ids),
+                )
             self._merge_task_results(merged, task, found)
 
         return sorted(
             merged.values(),
             key=lambda item: (-item.retrieval_score, item.document.evidence_id),
+        )
+
+    @staticmethod
+    def _log_task_results(
+        task: SearchTask,
+        found: list[tuple[Document, float]],
+        *,
+        run_id: str | None,
+        search_round: int | None,
+        allowed_evidence_id_count: int,
+    ) -> None:
+        """记录一个检索问题对应的原始片段、排名与 RRF 融合分。
+
+        Args:
+            task: 触发本次 Qdrant 查询的检索任务。
+            found: 尚未跨问题合并的 Qdrant 命中结果。
+            run_id: 简历生成 Run ID。
+            search_round: 当前检索轮次。
+            allowed_evidence_id_count: 传给 Qdrant 过滤器的 Evidence ID 数量。
+        """
+        hits: list[dict[str, Any]] = []
+        for rank, (langchain_document, score) in enumerate(found, start=1):
+            document = EvidenceDocument.model_validate(
+                langchain_document.metadata["evidence"]
+            )
+            raw_score = float(score)
+            hits.append(
+                {
+                    "rank": rank,
+                    "evidence_id": document.evidence_id,
+                    "experience_id": document.experience_id,
+                    "qdrant_fused_score_raw": raw_score,
+                    "retrieval_score": max(0.0, min(1.0, raw_score)),
+                    "searchable_text": langchain_document.page_content,
+                }
+            )
+        log_generation_trace(
+            "resume_generation.retrieval",
+            run_id=run_id,
+            search_round=search_round,
+            payload={
+                "status": "completed",
+                "question": {
+                    "task_id": task.task_id,
+                    "coverage_item_ids": task.coverage_item_ids,
+                    "intent": task.intent,
+                    "query": task.query,
+                    "requested_filters": task.filters,
+                    "top_k": task.top_k,
+                },
+                "retrieval_mode": "hybrid",
+                "fusion": "rrf",
+                "allowed_evidence_id_count": allowed_evidence_id_count,
+                "hit_count": len(hits),
+                "hits": hits,
+            },
         )
 
     @staticmethod

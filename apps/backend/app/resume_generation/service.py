@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_chat.graph import GraphDriver, LangGraphDriver
 from app.ai_chat.protocol import GraphOutcome
-from app.ai_chat.streaming.events import RuntimeEvent
 from app.ai_chat.run_state import RunStateMachine
+from app.ai_chat.streaming.events import RuntimeEvent
 from app.config import settings
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository
@@ -119,6 +119,7 @@ class ResumeGenerationService:
             async for item in self._graph_driver.stream(
                 graph=graph,
                 graph_input={
+                    "run_id": run_id,
                     "jd_source": jd_source,
                     "experiences": experiences,
                     "constraints": request.constraints,

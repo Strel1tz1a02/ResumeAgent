@@ -1,5 +1,7 @@
 """简历生成检索、组合和 Graph 停止条件。"""
 
+import json
+import logging
 from typing import Any
 
 from langchain_core.embeddings import Embeddings
@@ -67,6 +69,22 @@ class _FakeQdrantVectorStore:
             (document, max(0.1, 0.9 - index * 0.05))
             for index, document in enumerate(self.documents.values())
         ][:k]
+
+
+class _PerQueryScoreVectorStore(_FakeQdrantVectorStore):
+    """为同一片段按不同查询返回不同融合分，验证合并前日志。"""
+
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int,
+        **kwargs: Any,
+    ) -> list[tuple[Any, float]]:
+        self.search_calls.append({"query": query, "k": k, **kwargs})
+        if query == "无命中证据":
+            return []
+        score = 0.91 if query == "FastAPI API" else 0.37
+        return [(document, score) for document in self.documents.values()][:k]
 
 
 def _qdrant_retriever(
@@ -436,6 +454,104 @@ async def test_qdrant_retriever_executes_native_dense_sparse_rrf_query() -> None
     assert results[0].document.evidence_id == 11
 
 
+async def test_retrieval_logs_each_query_hit_before_score_merge(caplog) -> None:
+    experience = _experience(
+        1,
+        11,
+        action="使用 FastAPI 设计接口",
+        result="完成服务交付",
+        technologies=["FastAPI"],
+    )
+    documents = build_documents([experience])
+    store = _PerQueryScoreVectorStore()
+    store.add_documents(
+        [_to_langchain_document(item) for item in documents],
+        ids=[item.evidence_id for item in documents],
+    )
+    retriever = QdrantEvidenceRetriever(vector_store=store)
+    caplog.set_level(
+        logging.INFO,
+        logger="app.resume_generation.observability",
+    )
+
+    results = await retriever.retrieve_with_trace(
+        [
+            SearchTask(
+                task_id="fastapi",
+                coverage_item_ids=["api"],
+                intent="exact_skill",
+                query="FastAPI API",
+                top_k=2,
+            ),
+            SearchTask(
+                task_id="delivery",
+                coverage_item_ids=["delivery"],
+                intent="result_evidence",
+                query="服务交付",
+                top_k=2,
+            ),
+            SearchTask(
+                task_id="missing",
+                coverage_item_ids=["missing"],
+                intent="scenario",
+                query="无命中证据",
+                top_k=2,
+            ),
+        ],
+        documents,
+        run_id="run-log-1",
+        search_round=2,
+    )
+
+    events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "app.resume_generation.observability"
+        and json.loads(record.getMessage()).get("event")
+        == "resume_generation.retrieval"
+    ]
+    assert [event["question"]["query"] for event in events] == [
+        "FastAPI API",
+        "服务交付",
+        "无命中证据",
+    ]
+    assert [
+        event["hits"][0]["qdrant_fused_score_raw"]
+        for event in events
+        if event["hits"]
+    ] == [0.91, 0.37]
+    assert all(event["run_id"] == "run-log-1" for event in events)
+    assert all(event["search_round"] == 2 for event in events)
+    assert all(event["schema_version"] == 1 for event in events)
+    assert all(event["retrieval_mode"] == "hybrid" for event in events)
+    assert all(event["fusion"] == "rrf" for event in events)
+    assert events[0]["hits"][0]["evidence_id"] == 11
+    assert events[0]["hits"][0]["searchable_text"] == documents[0].searchable_text()
+    assert "使用 FastAPI 设计接口" in events[0]["hits"][0]["searchable_text"]
+    assert events[2]["hit_count"] == 0
+    assert events[2]["hits"] == []
+    assert results[0].retrieval_score == 0.91
+
+    caplog.clear()
+    await retriever.retrieve(
+        [
+            SearchTask(
+                task_id="unscoped",
+                coverage_item_ids=["api"],
+                intent="exact_skill",
+                query="FastAPI API",
+                top_k=1,
+            )
+        ],
+        documents,
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "app.resume_generation.observability"
+    ]
+
+
 def test_portfolio_promotes_unique_omitted_evidence_to_skill() -> None:
     source = _source()
     analysis = JDAnalysisSnapshot(
@@ -542,6 +658,74 @@ async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
     assert "requirement-2" in state["plan"].uncovered_requirements
     assert state["validation"].valid is True
     assert state["provenance"].bullets[0].evidence_ids == [11]
+
+
+async def test_graph_logs_evidence_scoring_with_candidate_context(caplog) -> None:
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 Python 和 FastAPI 设计 API",
+            result="完成服务交付",
+            technologies=["Python", "FastAPI"],
+        )
+    ]
+    graph = build_resume_generation_graph(
+        ResumeGenerationGraphDependencies(
+            model=RuleBasedResumeGenerationModel(),
+            retriever=_qdrant_retriever(experiences),
+        )
+    ).compile()
+    caplog.set_level(
+        logging.INFO,
+        logger="app.resume_generation.observability",
+    )
+
+    state = await graph.ainvoke(
+        {
+            "run_id": "run-score-1",
+            "jd_source": _source(),
+            "experiences": experiences,
+            "constraints": ResumeConstraints(max_search_rounds=1),
+        }
+    )
+
+    retrieval_events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "app.resume_generation.observability"
+        and json.loads(record.getMessage()).get("event")
+        == "resume_generation.retrieval"
+    ]
+    events = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "app.resume_generation.observability"
+        and json.loads(record.getMessage()).get("event")
+        == "resume_generation.evidence_scoring"
+    ]
+    assert retrieval_events
+    assert all(event["run_id"] == "run-score-1" for event in retrieval_events)
+    assert all(event["search_round"] == 1 for event in retrieval_events)
+    assert len(events) == 1
+    event = events[0]
+    assert event["run_id"] == "run-score-1"
+    assert event["search_round"] == 1
+    assert event["candidate_scope"] == "cumulative"
+    assert event["judge_model"] == {
+        "class": "RuleBasedResumeGenerationModel",
+        "fallback_used": False,
+    }
+    judgment = event["judgments"][0]
+    expected_judgment = state["judgments"][0].model_dump(mode="json")
+    assert judgment["evidence_id"] == 11
+    assert judgment["best_retrieval_score"] == 0.9
+    assert (
+        judgment["best_retrieval_score_scope"]
+        == "max_across_tasks_and_completed_rounds"
+    )
+    for field, value in expected_judgment.items():
+        assert judgment[field] == value
 
 
 async def test_graph_uses_model_defined_gap_for_replanning() -> None:

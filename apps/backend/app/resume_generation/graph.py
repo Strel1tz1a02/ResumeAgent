@@ -5,11 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
 
 from app.ai_chat.streaming.events import RuntimeEvent
 from app.resume_generation.model import ResumeGenerationModel
+from app.resume_generation.observability import log_generation_trace
 from app.resume_generation.planner import (
     assemble_plan,
     materialize_resume,
@@ -38,6 +39,7 @@ from app.schemas.models import ResumeData
 
 
 class ResumeGenerationState(TypedDict, total=False):
+    run_id: str
     jd_source: JDAnalysisSourceSnapshot
     experiences: list[ExperienceSnapshot]
     constraints: ResumeConstraints
@@ -98,9 +100,22 @@ def build_resume_generation_graph(
 
     async def retrieve(state: ResumeGenerationState) -> dict[str, Any]:
         documents = build_documents(state["experiences"])
-        current = await dependencies.retriever.retrieve(
-            state["search_tasks"], documents
+        traced_retrieve = getattr(
+            dependencies.retriever,
+            "retrieve_with_trace",
+            None,
         )
+        if traced_retrieve is None:
+            current = await dependencies.retriever.retrieve(
+                state["search_tasks"], documents
+            )
+        else:
+            current = await traced_retrieve(
+                state["search_tasks"],
+                documents,
+                run_id=state.get("run_id"),
+                search_round=state.get("search_round"),
+            )
         previous = state.get("retrieved", [])
         previous_ids = {item.document.evidence_id for item in previous}
         merged = merge_retrieval_rounds(previous, current)
@@ -112,10 +127,54 @@ def build_resume_generation_graph(
         }
 
     async def judge_evidence(state: ResumeGenerationState) -> dict[str, Any]:
+        fallback_events = getattr(dependencies.model, "fallback_events", [])
+        fallback_count_before = list(fallback_events).count("judge")
         judgments = await dependencies.model.judge(
             state["analysis"],
             state["all_search_tasks"],
             state["retrieved"],
+        )
+        fallback_events = getattr(dependencies.model, "fallback_events", [])
+        fallback_used = list(fallback_events).count("judge") > fallback_count_before
+        candidates_by_id = {
+            item.document.evidence_id: item for item in state["retrieved"]
+        }
+        judgment_rows: list[dict[str, Any]] = []
+        for judgment in judgments:
+            candidate = candidates_by_id.get(judgment.evidence_id)
+            row = judgment.model_dump(mode="json")
+            if candidate is not None:
+                row.update(
+                    {
+                        "best_retrieval_score": candidate.retrieval_score,
+                        "best_retrieval_score_scope": (
+                            "max_across_tasks_and_completed_rounds"
+                        ),
+                        "retrieval_task_ids": candidate.task_ids,
+                    }
+                )
+            judgment_rows.append(row)
+        model_details = {
+            "class": type(dependencies.model).__name__,
+            "fallback_used": fallback_used,
+        }
+        primary_model = getattr(dependencies.model, "primary", None)
+        fallback_model = getattr(dependencies.model, "fallback", None)
+        if primary_model is not None:
+            model_details["primary_class"] = type(primary_model).__name__
+        if fallback_model is not None:
+            model_details["fallback_class"] = type(fallback_model).__name__
+        log_generation_trace(
+            "resume_generation.evidence_scoring",
+            run_id=state.get("run_id"),
+            search_round=state.get("search_round"),
+            payload={
+                "status": "completed",
+                "judge_model": model_details,
+                "candidate_scope": "cumulative",
+                "candidate_count": len(state["retrieved"]),
+                "judgments": judgment_rows,
+            },
         )
         return {"judgments": judgments}
 
