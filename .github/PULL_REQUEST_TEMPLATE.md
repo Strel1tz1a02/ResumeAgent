@@ -1,50 +1,29 @@
-# Pull Request Title
-<!-- Provide a concise and descriptive title for the pull request -->
+## 变更说明
 
-## Related Issue
-<!-- If this pull request is related to an issue, please link it here using the "#" symbol followed by the issue number (e.g., #123) -->
+<!-- 说明改动的动机、解决的问题和主要实现。 -->
 
-## Description
-<!-- Describe the changes made in this pull request. What problem does it solve or what feature does it add/modify? -->
-copilot:summary
+## 关联 Issue
 
-## Type
-<!-- Check the relevant options by putting an "x" in the brackets -->
+<!-- 例如：Closes #123。没有关联 Issue 时请说明原因。 -->
 
-- [ ] Bug Fix
-- [ ] Feature Enhancement
-- [ ] Documentation Update
-- [ ] Code Refactoring
-- [ ] Other (please specify):
+## 验证方式
 
-## Proposed Changes
-<!-- List the specific changes made in this pull request -->
+<!-- 写出评审者可以复现的命令和操作步骤。勾选本次改动适用的项目。 -->
 
--
--
--
+- [ ] 后端：`cd apps/backend && uv run pytest`
+- [ ] 前端 lint：`cd apps/frontend && npm run lint`
+- [ ] 前端测试：`cd apps/frontend && npm run test`
+- [ ] 前端构建：`cd apps/frontend && npm run build`
+- [ ] 多语言：`python scripts/check_locale_parity.py`
+- [ ] 其他验证（请在下方说明）
 
-## Screenshots / Code Snippets (if applicable)
-<!-- Include any relevant screenshots or code snippets that help visualize the changes made -->
+## 界面变化
 
-## How to Test
-<!-- Provide step-by-step instructions or a checklist for testing the changes in this pull request -->
+<!-- 有界面变化时附前后截图或录屏；没有则写“无”。 -->
 
-1.
-2.
-3.
+## 提交前检查
 
-## Checklist
-<!-- Put an "x" in the brackets for the items that apply to this pull request -->
-
-- [ ] The code compiles successfully without any errors or warnings
-- [ ] The changes have been tested and verified
-- [ ] The documentation has been updated (if applicable)
-- [ ] The changes follow the project's coding guidelines and best practices
-- [ ] The commit messages are descriptive and follow the project's guidelines
-- [ ] All tests (if applicable) pass successfully
-- [ ] This pull request has been linked to the related issue (if applicable)
-
-## Additional Information
-<!-- Add any other information about the pull request that you think might be helpful -->
-copilot:walkthrough
+- [ ] 改动范围聚焦，未混入无关格式化或生成文件
+- [ ] 已补充或更新必要的测试与文档
+- [ ] 未提交 API Key、`.env`、个人数据或本地数据库
+- [ ] 新增/修改的用户文案已同步所有语言文件

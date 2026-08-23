@@ -1,8 +1,10 @@
-# Resume Matcher Agent 开发代码阅读路径
+# ResumeAgent 二次开发代码阅读路径
 
 > 目标：把“我设计了项目，但代码主要由 AI 生成”转化为“我能解释、调试、修改并为关键设计辩护”。
 >
-> 适用范围：当前仓库中的个人经历库、通用 `ai_chat` 运行时、`ExperienceAdapter`、LangGraph、Tool Call、Human-in-the-loop 与前端 SSE 接入。
+> 适用范围：当前仓库中的个人经历库、通用 `ai_chat` 运行时、Experience/JD Adapter、证据驱动简历生成、LangGraph、Tool Call、Human-in-the-loop 与前端 SSE 接入。
+>
+> 路径核验日期：2026-08-23。阅读前先看 `docs/codebase/STRUCTURE.md` 与 `ARCHITECTURE.md`；源码职责发生变化时，以生产代码和会失败的测试为准。
 
 ## 1. 学完后的验收标准
 
@@ -125,7 +127,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 ## 4. 总体路线
 
-路线共 16 课。前 4 课建立业务底座，第 5～13 课进入 Agent 主链，第 14～16 课完成可靠性、对比和面试迁移。
+路线共 18 课。前 4 课建立业务底座，第 5～13 课进入 Agent 主链，第 14～15 课横向比较 JD Import 与 Resume Generation，第 16～18 课完成可靠性、测试和面试迁移。
 
 ### 阶段 A：建立地图和确定性业务底座
 
@@ -146,13 +148,13 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 - 为什么 Adapter 是长期复用且无请求状态的？
 - 为什么注册表保存稳定名称，而不是到处直接实例化 Adapter？
 
-产出：三层边界图 + `BaseAdapter` 四个抽象方法的职责表。
+产出：三层边界图 + `BaseAdapter` 五个抽象方法的职责表；另记录非 approval 交互为何还要覆盖 `resolve_interaction()`。
 
 #### 第 2 课：Experience 聚合与 API 数据契约
 
 按顺序阅读：
 
-1. `apps/backend/app/models.py` 中 Experience、Evidence、ExperienceEvidence、FieldState、Revision 相关 ORM；
+1. `apps/backend/app/experience/models/experience.py::ExperienceItem`、`evidence.py::{EvidenceItem, ExperienceEvidence}`、`field_state.py::ExperienceFieldState`、`revision.py::ExperienceRevision`；
 2. `apps/backend/app/experience/schemas/experiences.py`；
 3. `apps/backend/app/experience/schemas/evidence_items.py`；
 4. `apps/backend/app/experience/services/experience_fields.py`；
@@ -192,7 +194,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 按顺序阅读：
 
-1. `apps/backend/app/models.py` 中 `ExperienceEvidence` 与 `ExperienceRevision`；
+1. `apps/backend/app/experience/models/evidence.py::ExperienceEvidence` 与 `models/revision.py::ExperienceRevision`；
 2. `apps/backend/app/experience/repositories/experience_revision_repository.py`；
 3. `apps/backend/app/experience/services/experience_field_service.py`；
 4. `apps/backend/app/experience/services/evidence_service.py`；
@@ -211,15 +213,15 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 按顺序阅读：
 
-1. `apps/backend/app/ai_chat/types.py`；
-2. `apps/backend/app/ai_chat/graph/state.py`；
+1. `apps/backend/app/ai_chat/types/adapter_input.py`、`subject_ref.py`、`scope_ref.py`、`validated_binding.py`；
+2. `apps/backend/app/ai_chat/protocol.py`；
 3. `apps/backend/app/ai_chat/tools/types.py`；
 4. `apps/backend/app/ai_chat/adapters/base.py`；
 5. `apps/backend/app/ai_chat/graph/runtime.py`；
 6. `apps/backend/app/ai_chat/container.py`；
 7. `apps/backend/app/main.py`。
 
-核心问题：Adapter 为什么要把统一 `AdapterInput` 转换成扩展 `BaseState` 的完整业务 State？哪些值必须 JSON 可序列化？
+核心问题：Adapter 为什么要把统一 `AdapterInput` 转换成完整的领域 State？哪些值必须 JSON 可序列化？为什么 Interaction/Outcome 独立于领域 State？
 
 产出：三种输入/状态结构的对照表。
 
@@ -231,7 +233,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 2. `apps/backend/app/ai_chat/repositories/conversation_repository.py`；
 3. `apps/backend/app/ai_chat/repositories/run_repository.py`；
 4. `apps/backend/app/ai_chat/repositories/message_repository.py`；
-5. `apps/backend/app/ai_chat/repositories/tool_call_repository.py`。
+5. `apps/backend/app/ai_chat/repositories/tool_repository.py`。
 
 核心问题：Conversation 和 Run 为什么拆开？为什么一个会话只能有一个 current run？数据库唯一约束解决了什么竞争条件？
 
@@ -243,10 +245,10 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 1. `AiChatService.create_conversation()`；
 2. `AiChatService.stream_message()`；
-3. `_start_run()`、`_build_input()`、`_execute()` 等被直接调用的内部函数；
+3. `_stream_new_run()`、`_build_input()`、`_execute()` 等被直接调用的内部函数；
 4. 对应 Repository 方法。
 
-文件：`apps/backend/app/ai_chat/services/service.py`。
+文件：`apps/backend/app/ai_chat/services/ai_chat_service.py`。
 
 核心问题：用户消息为什么先落库再调用模型？assistant 消息为什么先以 `generating` 创建？失败时保留什么？
 
@@ -277,7 +279,7 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 4. `apps/backend/app/experience/schemas/ai_chat.py`；
 5. `apps/backend/app/experience/routers/ai_chat.py`。
 
-核心问题：为什么用 POST + 流式响应而不是浏览器原生 `EventSource`？业务 Router 为什么要把内部事件映射成业务事件？
+核心问题：为什么用 POST + 流式响应而不是浏览器原生 `EventSource`？为什么 Experience/JD Router 共用 `runtime_sse_response()`，而业务差异下沉到 `payload.kind`？
 
 产出：前端状态、HTTP 请求和 SSE 事件对照表。
 
@@ -301,10 +303,9 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 ```text
 START
-→ prepare_turn
-→ agent_stream
-→ route_model_output
-→ persist_answer
+→ llm
+→ route_after_llm
+→ done（普通文本）
 → END
 ```
 
@@ -345,9 +346,41 @@ START
 
 产出：暂停前、暂停中、恢复后的数据库状态与 checkpoint 状态表。
 
-### 阶段 D：可靠性、对比和面试迁移
+### 阶段 D：横向理解另外两个二开领域
 
-#### 第 14 课：幂等、并发、断流与失败恢复
+#### 第 14 课：JD Import——外部采集与 question_batch 中断
+
+按顺序阅读：
+
+1. `apps/backend/app/jd_import/adapters/adapter.py`；
+2. `apps/backend/app/jd_import/graph/builder.py`；
+3. `apps/backend/app/jd_import/tools/ask_questions.py` 与 `persist_jd.py`；
+4. `apps/backend/app/jd_import/sources/url_policy.py` 与 `playwright_mcp.py`；
+5. `apps/backend/app/jd_import/routers/agent.py`；
+6. `apps/frontend/lib/api/jd-imports.ts` 与 `apps/frontend/components/jd-imports/jd-import-workspace.tsx`。
+
+核心问题：`question_batch` 为什么不是 approval？为什么 Adapter 必须校验并固化回答？`persist_jd` 为什么对模型不可见？URL 获取失败、最多三轮补问和部分候选落库分别在哪里收口？
+
+产出：JD 导入从 URL/文本到持久化的状态图 + question_batch 请求/解决载荷对照表。
+
+#### 第 15 课：Resume Generation——部分复用 Runtime 的证据流水线
+
+按顺序阅读：
+
+1. `apps/backend/app/resume_generation/router.py`；
+2. `apps/backend/app/resume_generation/service.py`；
+3. `apps/backend/app/resume_generation/graph.py`；
+4. `apps/backend/app/resume_generation/planner.py`、`retriever.py` 与 `validation.py`；
+5. `apps/backend/app/resume_generation/indexing.py` 与 `index_worker.py`；
+6. `apps/frontend/lib/api/resume-generations.ts` 与 `apps/frontend/components/resume-generation/resume-generation-workspace.tsx`。
+
+核心问题：九阶段 Graph 如何从 JD 分析、混合检索走到 fact/reference validation？它为什么只复用 `GraphDriver`、`GraphOutcome`、`RuntimeEvent(result.available)`、`RunStateMachine` 与结构化 Context，而没有接入 Adapter、checkpoint、Interaction 和 SSE？这里的 RuntimeEvent 只作为内部 Graph→Service 结果载体。Experience 事务、Outbox、ARQ 与 Qdrant 如何保证索引最终一致？preview 与 confirm 为什么拆开？
+
+产出：九阶段数据流 + “已复用/未复用 Runtime 能力”对照表 + 一张索引最终一致性时序图。
+
+### 阶段 E：可靠性、对比和面试迁移
+
+#### 第 16 课：幂等、并发、断流与失败恢复
 
 从失败场景反向查代码：
 
@@ -359,11 +392,11 @@ START
 - Tool 已应用但模型续答失败：pending Tool Result；
 - 生成期间字段变化：revision guard。
 
-主要文件：`service.py`、`runner.py`、四个 Repository、`experience_ai_mutation_service.py` 及相关测试。
+主要文件：`ai_chat/services/ai_chat_service.py`、`graph/runner.py`、Conversation/Run/Message/Tool Repository、`experience_ai_mutation_service.py` 及相关测试。
 
 产出：至少 10 个“故障—保护机制—剩余风险”三列表。
 
-#### 第 15 课：测试、调试与 Agent Eval
+#### 第 17 课：测试、调试与 Agent Eval
 
 按顺序阅读：
 
@@ -371,13 +404,13 @@ START
 2. `apps/backend/tests/unit/test_ai_chat_model.py`；
 3. `apps/frontend/tests/experience-ai-chat.test.ts`；
 4. `apps/backend/tests/evals/README.md`；
-5. `apps/backend/tests/evals/scorers.py`。
+5. `apps/backend/tests/evals/quality_scorers.py`。
 
 核心问题：哪些测试验证确定性机制？哪些测试验证 LLM 质量？Mock 到哪一层才不会变成“测试戏剧”？
 
 产出：测试金字塔 + 为一个失败场景新增测试草案。
 
-#### 第 16 课：对比旧 LLM 流程、独立扩展与面试演练
+#### 第 18 课：对比旧 LLM 流程、独立扩展与面试演练
 
 对比阅读：
 
@@ -408,7 +441,6 @@ createExperienceConversation
 → AiChatService.create_conversation
 → ExperienceAdapter.validate_request
 → ConversationRepository.create
-→ ExperienceFieldService.snapshot
 ```
 
 ### 5.2 发送消息并返回普通文本
@@ -420,7 +452,8 @@ streamExperienceMessage
 → 创建 user message / run / generating assistant message
 → GraphRunner.stream
 → ExperienceAdapter.parse_input
-→ ExperienceGraph.agent_stream
+→ ExperienceFieldService.snapshot
+→ ExperienceGraph.llm
 → AiChatRuntime.stream_model
 → ContextAssembler.assemble
 → AiChatModel.stream
@@ -472,7 +505,7 @@ streamExperienceMessage
 ```text
 问题：通用会话机制不应该认识 Experience 字段语义。
 方案：以 BaseAdapter 作为通用运行时与业务 AI 接入层的稳定协议。
-代码：validate_request、parse_input、build_graph、get_tools。
+代码：validate_request、parse_input、build_graph、get_tools、get_tool_approval_policy。
 权衡：增加了一层抽象和注册机制，但换来业务隔离和可扩展性。
 改进：新增 ResumeOptimizationAdapter 验证协议是否真正通用。
 ```
@@ -497,5 +530,7 @@ streamExperienceMessage
 | 14 | 未开始 | 否 |  |  |
 | 15 | 未开始 | 否 |  |  |
 | 16 | 未开始 | 否 |  |  |
+| 17 | 未开始 | 否 |  |  |
+| 18 | 未开始 | 否 |  |  |
 
 只有完成产出并通过脱稿问答，才能把一课标记为完成。

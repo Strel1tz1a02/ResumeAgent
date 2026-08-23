@@ -3,10 +3,10 @@
 ## 1) 架构风格
 
 - 主风格：模块化单体 + 领域插件式 Agent Graph + 事件驱动的 Runtime 控制面。
-- 一句话边界：上游统一的是 Driver、Outcome、Run、Interaction、Event、Context；下游保留每个业务自己的节点、边、领域状态与结果模型。
+- 一句话边界：通用 Runtime 层统一 Driver、Outcome、Run、Interaction、Event、Context；业务层保留自己的节点、边、领域状态与结果模型。这里的“通用层”不要与原始 `srbhr/Resume-Matcher` 上游仓库混淆。
 - 约束一：Runtime 不得导入 Experience、JD Import、Resume Generation。
-- 约束二：持久化事实必须先提交，事件随后发出；checkpoint 不是业务事实源。
-- 约束三：模型输入必须经 ContextAssembler，恢复必须经持久化 Interaction 身份。
+- 约束二：AiChat 对外 lifecycle/interaction/terminal 事件必须在对应事实提交后发出；checkpoint 不是业务事实源。Resume Graph 的内部 `result.available` 是 Graph→Service 结果载体，随后才由 Service 持久化，并不直接走 SSE。
+- 约束三：本轮 Experience、JD 与 Resume Generation 的 Agent/Graph 模型输入必须经 ContextAssembler；旧 improver/refiner 尚未迁移。恢复必须经持久化 Interaction 身份。
 
 证据：docs/superpowers/specs/2026-08-17-agent-runtime-unification-design.zh-CN.md；apps/backend/tests/unit/test_agent_runtime_boundaries.py。
 
@@ -31,7 +31,7 @@ HTTP / domain schema ────┼── JD Adapter ────────�
                     frontend parseRuntimeSse -> domain projections
 ~~~
 
-所以“Graph 放上游”不等于把三张业务图合成一张；上游只持有可执行 Graph 的端口，具体图由 Adapter 注入。
+所以“把 Graph 执行能力上提到通用层”不等于把三张业务图合成一张。Experience/JD 由 Adapter 向 Runtime 注入图；非对话的 Resume Generation 则由领域 Service 直接构图并调用 GraphDriver。
 
 ## 3) 输入为什么不是一套对象
 
@@ -41,8 +41,8 @@ HTTP / domain schema ────┼── JD Adapter ────────�
 |----|------------|------------------|------|
 | HTTP domain schema | 前端提交的业务请求是否合法 | 是 | experience/routers/ai_chat.py；jd_import/schemas/agent.py |
 | AdapterInput | 首次启动 Graph 的完整内部快照 | messages、tools、subject 等启动数据 | ai_chat/types/adapter_input.py:8 |
-| ResolveInteractionCommand | 解决哪个 Run 的哪个 Interaction，如何幂等 | 是；含 client_resolution_id 与领域 payload | ai_chat/protocol.py:65 |
-| GraphResumeCommand | 唤醒哪个 checkpoint 等待点 | 否；只含 run_id、interaction_id | ai_chat/protocol.py:106 |
+| ResolveInteractionCommand | 解决哪个 Run 的哪个 Interaction，如何幂等 | 是；含 client_resolution_id 与领域 payload | ai_chat/protocol.py:66 |
+| GraphResumeCommand | 唤醒哪个 checkpoint 等待点 | 否；只含 run_id、interaction_id | ai_chat/protocol.py:107 |
 
 不能用 AdapterInput 直接恢复，原因是它没有 interaction 身份、幂等键、领域 resolution 与 replay 语义。当前正确路径是：
 
@@ -79,7 +79,7 @@ client payload
 6. Driver recover checkpoint，Run 回到 running，再以 identity-only command 恢复。
 7. 已提交过的同一命令返回 command.replayed；不同 payload/id 冲突。
 
-证据：experience/graph/builder.py:178；jd_import/graph/builder.py:224；ai_chat/tools/approval/service.py；ai_chat/tools/input.py；ai_chat/services/ai_chat_service.py:331。
+证据：experience/graph/builder.py:191；jd_import/graph/builder.py:268；ai_chat/tools/approval/service.py；ai_chat/tools/input.py；ai_chat/services/ai_chat_service.py:330。
 
 当前限制：一个 checkpoint 只能有一个 active Interaction；多个 interrupt 会被 Driver 拒绝。JD 因此把最多 12 个问题封装为一个 question_batch。它还不是支持并行子 Agent、多审批 join 的 Harness。
 
@@ -94,7 +94,7 @@ client payload
 | Graph 执行位置、节点临时态 | LangGraph checkpoint DB | LangGraph Driver | 是，仅对此类别 |
 | Experience/JD 等领域对象 | 各领域数据库/repository | 领域服务 | 否 |
 | Resume preview/confirmed | Resume artifact_status | Resume Generation service | 否 |
-| 前端视图状态 | React/TanStack Query 投影 | 领域 hooks/components | 否 |
+| 前端视图状态 | React 领域投影；Experience 额外使用局部 TanStack Query cache | 领域 hooks/components | 否 |
 
 RunStateMachine 上游化的是状态词汇与合法转换；具体业务仍通过 RunStore 写自己的表，因此 int/string Run ID 和不同 ORM 模型可以共存。
 
@@ -131,12 +131,12 @@ system
 RuntimeEvent {
   type: string,
   run_id?: int | string,
-  sequence?: positive integer,
+  sequence: positive integer,
   payload: object
 }
 ~~~
 
-核心事件：run.started、output.delta、interaction.requested、interaction.resolved、result.available、run.suspended、run.completed、run.failed、run.cancelled、command.replayed。
+生产代码实际发出的核心事件：run.started、output.delta、interaction.requested、interaction.resolved、result.available、run.suspended、run.completed、run.failed、command.replayed。Run 状态可写为 cancelled，但当前没有对应的 `run.cancelled` SSE 发射点。
 
 改造效果：
 
@@ -147,11 +147,11 @@ RuntimeEvent {
 
 证据：ai_chat/streaming/events.py、streaming/sse.py；frontend/lib/api/runtime-events.ts；frontend/lib/api/experience-ai-chat.ts；frontend/lib/api/jd-imports.ts。
 
-这只是 envelope/transport 统一，不是强类型事件 schema 或可重放事件日志：sequence 当前按 SSE 连接临时生成，前端只校验、不去重、不重连，也没有 Last-Event-ID。
+内部 `RuntimeEvent` 在编码前可没有 sequence，但 SSE wire envelope 必填；编码器按连接临时生成，前端只校验、不去重、不重连，也没有 Last-Event-ID。因此这只是 envelope/transport 统一，不是强类型事件 schema 或可重放事件日志。
 
-## 8) Run 与 Graph 上游化
+## 8) Run 与 Graph 上提到通用层
 
-| 上游能力 | 抽象 | 业务保留 |
+| 通用能力 | 抽象 | 业务保留 |
 |----------|------|----------|
 | Graph 执行 | GraphDriver.stream/resume/recover | 节点、边、State schema |
 | Graph 收口 | GraphOutcome.completed/waiting | 领域 result payload |
@@ -163,7 +163,7 @@ RuntimeEvent {
 
 - Experience：LLM -> validator -> risk -> approval interrupt -> executor。
 - JD Import：parse -> URL/source -> extract -> assess -> plan -> question interrupt -> merge -> persist。
-- Resume Generation：plan/retrieve/generate -> result.available；当前无 checkpointer。
+- Resume Generation：analyze JD -> plan search -> dense+sparse retrieve -> judge evidence -> assemble/critique/replan -> draft -> fact/reference validate -> materialize/result.available；当前无 checkpointer。
 
 证据：experience/graph/builder.py；jd_import/graph/builder.py；resume_generation/graph.py。
 
@@ -183,24 +183,31 @@ RuntimeEvent {
 
 核心结论：Experience/JD 已完成主控制面接入；Resume Generation 只完成 Driver、Context、Run 状态和结果事件格式复用，不能称为完整 Runtime 客户。
 
-## 10) 从工作树可见的实施清单
+## 10) 二开相对上游的架构增量
 
-本轮工作树相对 HEAD 3e0de4c 仍有大量未提交改动；截至 2026-08-20，`git status --short` 显示 71 个 tracked 状态项和 25 个 untracked 项（后者包含本目录七份代码库文档）。精确数量会随开发继续变化，架构判断应以文件职责与测试证据为准。主要工作为：
+`.git-upstream-backup` 冻结了 `srbhr/Resume-Matcher` 的 `dd9b5c3` tree；当前仓库是无共同 ancestry 的独立历史。tree comparison 显示 ResumeAgent 的核心增量不是几处补丁，而是三层新能力：
 
-1. 新建 protocol.py：Interaction、Resolve command、identity-only resume、GraphOutcome。
-2. 新建 graph/driver.py，并把 runner.py 从 LangGraph/业务细节改为通用委托。
-3. 新建 run_state.py、services/run_lifecycle.py，拆出状态机和原子收口。
-4. 新建 context/assembler.py，删除 Experience 私有 context.py 并迁移三业务模型调用。
-5. 重写 RuntimeEvent 与 SSE encoder；前端新建 runtime-events.ts。
-6. Experience/JD 改为 Adapter 自有 Graph + 结构化 Interaction + 通用 result.available。
-7. Resume Generation 拆分 Run status 与 artifact_status，并通过 Driver/StateMachine 运行。
-8. 新增交互载荷和 Resume Run 生命周期迁移。
-9. 新增协议、边界、Driver、Context、Run 状态、迁移与恢复回归测试。
-10. 更新旧设计文档，新增统一设计与实施计划。
+1. 控制面：`app/ai_chat/`、`app/background_jobs/`，负责 Run、Interaction、Tool、Memory、Graph Driver、SSE 和 Outbox。
+2. 业务面：`app/experience/`、`app/jd_import/`、`app/resume_generation/`，把真实经历证据、JD 结构化与可追溯生成串成新主链。
+3. 交互面：前端 experiences、jd-imports、resume-generation 工作区，统一 Runtime SSE parser，以及 Experience 的 TanStack Query 缓存。
 
-证据：git status --short；git diff --stat；docs/superpowers/plans/2026-08-17-agent-runtime-unification.md。
+原有 resume CRUD、builder/tailor、模板/PDF、tracker 与 improver/refiner 仍保留。这使当前系统同时存在“旧一次性 LLM pipeline”和“新 Agent/Graph pipeline”，二开时必须先判断目标属于哪条链，不能在两边各实现一次。
 
-## 11) Intent 与 Reality 偏差
+证据：`.git-upstream-backup/config`；`git log --reverse`；当前/backup tree comparison；上述目录。
+
+## 11) 稳定扩展接口与不稳定内部
+
+| 扩展目标 | 优先使用 | 不应直接耦合 |
+|----------|----------|--------------|
+| 新对话 Agent | BaseAdapter、`app.ai_chat.register_adapter()`、main.py composition root、领域 router、RuntimeEvent/GraphOutcome、runtime_sse_response | 直接操作容器内部 AdapterRegistry/GraphRunner、AiChatService 私有流程、LangGraph checkpoint snapshot 格式 |
+| 新 Tool | ToolOperation、RegisteredTool、ToolApprovalPolicy、ToolService | 前端提交的展示 payload、直接跨过领域 Service 写库 |
+| 新外部交互 | InteractionRequest、Adapter.resolve_interaction、identity-only GraphResumeCommand | 把未经校验的客户端 payload 直接塞回 checkpoint |
+| 新非对话 Graph | GraphDriver、RunStateMachine、ContextAssembler.assemble_structured | 假装已经具备 checkpoint/SSE/Interaction；Resume Generation 就是当前部分接入示例 |
+| 新领域持久化 | repository/service + request-scoped session + outbox | 把 checkpoint 当业务事实源，或在提交前发完成事件 |
+
+Adapter 的默认稳定名是类名并持久化到 Conversation；GraphRunner 也按该名称缓存图。重命名 Adapter 必须考虑旧会话迁移，不能当普通类重命名处理。
+
+## 12) Intent 与 Reality 偏差
 
 | 设计意图 | 当前现实 | 判断 |
 |----------|----------|------|
@@ -212,7 +219,7 @@ RuntimeEvent {
 | 中断恢复统一 | interaction resolution 失败后可重试/自愈；没有非交互崩溃的公开 ResumeRun API | 只覆盖一类恢复 |
 | Interaction 是通用概念 | 持久化仍复用 Tool Call 表 | 对审批/问答可用，对未来任意 human/webhook interaction 有耦合 |
 
-## 12) 已知架构风险
+## 13) 已知架构风险
 
 - 事件不持久化，SSE sequence 每次连接重置；浏览器刷新/断线无法按 cursor 重放。
 - 前端没有 pending Interaction 查询与 hydration；等待 UI 主要存在组件内存。
@@ -220,8 +227,9 @@ RuntimeEvent {
 - Resume Generation 没有 checkpoint，也没有取消/中断/崩溃恢复入口。
 - RunLifecycleService 仍绑定 conversation/message/tool delivery；真正跨业务的是 RunStateMachine，不应误称所有生命周期已统一。
 - structured repair 在已预算请求后追加 validation errors，最终重试请求没有再次统一预算。
+- 生产装配缺少对 `_register_business_adapters()`、lifespan、JD Agent HTTP/SSE 的直接契约测试；现有 coverage 以单元 Graph/Tool 与 CRUD integration 为主。
 
-## 13) Evidence
+## 14) Evidence
 
 - docs/superpowers/specs/2026-08-17-agent-runtime-unification-design.zh-CN.md
 - docs/superpowers/plans/2026-08-17-agent-runtime-unification.md
@@ -237,5 +245,7 @@ RuntimeEvent {
 - apps/backend/app/experience/graph/builder.py
 - apps/backend/app/jd_import/graph/builder.py
 - apps/backend/app/resume_generation/service.py
+- apps/backend/app/resume_generation/graph.py
 - apps/frontend/lib/api/runtime-events.ts
+- .git-upstream-backup/config
 - apps/backend/tests/unit/test_agent_runtime_boundaries.py
