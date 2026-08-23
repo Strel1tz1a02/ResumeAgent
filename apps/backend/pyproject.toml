@@ -9,7 +9,7 @@ dependencies = [
     "python-multipart==0.0.31",
     "pydantic==2.12.5",
     "pydantic-settings==2.14.2",
-    "tinydb==4.8.2",
+    "tinydb==4.9.0",
     "sqlalchemy[asyncio]==2.0.36",
     "aiosqlite==0.20.0",
     "arq==0.28.0",
