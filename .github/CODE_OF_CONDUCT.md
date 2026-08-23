@@ -59,8 +59,9 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-[srbh077@gmail.com](mailto:srbh077@gmail.com).
+reported privately through the repository's
+[private reporting channel](https://github.com/Strel1tz1a02/resume-agent/security/advisories/new).
+Please include "Code of Conduct" in the report title.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
