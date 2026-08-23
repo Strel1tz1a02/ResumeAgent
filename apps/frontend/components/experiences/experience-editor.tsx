@@ -165,7 +165,8 @@ export function ExperienceEditor({
       patchMutation.reset();
     } else {
       const appliedScope = chat.lastBusinessResult?.scope as
-        { field?: string; evidence_id?: number | null } | undefined;
+        | { field?: string; evidence_id?: number | null }
+        | undefined;
       setDraft((current) => {
         const next = { ...current };
         for (const key of Object.keys(server) as DraftKey[]) {

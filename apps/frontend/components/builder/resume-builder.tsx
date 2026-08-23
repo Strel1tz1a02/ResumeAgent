@@ -1086,13 +1086,7 @@ const ResumeBuilderContent = () => {
         {/* Footer */}
         <div className="p-4 bg-background flex justify-between items-center font-mono text-xs text-blue-700 border-t border-black no-print">
           <span className="uppercase font-bold flex items-center gap-2">
-            <Image
-              src="/logo.svg"
-              alt="Resume Matcher"
-              width={20}
-              height={20}
-              className="w-5 h-5"
-            />
+            <Image src="/logo.svg" alt="ResumeAgent" width={20} height={20} className="w-5 h-5" />
             {t('builder.footer.moduleLabel')}
           </span>
           <div className="flex items-center gap-4">

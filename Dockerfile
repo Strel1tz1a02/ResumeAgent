@@ -1,4 +1,4 @@
-# Resume Matcher Docker Image
+# ResumeAgent Docker image
 # Multi-stage build for optimized image size
 
 # ============================================
@@ -29,7 +29,7 @@ RUN npm run build
 # ============================================
 # Stage 2: Final Image
 # ============================================
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \

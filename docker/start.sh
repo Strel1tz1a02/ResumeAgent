@@ -16,26 +16,8 @@ BACKEND_PORT="8000"
 
 # Print banner
 print_banner() {
-    echo -e "${CYAN}"
-    cat << 'EOF'
-
- ██████╗ ███████╗███████╗██╗   ██╗███╗   ███╗███████╗
- ██╔══██╗██╔════╝██╔════╝██║   ██║████╗ ████║██╔════╝
- ██████╔╝█████╗  ███████╗██║   ██║██╔████╔██║█████╗
- ██╔══██╗██╔══╝  ╚════██║██║   ██║██║╚██╔╝██║██╔══╝
- ██║  ██║███████╗███████║╚██████╔╝██║ ╚═╝ ██║███████╗
- ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝
-
- ███╗   ███╗ █████╗ ████████╗ ██████╗██╗  ██╗███████╗██████╗
- ████╗ ████║██╔══██╗╚══██╔══╝██╔════╝██║  ██║██╔════╝██╔══██╗
- ██╔████╔██║███████║   ██║   ██║     ███████║█████╗  ██████╔╝
- ██║╚██╔╝██║██╔══██║   ██║   ██║     ██╔══██║██╔══╝  ██╔══██╗
- ██║ ╚═╝ ██║██║  ██║   ██║   ╚██████╗██║  ██║███████╗██║  ██║
- ╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝
-
-EOF
-    echo -e "${NC}"
-    echo -e "${BOLD}        Crazy Stuff with Resumes and Cover letters${NC}"
+    echo -e "${CYAN}${BOLD}ResumeAgent${NC}"
+    echo -e "${BOLD}Evidence-grounded resumes for real job applications.${NC}"
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -112,7 +94,7 @@ cleanup() {
     trap '' SIGTERM SIGINT SIGQUIT
 
     echo "" >&2
-    info "Shutting down Resume Matcher..."
+    info "Shutting down ResumeAgent..."
 
     # Kill frontend if running
     if [ -n "$FRONTEND_PID" ] && kill -0 "$FRONTEND_PID" 2>/dev/null; then
