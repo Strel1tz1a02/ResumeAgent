@@ -1,33 +1,51 @@
-- Windows 本地开发推荐使用一键启动脚本。首次运行或依赖变化时加 `-Setup`：
-```bash
-.\start-dev.ps1
-.\start-dev.ps1 -Setup
-```
+# ResumeAgent 启动速查
 
-脚本默认使用 `E:\MiniConda` 下的 `resume-matcher` 环境；它会创建缺失的
-`.env`/`.env.local`，按需启动 Docker Desktop，并启动 Redis、Qdrant、受限出口的
-Playwright MCP、后端、Memory Worker、Resume Index Worker 和前端。若这些基础设施已由其他方式运行：
+完整说明见 [中文安装指南](SETUP.zh-CN.md) / [English setup guide](SETUP.md)。
+
+## 普通用户
 
 ```bash
-.\start-dev.ps1 -SkipInfrastructure
+docker compose up --build -d
 ```
 
-手动启动时，先启动基础设施：
+打开 <http://localhost:3000>，进入设置配置模型提供商。
+
+## Windows 本地开发
+
+```powershell
+./start-dev.ps1 -Setup
+```
+
+后续启动使用 `./start-dev.ps1`。脚本会启动 Redis、Qdrant、Playwright MCP、FastAPI、两个 ARQ worker 与 Next.js。
+
+## 手动开发
 
 ```bash
 docker compose up -d redis qdrant playwright-mcp-gateway
 ```
 
-然后分别启动以下进程：
+然后在不同终端分别启动：
 
 ```bash
+# 终端 1
 cd apps/backend
-conda run -n resume-matcher python -m app.main
-conda run -n resume-matcher arq app.ai_chat.memory.worker.WorkerSettings
-conda run -n resume-matcher arq app.resume_generation.index_worker.WorkerSettings
+uv run app
+```
+
+```bash
+# 终端 2
+cd apps/backend
+uv run arq app.ai_chat.memory.worker.WorkerSettings
+```
+
+```bash
+# 终端 3
+cd apps/backend
+uv run arq app.resume_generation.index_worker.WorkerSettings
+```
+
+```bash
+# 终端 4
 cd apps/frontend
 npm run dev
 ```
-
-使用 Docker 全量启动时执行 `docker compose up -d`，`resume-index-worker` 会自动为
-既有经历补建索引。

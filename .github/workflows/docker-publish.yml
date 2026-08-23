@@ -34,7 +34,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/strel1tz1a02/resumeagent
+          images: ghcr.io/strel1tz1a02/resume-agent
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=semver,pattern={{version}},value=${{ github.ref_name }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}

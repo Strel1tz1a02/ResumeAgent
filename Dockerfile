@@ -1,10 +1,10 @@
-# Resume Matcher Docker Image
+# ResumeAgent Docker image
 # Multi-stage build for optimized image size
 
 # ============================================
 # Stage 1: Build Frontend
 # ============================================
-FROM node:22-bookworm AS frontend-builder
+FROM node:26-bookworm AS frontend-builder
 
 # Build argument for API URL (allows customization at build time)
 # Default routes requests through Next.js rewrites on the same origin.
