@@ -212,6 +212,18 @@ class ResumeGenerationService:
             raise ResumeGenerationConflictError(
                 "run validation failed and cannot be confirmed"
             )
+        generation_mode = (
+            row.request_json.get("mode", "auto")
+            if isinstance(row.request_json, dict)
+            else "auto"
+        )
+        if (
+            generation_mode != "deterministic"
+            and validation.model_validation_status != "completed"
+        ):
+            raise ResumeGenerationConflictError(
+                "run did not complete model truthfulness validation"
+            )
         resume_data = ResumeData.model_validate(row.resume_data_json)
         resume_id = f"resume-generation-{run_id}"
         existing = await self._session.get(Resume, resume_id)

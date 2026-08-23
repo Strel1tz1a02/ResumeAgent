@@ -1,13 +1,13 @@
-"""经历组合、技能提升、ResumeData 组装和确定性校验。"""
+"""经历组合、技能提升和 ResumeData 组装。"""
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 
 from app.resume_generation.schemas import (
     BulletProvenance,
     CoverageStatus,
+    DraftBullet,
     EvidenceJudgment,
     ExperienceSnapshot,
     JDAnalysisSnapshot,
@@ -19,7 +19,6 @@ from app.resume_generation.schemas import (
     ResumeDraft,
     ResumePlan,
     ResumeProvenance,
-    ResumeValidation,
     SkillProvenance,
 )
 from app.schemas.models import Experience, Project, ResumeData
@@ -28,7 +27,6 @@ _IMPORTANCE_WEIGHT = {"must": 3.0, "should": 2.0, "nice": 1.0}
 _WORK_KINDS = {"work", "internship"}
 _MIN_RELEVANCE = 0.45
 _MIN_STRENGTH = 0.4
-_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*(?:%|万|亿|k|m|ms|s)?", re.IGNORECASE)
 
 
 def _judgment_score(item: EvidenceJudgment) -> float:
@@ -283,15 +281,18 @@ def materialize_resume(
     output.summary = draft.summary
     output.workExperience = []
     output.personalProjects = []
-    provenance = ResumeProvenance()
+    provenance = ResumeProvenance(
+        summary_evidence_ids=list(draft.summary_evidence_ids)
+    )
     snapshot_by_id = {item.experience_id: item for item in experiences}
-    drafted_by_id = {item.experience_id: item for item in draft.experiences}
+    drafted_bullets_by_id: dict[int, list[DraftBullet]] = defaultdict(list)
+    for drafted in draft.experiences:
+        drafted_bullets_by_id[drafted.experience_id].extend(drafted.bullets)
 
     for selected in plan.selected_experiences:
         snapshot = snapshot_by_id[selected.experience_id]
-        drafted = drafted_by_id.get(selected.experience_id)
-        bullets = drafted.bullets[: selected.bullet_budget] if drafted else []
-        descriptions = [item.text.strip() for item in bullets if item.text.strip()]
+        bullets = drafted_bullets_by_id[selected.experience_id]
+        descriptions = [bullet.text.strip() for bullet in bullets]
         years = _format_years(snapshot)
         if selected.section == "workExperience":
             output.workExperience.append(
@@ -337,156 +338,6 @@ def materialize_resume(
             SkillProvenance(skill=promoted.skill, evidence_ids=promoted.evidence_ids)
         )
     return output, provenance
-
-
-def validate_generation(
-    plan: ResumePlan,
-    resume_data: ResumeData,
-    provenance: ResumeProvenance,
-    experiences: list[ExperienceSnapshot],
-    constraints: ResumeConstraints,
-) -> ResumeValidation:
-    errors: list[str] = []
-    warnings = list(plan.review_warnings)
-    experience_map = {item.experience_id: item for item in experiences}
-    evidence_owner = {
-        evidence.evidence_id: item.experience_id
-        for item in experiences
-        for evidence in item.evidence
-    }
-    planned_evidence: set[int] = set()
-    for selected in plan.selected_experiences:
-        source = experience_map.get(selected.experience_id)
-        if source is None or source.status != "ready":
-            errors.append(f"计划引用了无效经历 {selected.experience_id}")
-            continue
-        if len(selected.evidence_ids) > constraints.max_bullets_per_experience:
-            errors.append(f"经历 {selected.experience_id} 超出 bullet 预算")
-        for evidence_id in selected.evidence_ids:
-            planned_evidence.add(evidence_id)
-            if evidence_owner.get(evidence_id) != selected.experience_id:
-                errors.append(
-                    f"Evidence {evidence_id} 不属于经历 {selected.experience_id}"
-                )
-
-    output_by_key = {
-        ("workExperience", item.id): item.description
-        for item in resume_data.workExperience
-    }
-    output_by_key.update(
-        {
-            ("personalProjects", item.id): item.description
-            for item in resume_data.personalProjects
-        }
-    )
-    source_evidence = {
-        evidence.evidence_id: evidence
-        for experience in experiences
-        for evidence in experience.evidence
-    }
-    selected_keys = {
-        (item.section, item.experience_id) for item in plan.selected_experiences
-    }
-    if set(output_by_key) != selected_keys:
-        errors.append("ResumeData 经历集合与 ResumePlan 不一致")
-
-    bullet_count = sum(
-        len(item.description)
-        for item in resume_data.workExperience + resume_data.personalProjects
-    )
-    if bullet_count != len(provenance.bullets):
-        errors.append("生成 bullet 数量与 provenance 数量不一致")
-    for item in provenance.bullets:
-        if not set(item.evidence_ids) <= planned_evidence:
-            errors.append("bullet provenance 引用了计划外 Evidence")
-            continue
-        descriptions = output_by_key.get((item.section, item.item_id), [])
-        if item.bullet_index >= len(descriptions):
-            errors.append("bullet provenance 索引不存在")
-            continue
-        bullet = descriptions[item.bullet_index]
-        source_text = " ".join(
-            part
-            for evidence_id in item.evidence_ids
-            for evidence in [source_evidence[evidence_id]]
-            for part in (evidence.background, evidence.action, evidence.result)
-            if part
-        ).casefold()
-        invented_numbers = {
-            match.group(0).casefold()
-            for match in _NUMBER_RE.finditer(bullet)
-            if match.group(0).casefold() not in source_text
-        }
-        if invented_numbers:
-            errors.append(
-                f"bullet 新增了证据中不存在的数字: {', '.join(sorted(invented_numbers))}"
-            )
-    promoted_evidence = {
-        evidence_id
-        for skill in plan.promoted_skills
-        for evidence_id in skill.evidence_ids
-    }
-    for item in provenance.skills:
-        if not set(item.evidence_ids) <= promoted_evidence:
-            errors.append(f"技能 {item.skill} 引用了计划外 Evidence")
-            continue
-        supporting_experiences = [
-            experience
-            for experience in experiences
-            if any(
-                evidence.evidence_id in item.evidence_ids
-                for evidence in experience.evidence
-            )
-        ]
-        source_text = " ".join(
-            [
-                label
-                for experience in supporting_experiences
-                for label in experience.technologies + experience.tags
-            ]
-            + [
-                part
-                for experience in supporting_experiences
-                for evidence in experience.evidence
-                if evidence.evidence_id in item.evidence_ids
-                for part in (evidence.background, evidence.action, evidence.result)
-                if part
-            ]
-        ).casefold()
-        if item.skill.casefold() not in source_text:
-            errors.append(f"技能 {item.skill} 在绑定 Evidence 中没有事实依据")
-    planned_source_text = " ".join(
-        part
-        for evidence_id in planned_evidence | promoted_evidence
-        for evidence in [source_evidence[evidence_id]]
-        for part in (evidence.background, evidence.action, evidence.result)
-        if part
-    ).casefold()
-    invented_summary_numbers = {
-        match.group(0).casefold()
-        for match in _NUMBER_RE.finditer(resume_data.summary)
-        if match.group(0).casefold() not in planned_source_text
-    }
-    if invented_summary_numbers:
-        errors.append(
-            "summary 新增了证据中不存在的数字: "
-            + ", ".join(sorted(invented_summary_numbers))
-        )
-    for selected in plan.selected_experiences:
-        descriptions = output_by_key.get((selected.section, selected.experience_id), [])
-        if not descriptions:
-            errors.append(f"已选经历 {selected.experience_id} 没有生成任何 bullet")
-        if len(descriptions) > selected.bullet_budget:
-            errors.append(f"已选经历 {selected.experience_id} 超出计划 bullet 预算")
-    if not plan.selected_experiences:
-        warnings.append("没有经历达到首版证据阈值，简历主体为空")
-    return ResumeValidation(
-        valid=not errors,
-        coverage_ratio=plan.coverage_ratio,
-        uncovered_requirements=plan.uncovered_requirements,
-        warnings=list(dict.fromkeys(warnings)),
-        errors=list(dict.fromkeys(errors)),
-    )
 
 
 def _format_years(snapshot: ExperienceSnapshot) -> str:

@@ -13,8 +13,13 @@ from app.experience.models import EvidenceItem, ExperienceEvidence, ExperienceIt
 from app.jd_import.models import JDInformation, JDRequirement
 from app.main import app
 from app.models import Resume
+from app.resume_generation.model import RuleBasedResumeGenerationModel
 from app.resume_generation.models import ResumeGenerationRun
-from app.resume_generation.schemas import RetrievedEvidence
+from app.resume_generation.schemas import (
+    DraftClaimAssessment,
+    DraftFactCheckResult,
+    RetrievedEvidence,
+)
 from app.resume_generation.service import ResumeGenerationService
 
 resume_generation_router = importlib.import_module("app.resume_generation.router")
@@ -52,6 +57,40 @@ class _FakeRetriever:
             }
         )
         return await self.retrieve(tasks, documents)
+
+
+class _RejectingFactCheckModel(RuleBasedResumeGenerationModel):
+    """模拟模型判定 Bullet 缺乏事实支持，同时保留完整生成产物。"""
+
+    async def validate_draft(self, draft, plan, experiences):
+        """按稳定 Claim ID 返回完整但未通过的模型校验结果。"""
+        assessments = []
+        if draft.summary.strip() or draft.summary_evidence_ids:
+            assessments.append(
+                DraftClaimAssessment(
+                    claim_id="summary",
+                    verdict="supported",
+                    reason="Summary 可由引用原文支持",
+                )
+            )
+        for experience in draft.experiences:
+            for bullet_index, bullet in enumerate(experience.bullets):
+                assessments.append(
+                    DraftClaimAssessment(
+                        claim_id=(
+                            f"experience:{experience.experience_id}:"
+                            f"bullet:{bullet_index}"
+                        ),
+                        verdict="unsupported",
+                        unsupported_fragments=[bullet.text],
+                        reason="测试模型判定该 Bullet 不可信",
+                    )
+                )
+        return DraftFactCheckResult(
+            assessments=assessments,
+            model_used=True,
+            model_required=True,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -153,9 +192,16 @@ async def test_preview_get_and_confirm_are_grounded_and_idempotent(
         )
 
     assert payload["validation"]["valid"] is True
+    assert payload["validation"]["model_validation_status"] == "skipped"
+    assert any(
+        check["source"] == "model" and check["status"] == "skipped"
+        for check in payload["validation"]["checks"]
+    )
     assert payload["plan"]["selected_experiences"][0]["experience_id"] == experience_id
+    assert payload["provenance"]["summary_evidence_ids"] == [evidence_id]
     assert payload["provenance"]["bullets"][0]["evidence_ids"] == [evidence_id]
     assert fetched.status_code == 200
+    assert fetched.json()["validation"] == payload["validation"]
     assert fetched.json()["jd_snapshot"]["source"]["revision"] == 0
     assert "base_resume_id" not in fetched.json()
     assert "base_resume_id" not in fetched.json()["request"]
@@ -192,6 +238,94 @@ async def test_preview_get_and_confirm_are_grounded_and_idempotent(
         experience = await session.get(ExperienceItem, experience_id)
         assert source.revision == 0
         assert experience.status == "ready"
+
+
+async def test_untrusted_model_result_is_persisted_but_cannot_be_confirmed(
+    isolated_db,
+    monkeypatch,
+    _replace_external_qdrant,
+) -> None:
+    """事实校验失败仍返回可诊断预览，但 Confirm 必须 fail closed。"""
+    jd_id, _, _ = await _seed_sources(isolated_db)
+
+    def build_service(session: Any) -> ResumeGenerationService:
+        return ResumeGenerationService(
+            session,
+            llm_model=_RejectingFactCheckModel(),
+            retriever=_replace_external_qdrant,
+        )
+
+    monkeypatch.setattr(resume_generation_router, "_service", build_service)
+
+    async with _client() as client:
+        preview = await client.post(
+            "/api/v1/resume-generations/preview",
+            json={"jd_information_id": jd_id, "mode": "llm"},
+        )
+        assert preview.status_code == 201, preview.text
+        payload = preview.json()
+        run_id = payload["run_id"]
+        fetched = await client.get(f"/api/v1/resume-generations/{run_id}")
+        confirmed = await client.post(
+            f"/api/v1/resume-generations/{run_id}/confirm",
+            json={},
+        )
+
+    assert payload["resume_data"]
+    assert payload["validation"]["valid"] is False
+    assert payload["validation"]["model_validation_status"] == "completed"
+    assert any(
+        check["source"] == "model"
+        and check["status"] == "failed"
+        and check["verdict"] == "unsupported"
+        for check in payload["validation"]["checks"]
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["validation"] == payload["validation"]
+    assert confirmed.status_code == 409
+
+    async with isolated_db.session() as session:
+        run = await session.get(ResumeGenerationRun, run_id)
+        assert run is not None
+        assert run.artifact_status == "previewed"
+        assert run.validation_json == payload["validation"]
+        assert await session.scalar(select(func.count()).select_from(Resume)) == 0
+
+
+async def test_legacy_llm_preview_without_model_check_cannot_be_confirmed(
+    isolated_db,
+) -> None:
+    """旧版 llm/auto 产物缺少真实性状态时按 skipped 处理并 fail closed。"""
+    jd_id, _, _ = await _seed_sources(isolated_db)
+    async with _client() as client:
+        preview = await client.post(
+            "/api/v1/resume-generations/preview",
+            json={"jd_information_id": jd_id, "mode": "deterministic"},
+        )
+        assert preview.status_code == 201, preview.text
+        run_id = preview.json()["run_id"]
+
+        async with isolated_db.session() as session:
+            run = await session.get(ResumeGenerationRun, run_id)
+            assert run is not None
+            legacy_request = dict(run.request_json)
+            legacy_request["mode"] = "llm"
+            legacy_validation = dict(run.validation_json)
+            legacy_validation.pop("model_validation_status", None)
+            legacy_validation.pop("checks", None)
+            run.request_json = legacy_request
+            run.validation_json = legacy_validation
+            await session.commit()
+
+        confirmed = await client.post(
+            f"/api/v1/resume-generations/{run_id}/confirm",
+            json={},
+        )
+
+    assert confirmed.status_code == 409
+    assert "truthfulness validation" in confirmed.json()["detail"]
+    async with isolated_db.session() as session:
+        assert await session.scalar(select(func.count()).select_from(Resume)) == 0
 
 
 async def test_preview_rejects_missing_requirements_and_ready_experiences(

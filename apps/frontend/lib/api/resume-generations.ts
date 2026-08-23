@@ -62,6 +62,7 @@ export interface ResumeGenerationPreview {
   plan: ResumePlan;
   resume_data: ResumeData;
   provenance: {
+    summary_evidence_ids?: number[];
     bullets: Array<{
       section: 'workExperience' | 'personalProjects';
       item_id: number;
@@ -76,6 +77,19 @@ export interface ResumeGenerationPreview {
     uncovered_requirements: string[];
     warnings: string[];
     errors: string[];
+    model_validation_status?: 'completed' | 'skipped' | 'failed';
+    checks?: Array<{
+      source: 'reference' | 'model';
+      status: 'passed' | 'failed' | 'skipped';
+      claim_id: string;
+      kind: 'summary' | 'bullet';
+      experience_id: number | null;
+      bullet_index: number | null;
+      evidence_ids: number[];
+      verdict: 'supported' | 'partial' | 'unsupported' | 'contradicted' | null;
+      unsupported_fragments: string[];
+      message: string;
+    }>;
   };
 }
 

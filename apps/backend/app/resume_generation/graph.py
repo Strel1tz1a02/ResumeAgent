@@ -11,17 +11,14 @@ from langgraph.graph import END, START, StateGraph
 from app.ai_chat.streaming.events import RuntimeEvent
 from app.resume_generation.model import ResumeGenerationModel
 from app.resume_generation.observability import log_generation_trace
-from app.resume_generation.planner import (
-    assemble_plan,
-    materialize_resume,
-    validate_generation,
-)
+from app.resume_generation.planner import assemble_plan, materialize_resume
 from app.resume_generation.retriever import (
     EvidenceRetriever,
     build_documents,
     merge_retrieval_rounds,
 )
 from app.resume_generation.schemas import (
+    DraftFactCheckResult,
     EvidenceJudgment,
     ExperienceSnapshot,
     JDAnalysisSnapshot,
@@ -34,6 +31,11 @@ from app.resume_generation.schemas import (
     ResumeValidation,
     RetrievedEvidence,
     SearchTask,
+)
+from app.resume_generation.validation import (
+    build_draft_validation_claims,
+    compose_draft_validation,
+    validate_draft_references,
 )
 from app.schemas.models import ResumeData
 
@@ -54,6 +56,7 @@ class ResumeGenerationState(TypedDict, total=False):
     plan: ResumePlan
     critique: PlanCritique
     draft: ResumeDraft
+    fact_check: DraftFactCheckResult
     resume_data: ResumeData
     provenance: ResumeProvenance
     validation: ResumeValidation
@@ -219,39 +222,66 @@ def build_resume_generation_graph(
         draft = await dependencies.model.draft(
             state["analysis"], state["plan"], state["experiences"]
         )
-        resume_data, provenance = materialize_resume(
-            state["analysis"],
-            state["plan"],
-            draft,
-            state["experiences"],
-        )
-        return {
-            "draft": draft,
-            "resume_data": resume_data,
-            "provenance": provenance,
-        }
+        return {"draft": draft}
 
-    async def verify_resume(state: ResumeGenerationState) -> dict[str, Any]:
-        validation = validate_generation(
-            state["plan"],
-            state["resume_data"],
-            state["provenance"],
-            state["experiences"],
-            state["constraints"],
+    async def validate_draft(state: ResumeGenerationState) -> dict[str, Any]:
+        claims = build_draft_validation_claims(
+            state["plan"], state["draft"], state["experiences"]
+        )
+        reference_checks = validate_draft_references(
+            state["plan"], state["draft"], state["experiences"]
+        )
+        fact_check = await dependencies.model.validate_draft(
+            state["draft"], state["plan"], state["experiences"]
         )
         fallback_events = list(
             dict.fromkeys(getattr(dependencies.model, "fallback_events", []))
         )
-        if fallback_events:
-            validation.warnings.append(
-                "auto 模式在以下阶段使用了确定性降级: " + ", ".join(fallback_events)
-            )
+        validation = compose_draft_validation(
+            plan=state["plan"],
+            claims=claims,
+            reference_checks=reference_checks,
+            fact_check=fact_check,
+            fallback_events=fallback_events,
+        )
+        log_generation_trace(
+            "resume_generation.draft_validation",
+            run_id=state.get("run_id"),
+            search_round=state.get("search_round"),
+            payload={
+                "status": "completed",
+                "valid": validation.valid,
+                "model_validation_status": validation.model_validation_status,
+                "checks": [
+                    {
+                        "source": check.source,
+                        "status": check.status,
+                        "claim_id": check.claim_id,
+                        "kind": check.kind,
+                        "experience_id": check.experience_id,
+                        "bullet_index": check.bullet_index,
+                        "evidence_ids": check.evidence_ids,
+                        "verdict": check.verdict,
+                    }
+                    for check in validation.checks
+                ],
+            },
+        )
+        return {"fact_check": fact_check, "validation": validation}
+
+    async def materialize_draft(state: ResumeGenerationState) -> dict[str, Any]:
+        resume_data, provenance = materialize_resume(
+            state["analysis"],
+            state["plan"],
+            state["draft"],
+            state["experiences"],
+        )
         result = {
             "analysis": state["analysis"].model_dump(mode="json"),
             "plan": state["plan"].model_dump(mode="json"),
-            "resume_data": state["resume_data"].model_dump(mode="json"),
-            "provenance": state["provenance"].model_dump(mode="json"),
-            "validation": validation.model_dump(mode="json"),
+            "resume_data": resume_data.model_dump(mode="json"),
+            "provenance": provenance.model_dump(mode="json"),
+            "validation": state["validation"].model_dump(mode="json"),
         }
         get_stream_writer()(
             RuntimeEvent(
@@ -259,7 +289,7 @@ def build_resume_generation_graph(
                 {"kind": "resume_generation", "result": result},
             )
         )
-        return {"validation": validation}
+        return {"resume_data": resume_data, "provenance": provenance}
 
     graph = StateGraph(ResumeGenerationState)
     graph.add_node("analyze_jd", analyze_jd)
@@ -269,7 +299,8 @@ def build_resume_generation_graph(
     graph.add_node("assemble_plan", build_plan)
     graph.add_node("critique_plan", critique)
     graph.add_node("draft_resume", draft_resume)
-    graph.add_node("verify_resume", verify_resume)
+    graph.add_node("validate_draft", validate_draft)
+    graph.add_node("materialize_resume", materialize_draft)
     graph.add_edge(START, "analyze_jd")
     graph.add_edge("analyze_jd", "plan_search")
     graph.add_edge("plan_search", "retrieve")
@@ -281,6 +312,7 @@ def build_resume_generation_graph(
         route_after_critique,
         {"plan_search": "plan_search", "draft_resume": "draft_resume"},
     )
-    graph.add_edge("draft_resume", "verify_resume")
-    graph.add_edge("verify_resume", END)
+    graph.add_edge("draft_resume", "validate_draft")
+    graph.add_edge("validate_draft", "materialize_resume")
+    graph.add_edge("materialize_resume", END)
     return graph

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, TypeVar
 
@@ -16,6 +17,8 @@ from app.resume_generation.schemas import (
     CoverageItem,
     DraftBullet,
     DraftedExperience,
+    DraftFactCheckResponse,
+    DraftFactCheckResult,
     EvidenceJudgment,
     ExperienceSnapshot,
     JDAnalysisSnapshot,
@@ -27,6 +30,7 @@ from app.resume_generation.schemas import (
     RetrievedEvidence,
     SearchTask,
 )
+from app.resume_generation.validation import build_draft_validation_claims
 
 Completion = Callable[..., Awaitable[dict[str, Any]]]
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -121,6 +125,13 @@ class ResumeGenerationModel(Protocol):
         plan: ResumePlan,
         experiences: list[ExperienceSnapshot],
     ) -> ResumeDraft: ...
+
+    async def validate_draft(
+        self,
+        draft: ResumeDraft,
+        plan: ResumePlan,
+        experiences: list[ExperienceSnapshot],
+    ) -> DraftFactCheckResult: ...
 
 
 def _importance(priority: str) -> str:
@@ -330,7 +341,35 @@ class RuleBasedResumeGenerationModel:
         summary = "、".join(top_capabilities)
         if summary:
             summary = f"具备{summary}相关的实践经历。"
-        return ResumeDraft(summary=summary, experiences=drafted)
+        summary_evidence_ids = (
+            list(
+                dict.fromkeys(
+                    evidence_id
+                    for selected in plan.selected_experiences
+                    for evidence_id in selected.evidence_ids
+                )
+            )
+            if summary
+            else []
+        )
+        return ResumeDraft(
+            summary=summary,
+            summary_evidence_ids=summary_evidence_ids,
+            experiences=drafted,
+        )
+
+    async def validate_draft(
+        self,
+        draft: ResumeDraft,
+        plan: ResumePlan,
+        experiences: list[ExperienceSnapshot],
+    ) -> DraftFactCheckResult:
+        """确定性模式不冒充语义 Judge，只声明模型校验未执行。"""
+        return DraftFactCheckResult(
+            model_used=False,
+            model_required=False,
+            warnings=["deterministic 模式未执行模型真实性校验"],
+        )
 
 
 class LangChainResumeGenerationModel:
@@ -612,7 +651,9 @@ class LangChainResumeGenerationModel:
             "4. text 只能压缩 Evidence 的 background、action、result，不得新增数字、指标、"
             "技能、职责、因果关系或结果；原文没有结果时不得补结果；\n"
             "5. summary 只能概括已选 Evidence 能直接支持的能力，不得照抄 JD 要求，不得新增"
-            "未出现在已选 Evidence 中的数字、技能或候选人评价。",
+            "未出现在已选 Evidence 中的数字、技能或候选人评价；summary 非空时必须填写"
+            "summary_evidence_ids，且只能引用真正支持 Summary 的已选 Evidence；summary 为空时"
+            "summary_evidence_ids 必须为空。",
             {
                 "target_title": analysis.target_title,
                 "plan": plan.model_dump(mode="json"),
@@ -624,20 +665,85 @@ class LangChainResumeGenerationModel:
             item.experience_id: set(item.evidence_ids)
             for item in plan.selected_experiences
         }
-        if {item.experience_id for item in result.experiences} != set(
-            allowed_by_experience
-        ):
-            raise ValueError("draft changed selected experience set")
+        allowed_summary_evidence = {
+            evidence_id
+            for evidence_ids in allowed_by_experience.values()
+            for evidence_id in evidence_ids
+        }
+        if result.summary.strip() and not result.summary_evidence_ids:
+            raise ValueError("draft summary must cite selected evidence")
+        if not result.summary.strip() and result.summary_evidence_ids:
+            raise ValueError("empty draft summary cannot cite evidence")
+        if set(result.summary_evidence_ids) - allowed_summary_evidence:
+            raise ValueError("draft summary referenced unplanned evidence")
+        planned_experience_ids = [
+            item.experience_id for item in plan.selected_experiences
+        ]
+        drafted_experience_ids = [
+            item.experience_id for item in result.experiences
+        ]
+        if Counter(drafted_experience_ids) != Counter(planned_experience_ids):
+            raise ValueError(
+                "draft experiences must match the final plan exactly once"
+            )
+        budget_by_experience = {
+            item.experience_id: item.bullet_budget
+            for item in plan.selected_experiences
+        }
         for experience in result.experiences:
+            if not experience.bullets:
+                raise ValueError("each drafted experience must contain a bullet")
+            if (
+                len(experience.bullets)
+                > budget_by_experience[experience.experience_id]
+            ):
+                raise ValueError("draft exceeded the planned bullet budget")
             for bullet in experience.bullets:
                 if bullet.experience_id != experience.experience_id:
                     raise ValueError("draft bullet changed experience ownership")
+                if not bullet.text.strip():
+                    raise ValueError("draft bullets cannot be empty")
                 if (
                     not set(bullet.evidence_ids)
                     <= allowed_by_experience[experience.experience_id]
                 ):
                     raise ValueError("draft referenced unplanned evidence")
         return result
+
+    async def validate_draft(
+        self,
+        draft: ResumeDraft,
+        plan: ResumePlan,
+        experiences: list[ExperienceSnapshot],
+    ) -> DraftFactCheckResult:
+        """用模型逐条判断 Draft 是否完全受其声明的原始 Evidence 支持。"""
+        claims = build_draft_validation_claims(plan, draft, experiences)
+        if not claims:
+            return DraftFactCheckResult(model_used=True, model_required=True)
+        result = await self._structured(
+            "输入只包含待校验 claims。每条 claim 已绑定它声明引用的原始 Evidence；"
+            "不得使用岗位要求、常识或未提供的信息补足证据。逐条判断 claim.text 是否真实可信：\n"
+            "1. supported：所有实质性陈述都能被绑定 Evidence 直接支持；\n"
+            "2. partial：核心事实有支持，但存在无法支持的限定词、范围、程度、职责、因果或结果；\n"
+            "3. unsupported：关键陈述缺少绑定 Evidence 支持；\n"
+            "4. contradicted：claim 与绑定 Evidence 明确冲突。\n"
+            "特别检查虚构的实体、数字、技能、职责、因果、结果和夸大措辞。"
+            "unsupported_fragments 必须逐字摘取 claim.text 中不受支持的最小片段；"
+            "supported 时必须为空。每个输入 claim_id 必须恰好返回一次，不得新增、遗漏或重复。",
+            {"claims": [claim.model_dump(mode="json") for claim in claims]},
+            DraftFactCheckResponse,
+        )
+        expected_ids = [claim.claim_id for claim in claims]
+        returned_ids = [item.claim_id for item in result.assessments]
+        if len(returned_ids) != len(set(returned_ids)):
+            raise ValueError("draft fact check returned duplicate claim_id")
+        if set(returned_ids) != set(expected_ids):
+            raise ValueError("draft fact check must assess every claim exactly once")
+        return DraftFactCheckResult(
+            assessments=result.assessments,
+            model_used=True,
+            model_required=True,
+        )
 
 
 class FallbackResumeGenerationModel:
@@ -694,3 +800,17 @@ class FallbackResumeGenerationModel:
         experiences: list[ExperienceSnapshot],
     ) -> ResumeDraft:
         return await self._call("draft", analysis, plan, experiences)
+
+    async def validate_draft(
+        self,
+        draft: ResumeDraft,
+        plan: ResumePlan,
+        experiences: list[ExperienceSnapshot],
+    ) -> DraftFactCheckResult:
+        """auto 模式要求真实模型完成校验；降级只能保留失败现场。"""
+        try:
+            result = await self.primary.validate_draft(draft, plan, experiences)
+        except Exception:  # noqa: BLE001 - 返回不可确认的预览比丢失现场更可诊断
+            self.fallback_events.append("validate_draft")
+            result = await self.fallback.validate_draft(draft, plan, experiences)
+        return result.model_copy(update={"model_required": True})

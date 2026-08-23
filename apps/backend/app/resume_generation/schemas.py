@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.ai_chat.protocol import RunStatus
 from app.schemas.models import ResumeData
@@ -229,6 +229,15 @@ class DraftBullet(BaseModel):
     evidence_ids: list[int] = Field(min_length=1)
     text: str
 
+    @field_validator("text")
+    @classmethod
+    def require_nonempty_text(cls, value: str) -> str:
+        """Draft 是拼装前的稳定产物，不允许后续再静默过滤空 Bullet。"""
+        text = value.strip()
+        if not text:
+            raise ValueError("draft bullet text cannot be empty")
+        return text
+
 
 class DraftedExperience(BaseModel):
     experience_id: int
@@ -237,7 +246,86 @@ class DraftedExperience(BaseModel):
 
 class ResumeDraft(BaseModel):
     summary: str = ""
+    summary_evidence_ids: list[int] = Field(default_factory=list)
     experiences: list[DraftedExperience] = Field(default_factory=list)
+
+
+FactVerdict = Literal["supported", "partial", "unsupported", "contradicted"]
+ValidationClaimKind = Literal["summary", "bullet"]
+ValidationCheckSource = Literal["reference", "model"]
+ValidationCheckStatus = Literal["passed", "failed", "skipped"]
+
+
+class DraftEvidenceQuote(BaseModel):
+    """模型事实校验可见的单条引用原文，不混入 JD 或经历标签。"""
+
+    evidence_id: int
+    background: str | None = None
+    action: str
+    result: str | None = None
+
+
+class DraftValidationClaim(BaseModel):
+    """待校验的单条 Summary 或 Bullet 及其原始 Evidence。"""
+
+    claim_id: str
+    kind: ValidationClaimKind
+    text: str
+    experience_id: int | None = None
+    bullet_index: int | None = Field(default=None, ge=0)
+    evidence_ids: list[int] = Field(default_factory=list)
+    evidence: list[DraftEvidenceQuote] = Field(default_factory=list)
+
+
+class DraftClaimAssessment(BaseModel):
+    """模型对单条简历陈述的事实支持判断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    verdict: FactVerdict
+    unsupported_fragments: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def validate_supported_fragments(self) -> DraftClaimAssessment:
+        """避免模型一边判定完全支持，一边又报告不受支持片段。"""
+        if self.verdict == "supported" and self.unsupported_fragments:
+            raise ValueError(
+                "supported assessment cannot contain unsupported fragments"
+            )
+        return self
+
+
+class DraftFactCheckResponse(BaseModel):
+    """模型必须严格返回的事实校验结构。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    assessments: list[DraftClaimAssessment] = Field(default_factory=list)
+
+
+class DraftFactCheckResult(DraftFactCheckResponse):
+    """事实校验运行结果；运行元数据由服务端填写。"""
+
+    model_used: bool = True
+    model_required: bool = True
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResumeValidationCheck(BaseModel):
+    """持久化的逐条校验结果，便于按 Claim 和 Evidence 追溯。"""
+
+    source: ValidationCheckSource
+    status: ValidationCheckStatus
+    claim_id: str
+    kind: ValidationClaimKind
+    experience_id: int | None = None
+    bullet_index: int | None = Field(default=None, ge=0)
+    evidence_ids: list[int] = Field(default_factory=list)
+    verdict: FactVerdict | None = None
+    unsupported_fragments: list[str] = Field(default_factory=list)
+    message: str = ""
 
 
 class BulletProvenance(BaseModel):
@@ -253,6 +341,7 @@ class SkillProvenance(BaseModel):
 
 
 class ResumeProvenance(BaseModel):
+    summary_evidence_ids: list[int] = Field(default_factory=list)
     bullets: list[BulletProvenance] = Field(default_factory=list)
     skills: list[SkillProvenance] = Field(default_factory=list)
 
@@ -263,6 +352,8 @@ class ResumeValidation(BaseModel):
     uncovered_requirements: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    model_validation_status: Literal["completed", "skipped", "failed"] = "skipped"
+    checks: list[ResumeValidationCheck] = Field(default_factory=list)
 
 
 class ResumeGenerationPreview(BaseModel):

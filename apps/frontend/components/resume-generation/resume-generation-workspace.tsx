@@ -9,6 +9,7 @@ import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import Sparkles from 'lucide-react/dist/esm/icons/sparkles';
 import TriangleAlert from 'lucide-react/dist/esm/icons/triangle-alert';
 
+import { GenerationProgress } from '@/components/resume-generation/generation-progress';
 import { Button } from '@/components/ui/button';
 import { Card, CardDescription, CardTitle } from '@/components/ui/card';
 import { listJDImports, type JDImport } from '@/lib/api/jd-imports';
@@ -137,6 +138,7 @@ export function ResumeGenerationWorkspace() {
                   <select
                     value={jdId}
                     onChange={(event) => setJdId(event.target.value)}
+                    disabled={generating}
                     className="h-11 w-full border border-black bg-background px-3 font-sans text-sm"
                   >
                     <option value="">{t('resumeGeneration.selectJD')}</option>
@@ -154,6 +156,7 @@ export function ResumeGenerationWorkspace() {
                   <select
                     value={mode}
                     onChange={(event) => setMode(event.target.value as ResumeGenerationMode)}
+                    disabled={generating}
                     className="h-11 w-full border border-black bg-background px-3 font-sans text-sm"
                   >
                     <option value="auto">{t('resumeGeneration.modeAuto')}</option>
@@ -167,6 +170,7 @@ export function ResumeGenerationWorkspace() {
                   <select
                     value={pageCount}
                     onChange={(event) => setPageCount(Number(event.target.value) as 1 | 2)}
+                    disabled={generating}
                     className="h-11 w-full border border-black bg-background px-3 font-sans text-sm"
                   >
                     <option value={1}>1</option>
@@ -197,6 +201,8 @@ export function ResumeGenerationWorkspace() {
           </Card>
 
           <main className="space-y-6">
+            {generating && <GenerationProgress />}
+
             {!preview && !generating && (
               <Card className="rounded-none border-dashed border-black p-10 text-center">
                 <CardTitle>{t('resumeGeneration.emptyTitle')}</CardTitle>

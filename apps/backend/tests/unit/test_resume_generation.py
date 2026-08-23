@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Any
 
+import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_qdrant import QdrantVectorStore, RetrievalMode, SparseEmbeddings
 from qdrant_client import QdrantClient, models
@@ -18,11 +19,7 @@ from app.resume_generation.model import (
     LangChainResumeGenerationModel,
     RuleBasedResumeGenerationModel,
 )
-from app.resume_generation.planner import (
-    assemble_plan,
-    materialize_resume,
-    validate_generation,
-)
+from app.resume_generation.planner import assemble_plan, materialize_resume
 from app.resume_generation.retriever import (
     QdrantEvidenceRetriever,
     QdrantEvidenceStore,
@@ -32,7 +29,9 @@ from app.resume_generation.retriever import (
 from app.resume_generation.schemas import (
     CoverageItem,
     DraftBullet,
+    DraftClaimAssessment,
     DraftedExperience,
+    DraftFactCheckResult,
     EvidenceJudgment,
     EvidenceSnapshot,
     ExperienceSnapshot,
@@ -40,11 +39,14 @@ from app.resume_generation.schemas import (
     JDAnalysisSourceSnapshot,
     JDRequirementSnapshot,
     PlanCritique,
+    PlannedExperience,
     ResumeConstraints,
     ResumeDraft,
+    ResumePlan,
     RetrievedEvidence,
     SearchTask,
 )
+from app.resume_generation.validation import validate_draft_references
 
 
 class _FakeQdrantVectorStore:
@@ -346,6 +348,148 @@ def _experience(
     )
 
 
+async def test_llm_fact_check_receives_claims_with_only_bound_evidence() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append({"args": args, "kwargs": kwargs})
+        return {
+            "assessments": [
+                {
+                    "claim_id": "summary",
+                    "verdict": "supported",
+                    "unsupported_fragments": [],
+                    "reason": "Summary 由引用 Evidence 支持",
+                },
+                {
+                    "claim_id": "experience:1:bullet:0",
+                    "verdict": "unsupported",
+                    "unsupported_fragments": ["主导 Kubernetes 架构"],
+                    "reason": "引用原文没有 Kubernetes 或主导职责",
+                },
+            ]
+        }
+
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 FastAPI 开发接口",
+            result="完成服务交付",
+            technologies=["FastAPI"],
+        )
+    ]
+    experiences[0].evidence.append(
+        EvidenceSnapshot(
+            evidence_id=12,
+            action="UNBOUND_EVIDENCE_MARKER",
+            result="未被 Draft 引用",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    plan = ResumePlan(
+        selected_experiences=[
+            PlannedExperience(
+                experience_id=1,
+                section="personalProjects",
+                evidence_ids=[11],
+                bullet_budget=1,
+            )
+        ],
+        search_rounds=1,
+        coverage_ratio=1,
+    )
+    draft = ResumeDraft(
+        summary="具备 FastAPI 项目经验",
+        summary_evidence_ids=[11],
+        experiences=[
+            DraftedExperience(
+                experience_id=1,
+                bullets=[
+                    DraftBullet(
+                        experience_id=1,
+                        evidence_ids=[11],
+                        text="使用 FastAPI 开发接口并主导 Kubernetes 架构",
+                    )
+                ],
+            )
+        ],
+    )
+
+    result = await LangChainResumeGenerationModel(completion).validate_draft(
+        draft, plan, experiences
+    )
+
+    assert result.model_used is True
+    assert [item.verdict for item in result.assessments] == [
+        "supported",
+        "unsupported",
+    ]
+    prompt = calls[0]["args"][0]
+    assert "experience:1:bullet:0" in prompt
+    assert '"evidence_id": 11' in prompt
+    assert "使用 FastAPI 开发接口" in prompt
+    assert "UNBOUND_EVIDENCE_MARKER" not in prompt
+    assert "知识检索项目" not in prompt
+    assert '"technologies"' not in prompt
+
+
+def test_supported_fact_assessment_cannot_report_unsupported_fragments() -> None:
+    """完全支持与“不受支持片段”是互斥状态，避免模型输出自相矛盾。"""
+    with pytest.raises(ValueError, match="supported assessment"):
+        DraftClaimAssessment(
+            claim_id="summary",
+            verdict="supported",
+            unsupported_fragments=["并不存在的片段"],
+        )
+
+
+async def test_llm_fact_check_requires_exact_claim_set() -> None:
+    async def completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"assessments": []}
+
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 FastAPI 开发接口",
+            result="完成服务交付",
+            technologies=["FastAPI"],
+        )
+    ]
+    plan = ResumePlan(
+        selected_experiences=[
+            PlannedExperience(
+                experience_id=1,
+                section="personalProjects",
+                evidence_ids=[11],
+                bullet_budget=1,
+            )
+        ],
+        search_rounds=1,
+        coverage_ratio=1,
+    )
+    draft = ResumeDraft(
+        experiences=[
+            DraftedExperience(
+                experience_id=1,
+                bullets=[
+                    DraftBullet(
+                        experience_id=1,
+                        evidence_ids=[11],
+                        text="使用 FastAPI 开发接口",
+                    )
+                ],
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="assess every claim exactly once"):
+        await LangChainResumeGenerationModel(completion).validate_draft(
+            draft, plan, experiences
+        )
+
+
 async def test_qdrant_retriever_uses_parent_metadata_and_returns_evidence_chunk() -> (
     None
 ):
@@ -642,7 +786,7 @@ async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
     graph = build_resume_generation_graph(
         ResumeGenerationGraphDependencies(
             model=RuleBasedResumeGenerationModel(),
-                retriever=_qdrant_retriever(experiences),
+            retriever=_qdrant_retriever(experiences),
         )
     ).compile()
 
@@ -658,6 +802,62 @@ async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
     assert "requirement-2" in state["plan"].uncovered_requirements
     assert state["validation"].valid is True
     assert state["provenance"].bullets[0].evidence_ids == [11]
+
+
+async def test_graph_fact_checks_draft_before_returning_materialized_preview() -> None:
+    class RejectingFactCheckModel(RuleBasedResumeGenerationModel):
+        async def validate_draft(self, draft, plan, experiences):
+            return DraftFactCheckResult(
+                model_used=True,
+                model_required=True,
+                assessments=[
+                    DraftClaimAssessment(
+                        claim_id="summary",
+                        verdict="supported",
+                        reason="Summary 有 Evidence 支持",
+                    ),
+                    DraftClaimAssessment(
+                        claim_id="experience:1:bullet:0",
+                        verdict="unsupported",
+                        unsupported_fragments=["完成服务交付"],
+                        reason="模型认为结果缺少充分依据",
+                    ),
+                ],
+            )
+
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 Python 和 FastAPI 设计 API",
+            result="完成服务交付",
+            technologies=["Python", "FastAPI"],
+        )
+    ]
+    graph = build_resume_generation_graph(
+        ResumeGenerationGraphDependencies(
+            model=RejectingFactCheckModel(),
+            retriever=_qdrant_retriever(experiences),
+        )
+    ).compile()
+
+    state = await graph.ainvoke(
+        {
+            "jd_source": _source(),
+            "experiences": experiences,
+            "constraints": ResumeConstraints(max_search_rounds=1),
+        }
+    )
+
+    assert state["resume_data"].personalProjects
+    assert state["validation"].valid is False
+    assert state["validation"].model_validation_status == "completed"
+    assert any(
+        check.source == "model"
+        and check.claim_id == "experience:1:bullet:0"
+        and check.status == "failed"
+        for check in state["validation"].checks
+    )
 
 
 async def test_graph_logs_evidence_scoring_with_candidate_context(caplog) -> None:
@@ -778,7 +978,7 @@ async def test_graph_uses_model_defined_gap_for_replanning() -> None:
     assert state["plan"].uncovered_requirements == []
 
 
-async def test_validation_rejects_number_absent_from_bound_evidence() -> None:
+def test_reference_validation_only_checks_bound_evidence_ids() -> None:
     source = _source()
     analysis = JDAnalysisSnapshot(
         source=source,
@@ -819,8 +1019,7 @@ async def test_validation_rejects_number_absent_from_bound_evidence() -> None:
         ResumeConstraints(),
         search_rounds=1,
     )
-    resume_data, provenance = materialize_resume(
-        analysis,
+    checks = validate_draft_references(
         plan,
         ResumeDraft(
             experiences=[
@@ -839,12 +1038,199 @@ async def test_validation_rejects_number_absent_from_bound_evidence() -> None:
         experiences,
     )
 
-    validation = validate_generation(
-        plan, resume_data, provenance, experiences, ResumeConstraints()
+    assert [check.status for check in checks] == ["passed"]
+
+
+def test_reference_validation_rejects_unknown_evidence() -> None:
+    source = _source()
+    analysis = JDAnalysisSnapshot(
+        source=source,
+        target_title=source.job_name,
+        coverage_items=[
+            CoverageItem(
+                coverage_id="python",
+                source_requirement_ids=[1],
+                statement="Python FastAPI",
+                importance="must",
+                capability="Python FastAPI",
+            )
+        ],
+    )
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 Python 开发接口",
+            result="完成交付",
+            technologies=["Python"],
+        )
+    ]
+    plan = assemble_plan(
+        analysis,
+        experiences,
+        [
+            EvidenceJudgment(
+                evidence_id=11,
+                experience_id=1,
+                coverage_item_ids=["python"],
+                relevance=0.9,
+                evidence_strength=0.8,
+                uniqueness=0.5,
+            )
+        ],
+        ResumeConstraints(),
+        search_rounds=1,
+    )
+    checks = validate_draft_references(
+        plan,
+        ResumeDraft(
+            experiences=[
+                DraftedExperience(
+                    experience_id=1,
+                    bullets=[
+                        DraftBullet(
+                            experience_id=1,
+                            evidence_ids=[999],
+                            text="使用 Python 开发接口",
+                        )
+                    ],
+                )
+            ]
+        ),
+        experiences,
     )
 
-    assert validation.valid is False
-    assert any("50%" in error for error in validation.errors)
+    assert [check.status for check in checks] == ["failed"]
+    assert "Evidence 999" in checks[0].message
+
+
+def test_reference_validation_rejects_cross_experience_attribution() -> None:
+    """合法 Evidence ID 也不能挂到声明不一致的 Experience 上。"""
+    source = _source()
+    analysis = JDAnalysisSnapshot(
+        source=source,
+        target_title=source.job_name,
+        coverage_items=[
+            CoverageItem(
+                coverage_id="python",
+                source_requirement_ids=[1],
+                statement="Python FastAPI",
+                importance="must",
+                capability="Python FastAPI",
+            )
+        ],
+    )
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 Python 开发接口",
+            result="完成交付",
+            technologies=["Python"],
+        )
+    ]
+    plan = assemble_plan(
+        analysis,
+        experiences,
+        [
+            EvidenceJudgment(
+                evidence_id=11,
+                experience_id=1,
+                coverage_item_ids=["python"],
+                relevance=0.9,
+                evidence_strength=0.8,
+                uniqueness=0.5,
+            )
+        ],
+        ResumeConstraints(),
+        search_rounds=1,
+    )
+    checks = validate_draft_references(
+        plan,
+        ResumeDraft(
+            experiences=[
+                DraftedExperience(
+                    experience_id=1,
+                    bullets=[
+                        DraftBullet(
+                            experience_id=2,
+                            evidence_ids=[11],
+                            text="使用 Python 开发接口",
+                        )
+                    ],
+                )
+            ]
+        ),
+        experiences,
+    )
+
+    assert [check.status for check in checks] == ["failed"]
+    assert "Experience 与所属 Draft 经历不一致" in checks[0].message
+
+
+def test_materialize_does_not_silently_change_validated_bullets() -> None:
+    """拼装必须保留校验过的 Bullet，使最终文本与 provenance 可一一复现。"""
+    source = _source()
+    analysis = JDAnalysisSnapshot(
+        source=source,
+        target_title=source.job_name,
+        coverage_items=[],
+    )
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="使用 Python 开发接口",
+            result="完成交付",
+            technologies=["Python"],
+        )
+    ]
+    plan = ResumePlan(
+        selected_experiences=[
+            PlannedExperience(
+                experience_id=1,
+                section="personalProjects",
+                evidence_ids=[11],
+                bullet_budget=1,
+            )
+        ],
+        search_rounds=1,
+        coverage_ratio=1,
+    )
+    resume_data, provenance = materialize_resume(
+        analysis,
+        plan,
+        ResumeDraft(
+            experiences=[
+                DraftedExperience(
+                    experience_id=1,
+                    bullets=[
+                        DraftBullet(
+                            experience_id=1,
+                            evidence_ids=[11],
+                            text="使用 Python 开发接口",
+                        ),
+                        DraftBullet(
+                            experience_id=1,
+                            evidence_ids=[11],
+                            text="完成接口交付",
+                        ),
+                    ],
+                )
+            ]
+        ),
+        experiences,
+    )
+
+    assert resume_data.personalProjects[0].description == [
+        "使用 Python 开发接口",
+        "完成接口交付",
+    ]
+    assert len(provenance.bullets) == 2
+    assert provenance.bullets[0].bullet_index == 0
+    assert provenance.bullets[0].evidence_ids == [11]
+    assert provenance.bullets[1].bullet_index == 1
+    assert provenance.bullets[1].evidence_ids == [11]
 
 
 async def test_auto_model_records_deterministic_fallback_in_validation() -> None:
@@ -879,3 +1265,5 @@ async def test_auto_model_records_deterministic_fallback_in_validation() -> None
     )
 
     assert any("analyze_jd" in warning for warning in state["validation"].warnings)
+    assert state["validation"].valid is False
+    assert state["validation"].model_validation_status == "failed"
