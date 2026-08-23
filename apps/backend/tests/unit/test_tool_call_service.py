@@ -598,7 +598,12 @@ assert ToolOperation.__abstractmethods__ == {"prepare", "execute"}
 assert not hasattr(ContentChangeOperation, "security")
 assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
-assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "context"}
+assert set(AiChatRuntime.__dataclass_fields__) == {
+    "model",
+    "tools",
+    "context",
+    "max_tokens",
+}
 assert not hasattr(AiChatRuntime, "receive_tool_call")
 assert "decision" not in tool_types.ToolCall.__annotations__
 assert "client_resolution_id" not in tool_types.ToolCall.__annotations__
