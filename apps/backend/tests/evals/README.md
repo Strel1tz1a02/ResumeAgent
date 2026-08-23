@@ -139,7 +139,7 @@ API Key 和 API Base 不会写入报告。`results/` 已加入 `.gitignore`，�
 在 PowerShell 中进入后端目录：
 
 ```powershell
-cd E:\projects\Resume-Matcher\apps\backend
+cd apps/backend
 conda activate resume-matcher
 ```
 

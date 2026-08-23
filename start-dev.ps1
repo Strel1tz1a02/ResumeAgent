@@ -2,9 +2,7 @@ param(
     [switch]$SkipInfrastructure,
     [switch]$SkipFrontend,
     [switch]$Setup,
-    [switch]$ValidateOnly,
-    [string]$CondaRoot = "E:\MiniConda",
-    [string]$CondaEnvironment = "resume-matcher"
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +14,6 @@ $BackendEnv = Join-Path $BackendDir ".env"
 $BackendEnvTemplate = Join-Path $ProjectRoot "config\backend.env.example"
 $FrontendEnv = Join-Path $FrontendDir ".env.local"
 $FrontendEnvTemplate = Join-Path $ProjectRoot "config\frontend.env.example"
-$CondaExe = Join-Path $CondaRoot "Scripts\conda.exe"
 $DockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 $DockerCandidates = @(
     "C:\Program Files\Docker\Docker\resources\bin\docker.exe",
@@ -104,6 +101,26 @@ function Resolve-DockerCommand {
     return $null
 }
 
+function Test-DockerEngine {
+    param([Parameter(Mandatory)][string]$DockerCommand)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $exitCode = -1
+    try {
+        # Windows PowerShell 5.1 turns native stderr into an ErrorRecord. Keep a
+        # failed readiness probe from terminating the script before its exit code
+        # can be inspected.
+        $ErrorActionPreference = "Continue"
+        & $DockerCommand info --format "{{.ServerVersion}}" 2>$null | Out-Null
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return $exitCode -eq 0
+}
+
 function Wait-DockerEngine {
     param(
         [Parameter(Mandatory)][string]$DockerCommand,
@@ -112,8 +129,7 @@ function Wait-DockerEngine {
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
-        & $DockerCommand info --format "{{.ServerVersion}}" 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-DockerEngine -DockerCommand $DockerCommand) {
             return
         }
         Start-Sleep -Seconds 2
@@ -139,8 +155,7 @@ if (-not $SkipInfrastructure) {
     if (($env:PATH -split ";") -notcontains $dockerBin) {
         $env:PATH = "$dockerBin;$env:PATH"
     }
-    & $DockerCommand info --format "{{.ServerVersion}}" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-DockerEngine -DockerCommand $DockerCommand)) {
         if (-not (Test-Path -LiteralPath $DockerDesktop)) {
             throw "Docker Engine is not running and Docker Desktop was not found."
         }
@@ -158,63 +173,62 @@ if (-not $SkipInfrastructure) {
     Wait-TcpPort -HostName "127.0.0.1" -Port 8931
 }
 
-if (-not (Test-Path -LiteralPath $CondaExe)) {
-    throw "Conda was not found: $CondaExe"
+$UvCommand = Get-Command "uv" -ErrorAction SilentlyContinue
+if ($null -eq $UvCommand) {
+    throw "uv was not found. Install it from https://docs.astral.sh/uv/ and run this script again."
 }
+$UvExe = $UvCommand.Source
 
-$environmentNames = & $CondaExe env list --json | ConvertFrom-Json
-$environmentPath = Join-Path $CondaRoot "envs\$CondaEnvironment"
-if ($environmentNames.envs -notcontains $environmentPath) {
-    if (-not $Setup) {
-        throw "Conda environment $CondaEnvironment does not exist. Run with -Setup."
+Push-Location -LiteralPath $BackendDir
+try {
+    if ($Setup) {
+        Write-Host "Installing backend dependencies with uv..." -ForegroundColor Cyan
+        & $UvExe sync --extra dev
+        if ($LASTEXITCODE -ne 0) {
+            throw "Backend dependency installation failed."
+        }
+        Write-Host "Installing Playwright Chromium for PDF export..." -ForegroundColor Cyan
+        & $UvExe run playwright install chromium
+        if ($LASTEXITCODE -ne 0) {
+            throw "Playwright Chromium installation failed."
+        }
     }
-    Write-Host "Creating Conda environment $CondaEnvironment..." -ForegroundColor Cyan
-    & $CondaExe create -y -n $CondaEnvironment "python=3.13"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Conda environment creation failed."
+    else {
+        & $UvExe run python -c "import arq, fastapi, qdrant_client" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Backend dependencies are missing. Run .\start-dev.ps1 -Setup first."
+        }
     }
 }
-
-if ($Setup) {
-    Write-Host "Installing backend dependencies into the Conda environment..." -ForegroundColor Cyan
-    & $CondaExe run -n $CondaEnvironment python -m pip install -e $BackendDir
-    if ($LASTEXITCODE -ne 0) {
-        throw "Backend dependency installation failed."
-    }
-}
-else {
-    & $CondaExe run -n $CondaEnvironment python -c "import arq, fastapi, qdrant_client" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Backend dependencies are missing. Run .\start-dev.ps1 -Setup first."
-    }
+finally {
+    Pop-Location
 }
 
 if (-not $SkipFrontend) {
-    if (-not (Test-Command "npm")) {
+    if (-not (Test-Command "npm.cmd")) {
         throw "npm was not found. Install Node.js 22+."
     }
     if ($Setup -or -not (Test-Path -LiteralPath (Join-Path $FrontendDir "node_modules"))) {
         Write-Host "Installing frontend dependencies..." -ForegroundColor Cyan
-        & npm --prefix $FrontendDir ci
+        & npm.cmd --prefix $FrontendDir ci
         if ($LASTEXITCODE -ne 0) {
             throw "Frontend dependency installation failed."
         }
     }
 }
 
-$escapedConda = $CondaExe.Replace("'", "''")
-$escapedEnvironment = $CondaEnvironment.Replace("'", "''")
-$BackendCommand = "& '$escapedConda' run --no-capture-output -n '$escapedEnvironment' python -m app.main"
-$MemoryWorkerCommand = "& '$escapedConda' run --no-capture-output -n '$escapedEnvironment' arq app.ai_chat.memory.worker.WorkerSettings"
-$IndexWorkerCommand = "& '$escapedConda' run --no-capture-output -n '$escapedEnvironment' arq app.resume_generation.index_worker.WorkerSettings"
+$escapedUv = $UvExe.Replace("'", "''")
+$BackendCommand = "& '$escapedUv' run python -m app.main"
+$MemoryWorkerCommand = "& '$escapedUv' run arq app.ai_chat.memory.worker.WorkerSettings"
+$IndexWorkerCommand = "& '$escapedUv' run arq app.resume_generation.index_worker.WorkerSettings"
 
-Start-DevTerminal -Title "Resume Matcher - Backend" -WorkingDirectory $BackendDir -Command $BackendCommand
-Start-DevTerminal -Title "Resume Matcher - Memory Worker" -WorkingDirectory $BackendDir -Command $MemoryWorkerCommand
-Start-DevTerminal -Title "Resume Matcher - Resume Index Worker" -WorkingDirectory $BackendDir -Command $IndexWorkerCommand
+Start-DevTerminal -Title "ResumeAgent - Backend" -WorkingDirectory $BackendDir -Command $BackendCommand
+Start-DevTerminal -Title "ResumeAgent - Memory Worker" -WorkingDirectory $BackendDir -Command $MemoryWorkerCommand
+Start-DevTerminal -Title "ResumeAgent - Resume Index Worker" -WorkingDirectory $BackendDir -Command $IndexWorkerCommand
 
 if (-not $SkipFrontend) {
     Start-DevTerminal `
-        -Title "Resume Matcher - Frontend" `
+        -Title "ResumeAgent - Frontend" `
         -WorkingDirectory $FrontendDir `
         -Command "& npm.cmd run dev"
 }
