@@ -1,12 +1,17 @@
-name: Custom / Other
-description: Describe this issue template's purpose here.
-title: ""
+name: 其他问题
+description: 提交不属于缺陷报告或功能建议的项目问题
+title: "[Other]: "
 labels: []
 body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。安全漏洞请勿填写此表单，请使用私密报告入口。
+
   - type: textarea
     id: description
     attributes:
-      label: Description
-      description: Please describe your issue.
+      label: 问题说明
+      description: 请说明背景、期望结果，以及为什么现有模板不适用。
     validations:
       required: true

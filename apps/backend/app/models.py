@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for Resume Matcher.
+"""SQLAlchemy ORM models for ResumeAgent.
 
 A single declarative ``Base`` backs all tables (doc tables migrated from
 TinyDB plus the new ``applications`` and ``api_keys`` tables). The facade in
