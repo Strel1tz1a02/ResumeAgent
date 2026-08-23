@@ -509,7 +509,7 @@ function ExperienceLibraryContent() {
             className="md:border-r-0"
           />
           <Dropdown
-            label={t('experiences.kind')}
+            label={t('experiences.editor.kind')}
             value={kind}
             onChange={(value) => applyFilters(query, value as ExperienceKind | 'all')}
             className="mt-3 md:mt-0"
