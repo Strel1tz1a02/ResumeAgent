@@ -36,7 +36,7 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 - Agent memory 还包含 app/ai_chat/memory/tests；由于 pytest testpaths 仅为 tests，默认全量命令不会自动发现这组内嵌测试。
 - 前端：apps/frontend/tests/*.test.ts(x)，全局 setup 为 apps/frontend/vitest.setup.ts。
 - E2E monitor：apps/backend/e2e_monitor；隔离 DATA_DIR，产物写入 artifacts/e2e-monitor。
-- 本地门禁：.githooks/pre-push；需要手工 git config core.hooksPath .githooks 才生效。
+- 本地门禁：.githooks/pre-push；除手工 `git config core.hooksPath .githooks` 外，还必须恢复可执行位。HEAD 跟踪 mode 为 100644，POSIX fresh clone 即使配置 hooksPath 也不会执行。
 
 ## 3) Scope matrix
 
@@ -51,6 +51,8 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 | 性能/负载 | 否 | [TODO] | 扫描未发现性能测试配置 |
 | 硬崩溃/多进程恢复 | 不完整 | stale running、DB/checkpoint 对账 | 当前最重要缺口 |
 
+另外两处确定性 coverage 缺口：生产 `_register_business_adapters()`/lifespan 与 JD Agent HTTP/SSE 没有直接契约测试；数据库 reset 测试只覆盖旧表，没有断言 Experience/Evidence/JD/Qdrant 被清理。
+
 ## 4) Mock 与隔离策略
 
 - 后端服务/LLM 通常 monkeypatch 模块函数或注入 fake model/driver/repository。
@@ -60,26 +62,21 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 - eval 测试默认 deselect，避免常规测试触网或调用付费模型。
 - 常见风险：fake runner 可证明服务幂等，却不能证明真实 Graph + checkpoint + DB 的跨进程一致性。
 
-## 5) 本次验证结果（2026-08-17）
+## 5) 本次验证结果（2026-08-23）
 
 | 验证 | 结果 | 备注 |
 |------|------|------|
-| 后端默认全量 | 751 passed、1 skipped、11 deselected，106.35s | Python 3.12.13 venv；项目目标为 3.13 |
-| 后端统一改造定向集 | 104 passed | protocol/context/driver/state + Experience/JD/Resume |
-| 前端全量 | 36 files、271 tests passed | Vitest 有 CJS/ESM config warning |
-| 前端统一改造定向集 | 5 files、21 tests passed | Experience/JD/Resume API 与 UI |
-| TypeScript | 通过 | npx tsc --noEmit --incremental false |
-| ESLint/Prettier | 失败 1 项 | lib/api/config.ts:14 的既有 CR 行尾问题，不在本轮 diff |
-| git diff --check | 无 whitespace error | 有 LF -> CRLF 工作树警告 |
+| 后端默认集收集 | 811 collected、16 eval deselected、795 selected | Python 3.12.13；本轮只做 collect-only，未声称 795 项全部执行通过 |
+| 后端关键定向 smoke | 5 passed | `test_run_state.py` + `test_agent_runtime_boundaries.py`；不是 production composition 或全量测试的替代 |
+| 默认集遗漏的 memory 内嵌套件 | 22 passed | 显式运行 app/ai_chat/memory/tests；默认 `testpaths=["tests"]` 不会收集 |
+| 前端全量 | 38 files、273 tests passed，25.70s | Vitest 4.1.8、Node 24.18.0 |
+| TypeScript / ESLint | 通过 / 通过 | `tsc --noEmit --incremental false`、`npm run lint` |
+| 依赖完整性 | 通过 | backend `pip check`、frontend `npm ls --depth=0` |
+| Locale parity / MCP proxy | 通过 / 4 passed | 中英 JSON 同形；受限出口代理单测 |
+| Compose 配置 | 通过 | `docker compose config --quiet` 在并行核验环境通过 |
+| Windows 启动脚本 | ValidateOnly 语法通过 | 当前 PATH 没有 uv，不能据此声称实际开发启动已验证 |
 
-2026-08-20 针对 Runtime 七项抽象补充验证：
-
-| 验证 | 结果 | 备注 |
-|------|------|------|
-| 后端 Graph/Run/Interaction/Event/Context/Tool/Adapter 定向集 | 97 passed，16.23s | Python 3.12.13；覆盖 7 个单元测试文件 |
-| 前端 Runtime SSE 与 Experience/JD/Resume API 定向集 | 3 files、14 tests passed，20.25s | Vitest 仍报告 CJS/ESM config warning |
-
-不能由绿测推出“完整崩溃恢复已完成”：stale running、JD 聚合结果补发、恢复阶段 output.delta 持久化和事件 replay 没有对应测试。
+仓库声明 Python 3.13、Node 22；本机版本与声明版本不同。不能由测试收集或前端绿测推出“完整崩溃恢复已完成”：stale current Run、JD 聚合结果补发、恢复阶段 output.delta 持久化和事件 replay 仍需要专门的 crash-window 测试。
 
 ## 6) Runtime 关键回归证据
 
@@ -95,11 +92,12 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 
 ## 7) CI 与质量信号
 
-- GitHub Actions 仅在 tag/manual 时构建并推送镜像，没有 PR test/lint/typecheck。
-- pre-push 运行 backend pytest、locale parity、可用时运行 Vitest；Node 不可用时会跳过前端。
-- pre-push 明确不运行 tsc/next build，并可由 --no-verify 绕过；当前 clone 的 hooksPath 是否启用应在交付时再次确认。
+- 当前工作树新增 `.github/workflows/ci.yml`：push/PR 到 main 时运行 Python 3.13 后端默认 pytest 集、Node 22 的 npm audit/lint/test/build、容器构建/Compose 校验及 locale parity；默认集仍漏掉 `app/ai_chat/memory/tests` 的 22 项。
+- 该 ci.yml 在本轮核验时仍是 untracked 文件；在提交前不能把它视为远端已生效的门禁。
+- docker-publish.yml 仍独立负责 tag/manual 的多架构 GHCR 发布。
+- pre-push 运行 backend pytest、locale parity、可用时运行 Vitest；Node 不可用时会跳过前端。当前 clone 未配置 `core.hooksPath`，且 HEAD 中 hook mode 为 100644，Linux fresh clone 不会把它作为可执行门禁。
+- pre-push 不运行 tsc/next build，并可由 --no-verify 绕过；CI 的 frontend build 才覆盖构建层。
 - 无 coverage threshold、mutation testing、性能门禁。
-- Vitest 警告：vitest.config.ts 作为 CommonJS 加载但使用 ESM；未来 Vite config loader 变化可能升级为阻断。
 
 ## 8) Evidence
 
@@ -107,6 +105,7 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 - apps/frontend/package.json
 - apps/frontend/vitest.config.ts
 - .githooks/pre-push
+- .github/workflows/ci.yml
 - .github/workflows/docker-publish.yml
 - apps/backend/e2e_monitor/README.md
 - apps/backend/tests/unit/test_experience_ai_chat.py

@@ -1,4 +1,4 @@
-"""SQLAlchemy (SQLite) data layer for Resume Matcher.
+"""SQLAlchemy (SQLite) data layer for ResumeAgent.
 
 This is a behavior-preserving replacement for the original TinyDB wrapper. The
 ``Database`` facade keeps the same method names/signatures and returns **plain
@@ -52,7 +52,7 @@ def _now() -> str:
 
 
 class Database:
-    """Async SQLAlchemy facade for resume matcher data."""
+    """Async SQLAlchemy facade for ResumeAgent data."""
 
     # Serializes concurrent master-resume promotion. Stays the *primary*
     # mechanism for the single-master invariant (the partial unique index is a

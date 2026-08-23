@@ -32,7 +32,7 @@ export default function Hero() {
 
         <div className="flex flex-col gap-4 md:flex-row md:gap-12">
           <a
-            href="https://github.com/srbhr/Resume-Matcher"
+            href="https://github.com/Strel1tz1a02/resume-agent"
             target="_blank"
             rel="noopener noreferrer"
             className={buttonClass}
@@ -40,7 +40,7 @@ export default function Hero() {
             GitHub
           </a>
           <a
-            href="https://resumematcher.fyi"
+            href="https://github.com/Strel1tz1a02/resume-agent/blob/main/SETUP.zh-CN.md"
             target="_blank"
             rel="noopener noreferrer"
             className={buttonClass}
