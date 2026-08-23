@@ -1,7 +1,13 @@
 import { apiDelete, apiFetch, apiPatch, apiPost, apiPut } from './client';
 
 export type ExperienceKind =
-  'work' | 'internship' | 'project' | 'research' | 'campus' | 'volunteer' | 'other';
+  | 'work'
+  | 'internship'
+  | 'project'
+  | 'research'
+  | 'campus'
+  | 'volunteer'
+  | 'other';
 export type ExperienceStatus = 'draft' | 'ready' | 'archived';
 export type ExperienceListStatus = 'active' | ExperienceStatus;
 export type ExperienceSort = 'updated_at_desc' | 'created_at_desc' | 'created_at_asc';

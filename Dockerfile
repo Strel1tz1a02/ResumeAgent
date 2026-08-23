@@ -1,4 +1,4 @@
-# Resume Matcher Docker Image
+# ResumeAgent Docker image
 # Multi-stage build for optimized image size
 
 # ============================================

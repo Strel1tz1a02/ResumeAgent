@@ -80,13 +80,14 @@
 .git-upstream-backup\refs\remotes
 .git-upstream-backup\refs\remotes\origin
 .git-upstream-backup\refs\tags
+.gitattributes
 .githooks
 .githooks\pre-push
 .githooks\README.md
 .github
 .github\CODE_OF_CONDUCT.md
 .github\CONTRIBUTING.md
-.github\FUNDING.yml
+.github\dependabot.yml
 .github\ISSUE_TEMPLATE
 .github\ISSUE_TEMPLATE\bug_report.yml
 .github\ISSUE_TEMPLATE\config.yml
@@ -96,6 +97,7 @@
 .github\PULL_REQUEST_TEMPLATE.md
 .github\SECURITY.md
 .github\workflows
+.github\workflows\ci.yml
 .github\workflows\docker-publish.yml
 .gitignore
 .impeccable.md
@@ -115,6 +117,8 @@
 .ruff_cache\0.16.2\15485966568660833784
 .ruff_cache\0.16.2\16233312316747654512
 .ruff_cache\0.16.2\17751955002682477127
+.ruff_cache\0.16.2\6275150283477969354
+.ruff_cache\0.16.2\6321694691715494903
 .ruff_cache\0.16.2\8313260809250630068
 .ruff_cache\0.16.2\8465697305325223416
 .ruff_cache\0.16.2\8757206424533003623
@@ -196,10 +200,6 @@
 .superpowers\sdd\2026-08-08-tool-call-service\task-6-brief.md
 .superpowers\sdd\2026-08-08-tool-call-service\task-6-report.md
 .superpowers\sdd\2026-08-08-tool-call-service\task-6-review-package.diff
-.superpowers\sdd\2026-08-08-tool-call-service\task-6-review.md
-.superpowers\sdd\2026-08-08-tool-call-service\task-7-brief.md
-.superpowers\sdd\2026-08-08-tool-call-service\task-7-review.md
-.vscode
 
 === STACK DETECTION (manifest files) ===
 No recognized manifest files found in project root.
@@ -217,6 +217,10 @@ No .env.example or .env.template found. Identify required environment variables 
 None found.
 
 === GIT RECENT COMMITS (last 20) ===
+dca0189 简历生成校验时机优化
+4442167 评估+简历生成日志记录
+bbcdb6e 生成简历能力bug修复
+22e1fcb 修复mcp问题
 3e0de4c 工具模块重构
 ec2316c 简历生成模块
 27b64f5 JD导入前端
@@ -233,44 +237,40 @@ db277e8 ai_chat接入记忆模块
 21effbd 记忆模块改造
 c826bf4 记忆模块测试
 118c50a 记忆模块测试
-e933a66 对话记忆模块
-4e56d56 merge: add standalone AI chat memory module
-f1335c9 refactor(ai-chat): keep memory implementation self-contained
-b74d3c8 工具模块系统化改造
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
-  21 apps/backend/tests/unit/test_experience_ai_chat.py
-  21 apps/frontend/tests/experience-library-page.test.tsx
+  22 apps/backend/tests/unit/test_experience_ai_chat.py
+  22 apps/frontend/tests/experience-library-page.test.tsx
   16 apps/frontend/components/experiences/experience-library-page.tsx
+  15 apps/backend/app/db_engine.py
   15 apps/backend/tests/integration/test_experiences_api.py
-  14 apps/backend/app/db_engine.py
-  13 apps/backend/tests/unit/test_tool_call_service.py
-  12 apps/backend/tests/unit/test_ai_chat_model.py
+  14 apps/backend/tests/unit/test_tool_call_service.py
+  13 apps/backend/tests/unit/test_ai_chat_model.py
+  12 apps/frontend/messages/en.json
+  12 apps/frontend/messages/zh.json
+  12 apps/backend/app/ai_chat/graph/runner.py
+  12 docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md
   12 apps/backend/app/ai_chat/repositories/tool_call_repository.py
-  11 apps/backend/app/ai_chat/graph/runner.py
-  11 docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md
-  11 apps/frontend/messages/en.json
-  11 apps/frontend/messages/zh.json
+  11 apps/backend/app/ai_chat/graph/runtime.py
+  11 apps/backend/app/experience/graph/builder.py
+  11 apps/backend/app/main.py
+  11 apps/frontend/components/experiences/evidence-list-editor.tsx
   11 apps/backend/app/ai_chat/services/service.py
-  10 apps/backend/app/ai_chat/graph/runtime.py
+  10 apps/backend/app/ai_chat/container.py
+  10 apps/frontend/components/experiences/experience-editor.tsx
   10 apps/backend/app/ai_chat/tools/handler.py
-  10 apps/backend/app/experience/graph/builder.py
-  10 apps/backend/app/main.py
-  10 apps/backend/tests/unit/test_experience_repositories.py
-  10 apps/frontend/components/experiences/evidence-list-editor.tsx
-   9 apps/backend/app/ai_chat/container.py
 
 === MONOREPO SIGNALS ===
 Sub-package directory found: apps/
 
 === CODE METRICS ===
-Total files scanned: 1430
-Total lines of code: 207792
+Total files scanned: 1475
+Total lines of code: 217718
 
 Files by language:
-  Other: 561
-  Python: 506
-  TypeScript/React: 246
+  Other: 586
+  Python: 523
+  TypeScript/React: 249
   TypeScript: 117
 
 Top 10 largest files:
@@ -281,9 +281,9 @@ assets\Resume_Matcher_Demo.gif: 16411.1KB
 assets\Resume_Matcher_Video.mp4: 10857.5KB
 .worktrees\ai-chat-memory\assets\Resume_Matcher_Demo_2.gif: 9474.4KB
 assets\Resume_Matcher_Demo_2.gif: 9474.4KB
+apps\backend\data\logs\backend.log: 3467.7KB
 .worktrees\ai-chat-memory\assets\page_2.png: 1708.2KB
 assets\page_2.png: 1708.2KB
-apps\backend\data\logs\backend.log: 1347.8KB
 
 === CI/CD PIPELINES ===
 CI/CD: GitHub Actions

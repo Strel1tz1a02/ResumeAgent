@@ -1,15 +1,11 @@
-# This prevents users from clicking "Open new issue" without picking a template first.
+# 先选择合适的模板，避免缺少复现信息的空白 Issue。
 blank_issues_enabled: false
 
 contact_links:
-  - name: 💬 Ask a Question (Discussions)
-    url: https://github.com/srbhr/Resume-Matcher/discussions
-    about: Please ask usage questions or discuss ideas here before opening a formal issue.
+  - name: 🔐 私密报告安全漏洞
+    url: https://github.com/Strel1tz1a02/resume-agent/security/advisories/new
+    about: 安全漏洞请通过私密报告入口提交，不要创建公开 Issue。
 
-  - name: 🔐 Report a Security Vulnerability
-    url: https://github.com/srbhr/Resume-Matcher/security/advisories/new
-    about: Please do not open public issues for security vulnerabilities.
-
-  - name: 📖 Read the Documentation
-    url: https://github.com/srbhr/Resume-Matcher/blob/master/README.md
-    about: Check the docs to see if your answer is already there.
+  - name: 📖 阅读项目文档
+    url: https://github.com/Strel1tz1a02/resume-agent/blob/main/README.md
+    about: 提交问题前请先查看 README 与安装说明。
