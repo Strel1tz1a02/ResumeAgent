@@ -1,6 +1,6 @@
 services:
   resume-matcher:
-    image: ghcr.io/srbhr/resume-matcher
+    image: ${RESUME_AGENT_IMAGE:-ghcr.io/strel1tz1a02/resume-agent:latest}
     build: .
     container_name: resume-matcher
     ports:
@@ -46,7 +46,7 @@ services:
     restart: unless-stopped
 
   memory-worker:
-    image: ghcr.io/srbhr/resume-matcher
+    image: ${RESUME_AGENT_IMAGE:-ghcr.io/strel1tz1a02/resume-agent:latest}
     build: .
     working_dir: /app/backend
     command: ["arq", "app.ai_chat.memory.worker.WorkerSettings"]
@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
 
   resume-index-worker:
-    image: ghcr.io/srbhr/resume-matcher
+    image: ${RESUME_AGENT_IMAGE:-ghcr.io/strel1tz1a02/resume-agent:latest}
     build: .
     working_dir: /app/backend
     command: ["arq", "app.resume_generation.index_worker.WorkerSettings"]
@@ -116,7 +116,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.18.2
     ports:
-      - "${QDRANT_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
