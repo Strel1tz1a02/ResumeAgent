@@ -1,5 +1,4 @@
-export const APP_VERSION = '1.2';
-export const APP_CODENAME = 'Nightvision';
-export const APP_NAME = 'Resume Matcher';
+export const APP_VERSION = '2.0.0';
+export const APP_NAME = 'ResumeAgent';
 
-export const getVersionString = () => `${APP_NAME} v${APP_VERSION} (${APP_CODENAME})`;
+export const getVersionString = () => `${APP_NAME} v${APP_VERSION}`;

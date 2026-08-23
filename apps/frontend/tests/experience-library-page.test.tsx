@@ -35,7 +35,7 @@ const translate = vi.hoisted(
     ({
       'experiences.title': 'Experience library',
       'experiences.search': 'Search experiences',
-      'experiences.kind': 'Kind',
+      'experiences.editor.kind': 'Kind',
       'experiences.kind.all': 'All kinds',
       'experiences.kind.project': 'Project',
       'experiences.kind.volunteer': 'Volunteer',
