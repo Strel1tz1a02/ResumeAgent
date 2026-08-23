@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620" role="img" aria-labelledby="title desc">
+  <title id="title">ResumeAgent</title>
+  <desc id="desc">Evidence-grounded resumes for real job applications</desc>
+  <defs>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#1d4ed8" stroke-opacity="0.10" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="9" dy="9" stdDeviation="0" flood-color="#1d4ed8"/>
+    </filter>
+  </defs>
+
+  <rect width="1400" height="620" fill="#f5f4ec"/>
+  <rect width="1400" height="620" fill="url(#grid)"/>
+  <rect x="42" y="42" width="1316" height="536" fill="#f5f4ec" stroke="#111111" stroke-width="3" filter="url(#shadow)"/>
+
+  <g transform="translate(105 108)" stroke="#1d4ed8" stroke-width="25" stroke-linecap="round">
+    <path d="M0 0 L0 92"/>
+    <path d="M-46 46 L46 46"/>
+    <path d="M-32 14 L32 78"/>
+    <path d="M32 14 L-32 78"/>
+  </g>
+
+  <text x="190" y="172" fill="#111111" font-family="Arial, Helvetica, sans-serif" font-size="86" font-weight="800" letter-spacing="-3">Resume</text>
+  <text x="515" y="172" fill="#1d4ed8" font-family="Arial, Helvetica, sans-serif" font-size="86" font-weight="800" letter-spacing="-3">Agent</text>
+  <text x="102" y="236" fill="#111111" font-family="Arial, Helvetica, sans-serif" font-size="29" font-weight="600">Evidence-grounded resumes for real job applications.</text>
+  <text x="102" y="281" fill="#555555" font-family="Arial, Helvetica, sans-serif" font-size="23">Build from what you actually did. Tailor for where you want to go.</text>
+
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="102" y="356" width="310" height="105" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+    <text x="126" y="392" fill="#1d4ed8" font-size="17" font-weight="800" letter-spacing="2">01 / EVIDENCE</text>
+    <text x="126" y="428" fill="#111111" font-size="23" font-weight="700">Career experience library</text>
+
+    <path d="M429 408 H473" stroke="#1d4ed8" stroke-width="4"/>
+    <path d="M460 394 L476 408 L460 422" fill="none" stroke="#1d4ed8" stroke-width="4"/>
+
+    <rect x="490" y="356" width="310" height="105" fill="#ffffff" stroke="#111111" stroke-width="2"/>
+    <text x="514" y="392" fill="#1d4ed8" font-size="17" font-weight="800" letter-spacing="2">02 / REQUIREMENTS</text>
+    <text x="514" y="428" fill="#111111" font-size="23" font-weight="700">Structured job descriptions</text>
+
+    <path d="M817 408 H861" stroke="#1d4ed8" stroke-width="4"/>
+    <path d="M848 394 L864 408 L848 422" fill="none" stroke="#1d4ed8" stroke-width="4"/>
+
+    <rect x="878" y="356" width="378" height="105" fill="#1d4ed8" stroke="#111111" stroke-width="2"/>
+    <text x="902" y="392" fill="#ffffff" font-size="17" font-weight="800" letter-spacing="2">03 / GROUNDED OUTPUT</text>
+    <text x="902" y="428" fill="#ffffff" font-size="23" font-weight="700">Reviewable, tailored resume</text>
+  </g>
+
+  <g font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" letter-spacing="1.4">
+    <rect x="102" y="504" width="170" height="38" fill="#f5f4ec" stroke="#111111"/>
+    <text x="122" y="529" fill="#111111">SELF-HOSTED</text>
+    <rect x="286" y="504" width="104" height="38" fill="#f5f4ec" stroke="#111111"/>
+    <text x="310" y="529" fill="#111111">BYOK</text>
+    <rect x="404" y="504" width="244" height="38" fill="#f5f4ec" stroke="#111111"/>
+    <text x="425" y="529" fill="#111111">HUMAN IN THE LOOP</text>
+    <rect x="662" y="504" width="210" height="38" fill="#f5f4ec" stroke="#111111"/>
+    <text x="684" y="529" fill="#111111">中文 / ENGLISH</text>
+  </g>
+</svg>
