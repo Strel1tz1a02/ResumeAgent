@@ -23,7 +23,6 @@ from app.resume_generation.schemas import (
     ExperienceSnapshot,
     JDAnalysisSnapshot,
     JDAnalysisSourceSnapshot,
-    PlanCritique,
     ResumeConstraints,
     ResumeDraft,
     ResumePlan,
@@ -54,7 +53,7 @@ class ResumeGenerationState(TypedDict, total=False):
     new_candidate_count: int
     judgments: list[EvidenceJudgment]
     plan: ResumePlan
-    critique: PlanCritique
+    should_search_more: bool
     draft: ResumeDraft
     fact_check: DraftFactCheckResult
     resume_data: ResumeData
@@ -182,6 +181,7 @@ def build_resume_generation_graph(
         return {"judgments": judgments}
 
     async def build_plan(state: ResumeGenerationState) -> dict[str, Any]:
+        """拼装计划，并用确定性规则计算补搜目标与停止条件。"""
         plan = assemble_plan(
             state["analysis"],
             state["experiences"],
@@ -189,32 +189,62 @@ def build_resume_generation_graph(
             state["constraints"],
             search_rounds=state["search_round"],
         )
-        return {"plan": plan}
+        importance_by_id = {
+            item.coverage_id: item.importance
+            for item in state["analysis"].coverage_items
+        }
+        gap_coverage_ids = [
+            coverage_id
+            for coverage_id in plan.uncovered_requirements
+            if importance_by_id.get(coverage_id) in {"must", "should"}
+        ]
+        should_search_more = (
+            bool(gap_coverage_ids)
+            and state["search_round"] < state["constraints"].max_search_rounds
+            and (
+                state["search_round"] == 1
+                or state.get("new_candidate_count", 0) > 0
+            )
+        )
 
-    async def critique(state: ResumeGenerationState) -> dict[str, Any]:
-        result = await dependencies.model.critique(
-            state["analysis"],
-            state["plan"],
-            state["judgments"],
-            state["constraints"],
-            search_round=state["search_round"],
-            has_new_candidates=state.get("new_candidate_count", 0) > 0,
-        )
-        plan = state["plan"].model_copy(deep=True)
-        # “空缺”是模型基于证据质量作出的语义结论，不由服务端覆盖率规则代判。
-        plan.uncovered_requirements = result.gap_coverage_ids
-        plan.review_actions = list(dict.fromkeys(plan.review_actions + result.actions))
-        plan.review_warnings = list(
-            dict.fromkeys(plan.review_warnings + result.warnings)
-        )
+        warnings: list[str] = []
+        must_gaps = [
+            coverage_id
+            for coverage_id in gap_coverage_ids
+            if importance_by_id[coverage_id] == "must"
+        ]
+        if must_gaps:
+            warnings.append(f"仍有 {len(must_gaps)} 项必选要求没有事实证据")
+        if plan.coverage_ratio < state["constraints"].min_coverage_ratio:
+            warnings.append(
+                f"加权覆盖率 {plan.coverage_ratio:.0%} 低于目标 "
+                f"{state['constraints'].min_coverage_ratio:.0%}"
+            )
+
+        if should_search_more:
+            actions = ["search_more"]
+        else:
+            actions = []
+            if plan.promoted_skills:
+                actions.append("move_to_skill")
+            if plan.omitted_candidates:
+                actions.append("drop_redundant_content")
+            if plan.uncovered_requirements:
+                actions.append("accept_with_gaps")
+                warnings.append(
+                    "已达到停止条件，未覆盖项将显式保留且不会生成虚构内容"
+                )
+        plan.review_actions = actions
+        plan.review_warnings = warnings
         return {
-            "critique": result,
             "plan": plan,
-            "gap_coverage_ids": result.gap_coverage_ids,
+            "gap_coverage_ids": gap_coverage_ids,
+            "should_search_more": should_search_more,
         }
 
-    def route_after_critique(state: ResumeGenerationState) -> str:
-        if "search_more" in state["critique"].actions:
+    def route_after_plan(state: ResumeGenerationState) -> str:
+        """根据规则决策进入下一轮检索或开始生成草稿。"""
+        if state["should_search_more"]:
             return "plan_search"
         return "draft_resume"
 
@@ -297,7 +327,6 @@ def build_resume_generation_graph(
     graph.add_node("retrieve", retrieve)
     graph.add_node("judge_evidence", judge_evidence)
     graph.add_node("assemble_plan", build_plan)
-    graph.add_node("critique_plan", critique)
     graph.add_node("draft_resume", draft_resume)
     graph.add_node("validate_draft", validate_draft)
     graph.add_node("materialize_resume", materialize_draft)
@@ -306,10 +335,9 @@ def build_resume_generation_graph(
     graph.add_edge("plan_search", "retrieve")
     graph.add_edge("retrieve", "judge_evidence")
     graph.add_edge("judge_evidence", "assemble_plan")
-    graph.add_edge("assemble_plan", "critique_plan")
     graph.add_conditional_edges(
-        "critique_plan",
-        route_after_critique,
+        "assemble_plan",
+        route_after_plan,
         {"plan_search": "plan_search", "draft_resume": "draft_resume"},
     )
     graph.add_edge("draft_resume", "validate_draft")

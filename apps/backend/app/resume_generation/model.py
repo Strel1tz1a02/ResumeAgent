@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypedDict, TypeVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from app.ai_chat.context import ContextAssembler
 from app.llm import complete_json
-from app.resume_generation.planner import critique_plan
 from app.resume_generation.retriever import tokenize
 from app.resume_generation.schemas import (
     CoverageItem,
@@ -23,8 +23,6 @@ from app.resume_generation.schemas import (
     ExperienceSnapshot,
     JDAnalysisSnapshot,
     JDAnalysisSourceSnapshot,
-    PlanCritique,
-    ResumeConstraints,
     ResumeDraft,
     ResumePlan,
     RetrievedEvidence,
@@ -35,9 +33,22 @@ from app.resume_generation.validation import build_draft_validation_claims
 Completion = Callable[..., Awaitable[dict[str, Any]]]
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 STRUCTURED_JSON_RETRIES = 1
+FALLBACK_ERROR_MESSAGE_LIMIT = 2_000
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """你是简历经历规划器。只能使用输入 JSON 中存在的事实和 ID。
 不得补充数字、规模、职责、技能熟练度或结果。输出必须满足给定 JSON 结构。"""
+
+
+class FallbackError(TypedDict):
+    """一次模型阶段失败的可持久化诊断摘要。"""
+
+    stage: str
+    primary_model: str
+    fallback_model: str
+    exception_type: str
+    message: str
 
 
 class CoverageAnalysisItem(CoverageItem):
@@ -107,17 +118,6 @@ class ResumeGenerationModel(Protocol):
         tasks: list[SearchTask],
         candidates: list[RetrievedEvidence],
     ) -> list[EvidenceJudgment]: ...
-
-    async def critique(
-        self,
-        analysis: JDAnalysisSnapshot,
-        plan: ResumePlan,
-        judgments: list[EvidenceJudgment],
-        constraints: ResumeConstraints,
-        *,
-        search_round: int,
-        has_new_candidates: bool,
-    ) -> PlanCritique: ...
 
     async def draft(
         self,
@@ -280,24 +280,6 @@ class RuleBasedResumeGenerationModel:
                 )
             )
         return judgments
-
-    async def critique(
-        self,
-        analysis: JDAnalysisSnapshot,
-        plan: ResumePlan,
-        judgments: list[EvidenceJudgment],
-        constraints: ResumeConstraints,
-        *,
-        search_round: int,
-        has_new_candidates: bool,
-    ) -> PlanCritique:
-        """确定性降级才使用固定覆盖规则判断是否继续搜索。"""
-        return critique_plan(
-            plan,
-            analysis,
-            constraints,
-            has_new_candidates=has_new_candidates,
-        )
 
     async def draft(
         self,
@@ -575,52 +557,6 @@ class LangChainResumeGenerationModel:
             )
         return result.judgments
 
-    async def critique(
-        self,
-        analysis: JDAnalysisSnapshot,
-        plan: ResumePlan,
-        judgments: list[EvidenceJudgment],
-        constraints: ResumeConstraints,
-        *,
-        search_round: int,
-        has_new_candidates: bool,
-    ) -> PlanCritique:
-        """由模型结合证据质量定义真实空缺，并决定是否重规划。"""
-        result = await self._structured(
-            "输入包含 analysis、plan、judgments、constraints、search_round 和"
-            "has_new_candidates。评审当前计划是否有足够、直接、具体的事实证据支持目标岗位。"
-            "gap_coverage_ids 必须列出仍缺少可靠证据的输入 coverage_id，不得引用未知 ID；"
-            "不要只看 plan.coverage.covered，要综合 relevance、evidence_strength、"
-            "unsupported_risk 和当前入选组合。\n"
-            "严格按以下真值表决策：只有 gap_coverage_ids 非空、search_round 小于"
-            "constraints.max_search_rounds，并且 search_round=1 或 has_new_candidates=true 时，"
-            "才允许 actions 包含 search_more；此时 acceptable 必须为 false。其他所有情况"
-            "actions 都不得包含 search_more，acceptable 必须为 true；仍有空缺时 actions 应"
-            "包含 accept_with_gaps。warnings 只描述输入可证实的缺口或停止原因。",
-            {
-                "analysis": analysis.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json"),
-                "judgments": [item.model_dump(mode="json") for item in judgments],
-                "constraints": constraints.model_dump(mode="json"),
-                "search_round": search_round,
-                "has_new_candidates": has_new_candidates,
-            },
-            PlanCritique,
-        )
-        allowed = {item.coverage_id for item in analysis.coverage_items}
-        if set(result.gap_coverage_ids) - allowed:
-            raise ValueError("critique referenced unknown coverage")
-        wants_more = "search_more" in result.actions
-        if wants_more and not result.gap_coverage_ids:
-            raise ValueError("search_more requires at least one evidence gap")
-        if wants_more and search_round >= constraints.max_search_rounds:
-            raise ValueError("critique exceeded the hard search round limit")
-        if wants_more and search_round > 1 and not has_new_candidates:
-            raise ValueError("critique requested search without new candidate progress")
-        if wants_more == result.acceptable:
-            raise ValueError("critique decision is internally inconsistent")
-        return result
-
     async def draft(
         self,
         analysis: JDAnalysisSnapshot,
@@ -757,12 +693,35 @@ class FallbackResumeGenerationModel:
         self.primary = primary
         self.fallback = fallback
         self.fallback_events: list[str] = []
+        self.fallback_errors: list[FallbackError] = []
+
+    def _record_fallback(self, stage: str, error: Exception) -> None:
+        message = str(error).strip() or repr(error)
+        if len(message) > FALLBACK_ERROR_MESSAGE_LIMIT:
+            message = f"{message[: FALLBACK_ERROR_MESSAGE_LIMIT - 3]}..."
+        details: FallbackError = {
+            "stage": stage,
+            "primary_model": type(self.primary).__name__,
+            "fallback_model": type(self.fallback).__name__,
+            "exception_type": type(error).__name__,
+            "message": message,
+        }
+        self.fallback_events.append(stage)
+        self.fallback_errors.append(details)
+        logger.exception(
+            "Resume generation stage '%s' failed in %s; using %s: %s: %s",
+            stage,
+            details["primary_model"],
+            details["fallback_model"],
+            details["exception_type"],
+            details["message"],
+        )
 
     async def _call(self, name: str, *args: Any, **kwargs: Any):
         try:
             return await getattr(self.primary, name)(*args, **kwargs)
-        except Exception:  # noqa: BLE001 - auto 模式必须在任意模型故障时确定性降级
-            self.fallback_events.append(name)
+        except Exception as error:  # noqa: BLE001 - auto 模式必须在任意模型故障时确定性降级
+            self._record_fallback(name, error)
             return await getattr(self.fallback, name)(*args, **kwargs)
 
     async def analyze_jd(self, source: JDAnalysisSourceSnapshot) -> list[CoverageItem]:
@@ -781,18 +740,6 @@ class FallbackResumeGenerationModel:
     ) -> list[EvidenceJudgment]:
         return await self._call("judge", analysis, tasks, candidates)
 
-    async def critique(
-        self,
-        analysis: JDAnalysisSnapshot,
-        plan: ResumePlan,
-        judgments: list[EvidenceJudgment],
-        constraints: ResumeConstraints,
-        **kwargs: Any,
-    ) -> PlanCritique:
-        return await self._call(
-            "critique", analysis, plan, judgments, constraints, **kwargs
-        )
-
     async def draft(
         self,
         analysis: JDAnalysisSnapshot,
@@ -810,7 +757,7 @@ class FallbackResumeGenerationModel:
         """auto 模式要求真实模型完成校验；降级只能保留失败现场。"""
         try:
             result = await self.primary.validate_draft(draft, plan, experiences)
-        except Exception:  # noqa: BLE001 - 返回不可确认的预览比丢失现场更可诊断
-            self.fallback_events.append("validate_draft")
+        except Exception as error:  # noqa: BLE001 - 返回不可确认的预览比丢失现场更可诊断
+            self._record_fallback("validate_draft", error)
             result = await self.fallback.validate_draft(draft, plan, experiences)
         return result.model_copy(update={"model_required": True})

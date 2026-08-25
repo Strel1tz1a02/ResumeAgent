@@ -12,7 +12,6 @@ from app.resume_generation.schemas import (
     ExperienceSnapshot,
     JDAnalysisSnapshot,
     OmittedCandidate,
-    PlanCritique,
     PlannedExperience,
     PromotedSkill,
     ResumeConstraints,
@@ -212,62 +211,6 @@ def assemble_plan(
         search_rounds=search_rounds,
         coverage_ratio=round(ratio, 4),
     )
-
-
-def critique_plan(
-    plan: ResumePlan,
-    analysis: JDAnalysisSnapshot,
-    constraints: ResumeConstraints,
-    *,
-    has_new_candidates: bool,
-) -> PlanCritique:
-    importance = {item.coverage_id: item.importance for item in analysis.coverage_items}
-    must_gaps = [
-        item for item in plan.uncovered_requirements if importance.get(item) == "must"
-    ]
-    meaningful_gaps = [
-        item
-        for item in plan.uncovered_requirements
-        if importance.get(item) in {"must", "should"}
-    ]
-    warnings: list[str] = []
-    if must_gaps:
-        warnings.append(f"仍有 {len(must_gaps)} 项必选要求没有事实证据")
-    if plan.coverage_ratio < constraints.min_coverage_ratio:
-        warnings.append(
-            f"加权覆盖率 {plan.coverage_ratio:.0%} 低于目标 {constraints.min_coverage_ratio:.0%}"
-        )
-    can_search = (
-        bool(meaningful_gaps)
-        and (plan.search_rounds == 1 or has_new_candidates)
-        and plan.search_rounds < constraints.max_search_rounds
-    )
-    if can_search:
-        return PlanCritique(
-            acceptable=False,
-            actions=["search_more"],
-            gap_coverage_ids=meaningful_gaps,
-            warnings=warnings,
-        )
-    if plan.uncovered_requirements:
-        warnings.append("已达到停止条件，未覆盖项将显式保留且不会生成虚构内容")
-        actions = ["accept_with_gaps"]
-        if plan.promoted_skills:
-            actions.insert(0, "move_to_skill")
-        if plan.omitted_candidates:
-            actions.insert(0, "drop_redundant_content")
-        return PlanCritique(
-            acceptable=True,
-            actions=actions,
-            gap_coverage_ids=plan.uncovered_requirements,
-            warnings=warnings,
-        )
-    actions = []
-    if plan.promoted_skills:
-        actions.append("move_to_skill")
-    if plan.omitted_candidates:
-        actions.append("drop_redundant_content")
-    return PlanCritique(acceptable=True, actions=actions, warnings=warnings)
 
 
 def materialize_resume(

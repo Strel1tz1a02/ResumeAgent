@@ -217,13 +217,6 @@ class ResumePlan(BaseModel):
     review_warnings: list[str] = Field(default_factory=list)
 
 
-class PlanCritique(BaseModel):
-    acceptable: bool
-    actions: list[PlanAction] = Field(default_factory=list)
-    gap_coverage_ids: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
 class DraftBullet(BaseModel):
     experience_id: int
     evidence_ids: list[int] = Field(min_length=1)
