@@ -1,4 +1,4 @@
-"""GraphRunner 隐藏 LangGraph 细节并只暴露统一协议。"""
+"""WorkflowExecutor 隐藏 LangGraph 细节并只暴露统一协议。"""
 
 from typing import TypedDict
 
@@ -8,12 +8,23 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
-from app.ai_chat.graph import LangGraphDriver
-from app.ai_chat.graph.runner import GraphRunner
-from app.ai_chat.protocol import GraphOutcome, GraphResumeCommand, InteractionRequest
-from app.ai_chat.streaming.events import RuntimeEvent
-from app.ai_chat.tools.approval import ToolApprovalPolicy
+from app.ai_chat.workflow import ConversationWorkflow
+from app.workflow_runtime import WorkflowCatalog
+from app.workflow_runtime.errors import (
+    WorkflowNotRegisteredError,
+    WorkflowRegistrationError,
+)
+from app.workflow_runtime.events import RuntimeEvent
+from app.workflow_runtime.graph import (
+    CheckpointedWorkflowExecutor,
+    LangGraphExecutor,
+)
+from app.workflow_runtime.protocol import (
+    GraphOutcome,
+    GraphResumeCommand,
+    InteractionRequest,
+)
+from app.workflow_runtime.tools import ToolApprovalPolicy
 
 
 class _State(TypedDict):
@@ -26,14 +37,18 @@ class _Runtime:
         return self
 
 
-class _Adapter(BaseAdapter[_State]):
+class _TestWorkflow(ConversationWorkflow[_State]):
+    def __init__(self) -> None:
+        self.initialized_runs: list[int] = []
+
     async def validate_request(self, subject, scope):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def parse_input(self, value):  # type: ignore[no-untyped-def]
+    async def init_state(self, value):  # type: ignore[no-untyped-def]
+        self.initialized_runs.append(value["run_id"])
         return _State(run_id=value["run_id"], resolved=False)
 
-    def build_graph(self, _runtime):  # type: ignore[no-untyped-def]
+    def build_graph(self, _model, _tools):  # type: ignore[no-untyped-def]
         def emit(state: _State):
             get_stream_writer()(RuntimeEvent("output.delta", {"text": "ready"}))
             return state
@@ -65,10 +80,10 @@ class _Adapter(BaseAdapter[_State]):
         return ToolApprovalPolicy()
 
 
-def _input():
+def _input(run_id: int = 7):
     return {
         "conversation_id": 3,
-        "run_id": 7,
+        "run_id": run_id,
         "subject": {},
         "scope": {},
         "language": "zh",
@@ -80,11 +95,22 @@ def _input():
 
 
 async def test_graph_runner_returns_event_then_waiting_outcome() -> None:
-    registry = AdapterRegistry()
-    registry.register(_Adapter())
-    runner = GraphRunner(registry, InMemorySaver(), _Runtime())  # type: ignore[arg-type]
+    catalog = WorkflowCatalog()
+    catalog.register(_TestWorkflow())
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        InMemorySaver(),
+        object(),  # type: ignore[arg-type]
+        _Runtime(),  # type: ignore[arg-type]
+        thread_namespace="test",
+    )
 
-    items = [item async for item in runner.stream(adapter_name="_Adapter", value=_input())]
+    items = [
+        item
+        async for item in runner.stream(
+            workflow_name="_TestWorkflow", thread_id=7, value=_input()
+        )
+    ]
 
     assert isinstance(items[0], RuntimeEvent)
     assert items[0].type == "output.delta"
@@ -92,18 +118,29 @@ async def test_graph_runner_returns_event_then_waiting_outcome() -> None:
     assert items[1].status == "waiting"
     assert items[1].interaction is not None
     assert items[1].interaction.interaction_id == 11
+    recovery = await runner.recover(workflow_name="_TestWorkflow", thread_id=7)
+    assert recovery.outcome is not None
+    assert recovery.outcome.status == "waiting"
 
 
 async def test_graph_runner_resume_accepts_only_minimal_command() -> None:
-    registry = AdapterRegistry()
-    registry.register(_Adapter())
-    runner = GraphRunner(registry, InMemorySaver(), _Runtime())  # type: ignore[arg-type]
-    await _collect(runner.stream(adapter_name="_Adapter", value=_input()))
+    catalog = WorkflowCatalog()
+    catalog.register(_TestWorkflow())
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        InMemorySaver(),
+        object(),  # type: ignore[arg-type]
+        _Runtime(),  # type: ignore[arg-type]
+        thread_namespace="test",
+    )
+    await _collect(
+        runner.stream(workflow_name="_TestWorkflow", thread_id=7, value=_input())
+    )
 
     items = await _collect(
         runner.resume(
-            adapter_name="_Adapter",
-            conversation_id=3,
+            workflow_name="_TestWorkflow",
+            thread_id=7,
             command=GraphResumeCommand(run_id=7, interaction_id=11),
         )
     )
@@ -111,9 +148,56 @@ async def test_graph_runner_resume_accepts_only_minimal_command() -> None:
     assert items == [GraphOutcome.completed()]
 
 
-def test_graph_driver_rejects_legacy_dict_custom_events() -> None:
+async def test_each_run_initializes_an_independent_workflow_thread() -> None:
+    catalog = WorkflowCatalog()
+    workflow = _TestWorkflow()
+    catalog.register(workflow)
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        InMemorySaver(),
+        object(),  # type: ignore[arg-type]
+        _Runtime(),  # type: ignore[arg-type]
+        thread_namespace="test",
+    )
+    first = await _collect(
+        runner.stream(workflow_name="_TestWorkflow", thread_id=7, value=_input(7))
+    )
+    assert isinstance(first[-1], GraphOutcome)
+    assert first[-1].status == "waiting"
+    second = await _collect(
+        runner.stream(
+            workflow_name="_TestWorkflow",
+            thread_id=8,
+            value=_input(8),
+        )
+    )
+
+    assert isinstance(second[0], RuntimeEvent)
+    assert second[0].type == "output.delta"
+    assert isinstance(second[-1], GraphOutcome)
+    assert second[-1].status == "waiting"
+    assert workflow.initialized_runs == [7, 8]
+    assert (
+        await runner.recover(workflow_name="_TestWorkflow", thread_id=7)
+    ).outcome == first[-1]
+    assert (
+        await runner.recover(workflow_name="_TestWorkflow", thread_id=8)
+    ).outcome == second[-1]
+
+
+def test_workflow_catalog_rejects_duplicate_and_unknown_names() -> None:
+    catalog = WorkflowCatalog()
+    catalog.register(_TestWorkflow())
+
+    with pytest.raises(WorkflowRegistrationError):
+        catalog.register(_TestWorkflow())
+    with pytest.raises(WorkflowNotRegisteredError):
+        catalog.get("missing")
+
+
+def test_graph_executor_rejects_legacy_dict_custom_events() -> None:
     with pytest.raises(ValueError, match="RuntimeEvent"):
-        LangGraphDriver.normalize(
+        LangGraphExecutor.normalize(
             {
                 "type": "custom",
                 "data": {"type": "output.delta", "payload": {"text": "legacy"}},

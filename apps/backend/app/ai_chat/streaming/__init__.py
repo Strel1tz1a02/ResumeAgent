@@ -1,10 +1,13 @@
-"""后端 AI 对话运行时公开的流式基础类型。"""
+"""Conversation 的 SSE 传输适配器。"""
 
-from app.ai_chat.streaming.events import RuntimeEvent
-from app.ai_chat.streaming.model import AiChatModel, complete_tool_calls
+from app.ai_chat.streaming.sse import (
+    encode_runtime_event,
+    runtime_sse_response,
+    stream_runtime_events,
+)
 
 __all__ = [
-    "RuntimeEvent",
-    "AiChatModel",
-    "complete_tool_calls",
+    "encode_runtime_event",
+    "runtime_sse_response",
+    "stream_runtime_events",
 ]

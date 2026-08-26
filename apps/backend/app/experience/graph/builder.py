@@ -9,18 +9,17 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.ai_chat.errors import InteractionStateError, ToolProtocolError
-from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.protocol import GraphResumeCommand, InteractionRequest
-from app.ai_chat.streaming.events import (
+from app.ai_chat.types import JsonObject
+from app.experience.graph.state import ExperienceState
+from app.workflow_runtime.errors import InteractionStateError, ToolProtocolError
+from app.workflow_runtime.events import (
     RuntimeEvent,
     output_delta_event,
     tool_result_event,
 )
-from app.ai_chat.streaming.model import complete_tool_calls
-from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
-from app.ai_chat.types import JsonObject
-from app.experience.graph.state import ExperienceState
+from app.workflow_runtime.model import ModelClient, complete_tool_calls
+from app.workflow_runtime.protocol import GraphResumeCommand, InteractionRequest
+from app.workflow_runtime.tools import ToolCall, ToolContext, ToolLifecycle, ToolResult
 
 
 def _emit(event: str, data: JsonObject) -> None:
@@ -69,17 +68,17 @@ def _get_tool_call(state: ExperienceState) -> ToolCall | None:
 
 async def _durable_call(
     state: ExperienceState,
-    runtime: AiChatRuntime,
+    tools: ToolLifecycle,
 ) -> ToolCall:
     """从数据库重建调用，只保留图中的瞬时执行路由。"""
     checkpoint = _get_tool_call(state)
     if checkpoint is None:
         raise ToolProtocolError("Tool node has no persisted Tool Call")
-    durable = await runtime.tools.get_call(checkpoint["tool_call_id"])
+    durable = await tools.get_call(checkpoint["tool_call_id"])
     if (
         durable["status"] == "validated"
         and checkpoint["should_execute"] is True
-        and runtime.tools.approval.route(durable) == "execute"
+        and tools.approval.route(durable) == "execute"
     ):
         return {**durable, "should_execute": True}
     return durable
@@ -88,25 +87,29 @@ async def _durable_call(
 def _tool_context(state: ExperienceState, tool_call_id: int | None = None) -> ToolContext:
     """构造服务所需的可信调用上下文。"""
     return ToolContext(
-        conversation_id=state["conversation_id"],
+        thread_id=state["conversation_id"],
         run_id=state["run_id"],
         tool_call_id=tool_call_id,
         subject=state["subject"],
         scope=state["scope"],
-        adapter_context={"revision_snapshot": state["revision_snapshot"]},
+        workflow_context={"revision_snapshot": state["revision_snapshot"]},
     )
 
 
-def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
+def build_experience_graph(
+    model: ModelClient,
+    tools: ToolLifecycle,
+) -> StateGraph:
     """构建模型、校验、审批策略、人工审批和执行五个节点。"""
 
     async def llm(state: ExperienceState) -> JsonObject:
         """流式执行模型，并在结束后暴露 LangChain 工具调用。"""
         response = AIMessageChunk(content="")
         tools_enabled = state["tools_enabled"] and state["run_kind"] != "opening"
-        async for chunk in runtime.stream_model(
+        async for chunk in model.stream(
             run_id=state["run_id"],
             context=state["model_context"],
+            tools=tools,
             tools_enabled=tools_enabled,
         ):
             response += chunk
@@ -133,7 +136,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         call_index = state.get("raw_tool_call_index")
         if not isinstance(call_index, int):
             raise ToolProtocolError("Validator received no Tool Call index")
-        call = await runtime.tools.validate_call(
+        call = await tools.validate_call(
             _tool_context(state),
             cast(LangChainToolCall, raw_call),
             index=call_index,
@@ -157,7 +160,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             return {}
         if call["status"] != "validated":
             raise ToolProtocolError("Risk assessment received an unsupported status")
-        if runtime.tools.approval.route(call) == "execute":
+        if tools.approval.route(call) == "execute":
             return {"tool_call": {**call, "should_execute": True}}
         return {}
 
@@ -177,8 +180,8 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
 
     async def approver(state: ExperienceState) -> JsonObject:
         """创建审批申请、等待用户决定，并保存独立审批命令。"""
-        current = await _durable_call(state, runtime)
-        call = await runtime.tools.request_approval(current["tool_call_id"])
+        current = await _durable_call(state, tools)
+        call = await tools.request_approval(current["tool_call_id"])
         if call["status"] in {"approved", "resolved"}:
             return {"tool_call": call}
         if call["status"] != "awaiting_approval":
@@ -203,7 +206,7 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
             or resumed.interaction_id != call["tool_call_id"]
         ):
             raise InteractionStateError("Approval Tool Call does not match interrupt")
-        decided = await runtime.tools.get_call(call["tool_call_id"])
+        decided = await tools.get_call(call["tool_call_id"])
         if decided["status"] not in {"approved", "resolved"}:
             raise InteractionStateError("Approval decision is not durable")
         return {"tool_call": decided}
@@ -215,12 +218,12 @@ def build_experience_graph(runtime: AiChatRuntime) -> StateGraph:
         raise ToolProtocolError("Approver did not produce a decision")
 
     async def executor(state: ExperienceState) -> JsonObject:
-        """根据审批结果调用 ToolService 执行或返回固化的拒绝结果。"""
-        call = await _durable_call(state, runtime)
+        """根据审批结果执行 ToolLifecycle 或返回固化的拒绝结果。"""
+        call = await _durable_call(state, tools)
         already_resolved = call["status"] == "resolved"
         if not already_resolved and call["should_execute"] is not True:
             raise ToolProtocolError("Tool Call is not authorized for execution")
-        result = await runtime.tools.execute_call(
+        result = await tools.execute_call(
             _tool_context(state, call["tool_call_id"]),
             call["tool_call_id"],
         )

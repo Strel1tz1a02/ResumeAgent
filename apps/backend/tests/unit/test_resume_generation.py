@@ -38,7 +38,6 @@ from app.resume_generation.schemas import (
     JDAnalysisSnapshot,
     JDAnalysisSourceSnapshot,
     JDRequirementSnapshot,
-    PlanCritique,
     PlannedExperience,
     ResumeConstraints,
     ResumeDraft,
@@ -771,9 +770,153 @@ def test_portfolio_promotes_unique_omitted_evidence_to_skill() -> None:
     ]
     assert plan.coverage_ratio == 1.0
 
+    resume_data, provenance = materialize_resume(
+        analysis,
+        plan,
+        ResumeDraft(
+            experiences=[
+                DraftedExperience(
+                    experience_id=1,
+                    bullets=[
+                        DraftBullet(
+                            experience_id=1,
+                            evidence_ids=[11],
+                            text="使用 Python FastAPI 开发接口",
+                        )
+                    ],
+                )
+            ]
+        ),
+        experiences,
+    )
+    assert resume_data.additional.technicalSkills == [
+        "Python",
+        "FastAPI",
+        "OpenSearch",
+    ]
+    assert [item.model_dump(mode="json") for item in provenance.skills] == [
+        {"skill": "Python", "evidence_ids": [11]},
+        {"skill": "FastAPI", "evidence_ids": [11]},
+        {"skill": "OpenSearch", "evidence_ids": [22]},
+    ]
 
-async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
+
+def test_portfolio_prefers_unique_support_over_risk_free_hard_negative() -> None:
     source = _source()
+    analysis = JDAnalysisSnapshot(
+        source=source,
+        target_title=source.job_name,
+        coverage_items=[
+            CoverageItem(
+                coverage_id="hybrid-retrieval",
+                source_requirement_ids=[1],
+                statement="混合检索",
+                importance="must",
+                capability="混合检索",
+            ),
+            CoverageItem(
+                coverage_id="offline-evaluation",
+                source_requirement_ids=[2],
+                statement="离线评估",
+                importance="must",
+                capability="离线评估",
+            ),
+        ],
+    )
+    experiences = [
+        _experience(
+            1,
+            11,
+            action="建设混合检索与离线评估",
+            result="Recall@10 提升",
+            technologies=["Qdrant", "BM25"],
+        ),
+        _experience(
+            2,
+            22,
+            action="使用 Embedding 训练分类器",
+            result="准确率达到 91%",
+            technologies=["Embedding"],
+        ),
+        _experience(
+            3,
+            33,
+            action="建立可重复的离线评估流程",
+            result="减少人工统计误差",
+            technologies=["Python"],
+        ),
+    ]
+    judgments = [
+        EvidenceJudgment(
+            evidence_id=11,
+            experience_id=1,
+            coverage_item_ids=["hybrid-retrieval", "offline-evaluation"],
+            relevance=0.75,
+            evidence_strength=0.9,
+            uniqueness=1.0,
+            supported_skills=["Qdrant", "BM25"],
+            unsupported_risk=[
+                "Qdrant 使用细节不够完整",
+                "BM25 使用细节不够完整",
+                "Embedding 使用细节不够完整",
+            ],
+        ),
+        EvidenceJudgment(
+            evidence_id=22,
+            experience_id=2,
+            coverage_item_ids=["hybrid-retrieval"],
+            relevance=1.0,
+            evidence_strength=0.9,
+            uniqueness=0.5,
+            supported_skills=["Embedding"],
+        ),
+        EvidenceJudgment(
+            evidence_id=33,
+            experience_id=3,
+            coverage_item_ids=["offline-evaluation"],
+            relevance=0.75,
+            evidence_strength=0.7,
+            uniqueness=1.0,
+            supported_skills=["Python"],
+            unsupported_risk=["未明确使用指定离线指标"],
+        ),
+    ]
+
+    plan = assemble_plan(
+        analysis,
+        experiences,
+        judgments,
+        ResumeConstraints(max_project_experiences=2),
+        search_rounds=1,
+    )
+
+    assert [item.experience_id for item in plan.selected_experiences] == [1, 3]
+    assert plan.coverage_ratio == 1.0
+
+
+async def test_graph_replans_for_rule_gap_and_stops_without_new_candidates() -> None:
+    class TrackingSearchModel(RuleBasedResumeGenerationModel):
+        def __init__(self) -> None:
+            self.gap_history: list[list[str]] = []
+
+        async def plan_search(
+            self,
+            analysis: JDAnalysisSnapshot,
+            *,
+            gap_coverage_ids: list[str],
+            search_round: int,
+            top_k: int,
+        ) -> list[SearchTask]:
+            self.gap_history.append(list(gap_coverage_ids))
+            return await super().plan_search(
+                analysis,
+                gap_coverage_ids=gap_coverage_ids,
+                search_round=search_round,
+                top_k=top_k,
+            )
+
+    source = _source()
+    model = TrackingSearchModel()
     experiences = [
         _experience(
             1,
@@ -785,7 +928,7 @@ async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
     ]
     graph = build_resume_generation_graph(
         ResumeGenerationGraphDependencies(
-            model=RuleBasedResumeGenerationModel(),
+            model=model,
             retriever=_qdrant_retriever(experiences),
         )
     ).compile()
@@ -794,12 +937,15 @@ async def test_graph_replans_once_and_keeps_uncovered_gap_explicit() -> None:
         {
             "jd_source": source,
             "experiences": experiences,
-            "constraints": ResumeConstraints(max_search_rounds=2),
+            "constraints": ResumeConstraints(max_search_rounds=3),
         }
     )
 
     assert state["plan"].search_rounds == 2
+    assert model.gap_history == [[], ["requirement-2"]]
     assert "requirement-2" in state["plan"].uncovered_requirements
+    assert state["plan"].review_actions == ["accept_with_gaps"]
+    assert "critique_plan" not in graph.get_graph().nodes
     assert state["validation"].valid is True
     assert state["provenance"].bullets[0].evidence_ids == [11]
 
@@ -926,56 +1072,6 @@ async def test_graph_logs_evidence_scoring_with_candidate_context(caplog) -> Non
     )
     for field, value in expected_judgment.items():
         assert judgment[field] == value
-
-
-async def test_graph_uses_model_defined_gap_for_replanning() -> None:
-    class ModelDirectedCritique(RuleBasedResumeGenerationModel):
-        async def critique(
-            self,
-            analysis,
-            plan,
-            judgments,
-            constraints,
-            *,
-            search_round,
-            has_new_candidates,
-        ):
-            if search_round == 1:
-                return PlanCritique(
-                    acceptable=False,
-                    actions=["search_more"],
-                    gap_coverage_ids=["requirement-1"],
-                    warnings=["当前证据虽有映射，但支持强度仍不足"],
-                )
-            return PlanCritique(acceptable=True)
-
-    experiences = [
-        _experience(
-            1,
-            11,
-            action="使用 Python 和 FastAPI 设计 API",
-            result="完成服务交付",
-            technologies=["Python", "FastAPI"],
-        )
-    ]
-    graph = build_resume_generation_graph(
-        ResumeGenerationGraphDependencies(
-            model=ModelDirectedCritique(),
-            retriever=_qdrant_retriever(experiences),
-        )
-    ).compile()
-
-    state = await graph.ainvoke(
-        {
-            "jd_source": _source(),
-            "experiences": experiences,
-            "constraints": ResumeConstraints(max_search_rounds=2),
-        }
-    )
-
-    assert state["plan"].search_rounds == 2
-    assert state["all_search_tasks"][-1].coverage_item_ids == ["requirement-1"]
-    assert state["plan"].uncovered_requirements == []
 
 
 def test_reference_validation_only_checks_bound_evidence_ids() -> None:
@@ -1233,7 +1329,9 @@ def test_materialize_does_not_silently_change_validated_bullets() -> None:
     assert provenance.bullets[1].evidence_ids == [11]
 
 
-async def test_auto_model_records_deterministic_fallback_in_validation() -> None:
+async def test_auto_model_records_deterministic_fallback_in_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     class BrokenAnalyzer(RuleBasedResumeGenerationModel):
         async def analyze_jd(self, source):
             raise RuntimeError("model unavailable")
@@ -1256,14 +1354,31 @@ async def test_auto_model_records_deterministic_fallback_in_validation() -> None
             retriever=_qdrant_retriever(experiences),
         )
     ).compile()
-    state = await graph.ainvoke(
-        {
-            "jd_source": _source(),
-            "experiences": experiences,
-            "constraints": ResumeConstraints(max_search_rounds=1),
-        }
-    )
+    with caplog.at_level(logging.ERROR, logger="app.resume_generation.model"):
+        state = await graph.ainvoke(
+            {
+                "jd_source": _source(),
+                "experiences": experiences,
+                "constraints": ResumeConstraints(max_search_rounds=1),
+            }
+        )
 
     assert any("analyze_jd" in warning for warning in state["validation"].warnings)
     assert state["validation"].valid is False
     assert state["validation"].model_validation_status == "failed"
+    assert model.fallback_errors == [
+        {
+            "stage": "analyze_jd",
+            "primary_model": "BrokenAnalyzer",
+            "fallback_model": "RuleBasedResumeGenerationModel",
+            "exception_type": "RuntimeError",
+            "message": "model unavailable",
+        }
+    ]
+    record = next(
+        item for item in caplog.records if "Resume generation stage" in item.message
+    )
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
+    assert "analyze_jd" in record.message
+    assert "RuntimeError: model unavailable" in record.message

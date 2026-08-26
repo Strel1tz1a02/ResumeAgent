@@ -233,7 +233,7 @@ class ExperienceFieldService:
         )
 
     async def snapshot( self, experience_id: int, key: str, ref_id: int | None) -> FieldSnapshot:
-        """读取 Adapter/Tool 使用的严格目标快照。"""
+        """读取 Workflow/Tool 使用的严格目标快照。"""
         item = await self._experiences.get(experience_id)
         if item is None:
             raise FieldStateInvariantError(f"experience {experience_id} does not exist")

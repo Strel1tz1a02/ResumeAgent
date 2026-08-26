@@ -19,7 +19,7 @@
 | FastAPI / Uvicorn | 0.128.4 / 0.40.0 | HTTP API、SSE 服务 | apps/backend/pyproject.toml |
 | Pydantic / pydantic-settings | 2.12.5 / 2.14.2 | 请求、配置、领域 schema | apps/backend/pyproject.toml；apps/backend/app/config.py |
 | SQLAlchemy async / aiosqlite | 2.0.36 / 0.20.0 | SQLite 主数据、Run、Interaction 持久化 | apps/backend/pyproject.toml；apps/backend/app/db_engine.py |
-| LangGraph / checkpoint-sqlite | 1.2.10 / 3.1.0 | 业务 Graph 与 checkpoint | apps/backend/pyproject.toml；apps/backend/app/ai_chat/graph/driver.py |
+| LangGraph / checkpoint-sqlite | 1.2.10 / 3.1.0 | 业务 Graph 与 checkpoint | apps/backend/pyproject.toml；apps/backend/app/workflow_runtime/graph/driver.py |
 | LangChain 及 provider adapters | 1.3.14；各 provider 版本见 manifest | 统一模型接入 | apps/backend/pyproject.toml；apps/backend/app/llm.py |
 | ARQ / Redis | 0.28.0 / Docker Redis 7 | 记忆压缩、简历索引后台任务 | apps/backend/pyproject.toml；docker-compose.yml |
 | Qdrant / FastEmbed | client 1.19.0 / 0.8.0；server 1.18.2 | 经历向量检索 | apps/backend/pyproject.toml；docker-compose.yml |

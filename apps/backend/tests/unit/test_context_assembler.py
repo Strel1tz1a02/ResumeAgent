@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from app.ai_chat.context import ContextAssembler
-from app.ai_chat.memory import token_budget
+from app.workflow_runtime import token_budget
+from app.workflow_runtime.context import ContextAssembler
 
 
 async def test_context_assembler_owns_order_memory_tools_and_budget(monkeypatch) -> None:
@@ -24,11 +24,11 @@ async def test_context_assembler_owns_order_memory_tools_and_budget(monkeypatch)
             return '{"memory":{"current_goal":"remembered"},"runs":[]}'
 
     monkeypatch.setattr(
-        "app.ai_chat.context.assembler.count_request_tokens",
+        "app.workflow_runtime.context.count_request_tokens",
         fake_count,
     )
     monkeypatch.setattr(
-        "app.ai_chat.context.assembler.build_structured_token_budget",
+        "app.workflow_runtime.context.build_structured_token_budget",
         lambda: SimpleNamespace(input_budget=1000),
     )
     prepared = await ContextAssembler(_HistoryMemory()).assemble(  # type: ignore[arg-type]
@@ -76,11 +76,11 @@ def test_structured_context_uses_same_data_boundary_and_budget(monkeypatch) -> N
         return 20
 
     monkeypatch.setattr(
-        "app.ai_chat.context.assembler.count_request_tokens",
+        "app.workflow_runtime.context.count_request_tokens",
         fake_count,
     )
     monkeypatch.setattr(
-        "app.ai_chat.context.assembler.build_memory_token_budget",
+        "app.workflow_runtime.context.build_model_token_budget",
         lambda: SimpleNamespace(input_budget=1000),
     )
 
@@ -110,7 +110,7 @@ def test_structured_budget_uses_known_model_input_limit(monkeypatch) -> None:
     monkeypatch.setattr(token_budget, "_model_limits", lambda: (1_000_000, 384_000))
     monkeypatch.setattr(
         token_budget,
-        "build_memory_token_budget",
+        "build_model_token_budget",
         lambda *, configured_input_cap: (
             captured.append(configured_input_cap) or expected
         ),
@@ -128,10 +128,10 @@ def test_structured_budget_keeps_safe_cap_for_unknown_model(monkeypatch) -> None
     monkeypatch.setattr(token_budget, "_model_limits", lambda: (None, None))
     monkeypatch.setattr(
         token_budget,
-        "build_memory_token_budget",
+        "build_model_token_budget",
         lambda *, configured_input_cap: captured.append(configured_input_cap),
     )
 
     token_budget.build_structured_token_budget()
 
-    assert captured == [token_budget.memory_settings.ai_chat_input_cap]
+    assert captured == [token_budget.workflow_runtime_settings.model_input_cap]

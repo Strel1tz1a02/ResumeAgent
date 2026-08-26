@@ -1,12 +1,10 @@
-"""Configuration owned by the conversation-memory module."""
+"""Conversation Memory 自己的容量与后台任务配置。"""
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class MemorySettings(BaseSettings):
-    """Token limits used only while building and compacting memory context."""
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -30,3 +28,5 @@ class MemorySettings(BaseSettings):
 
 
 memory_settings = MemorySettings()
+
+__all__ = ["MemorySettings", "memory_settings"]

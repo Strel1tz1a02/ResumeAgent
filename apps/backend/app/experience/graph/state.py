@@ -6,8 +6,8 @@ from typing import NotRequired, TypedDict
 
 from langchain_core.messages import ToolCall as LangChainToolCall
 
-from app.ai_chat.context import ModelContext
-from app.ai_chat.tools.types import ToolCall
+from app.workflow_runtime.context import ModelContext
+from app.workflow_runtime.tools import ToolCall
 from app.ai_chat.types import (
     JsonObject,
     JsonValue,  # noqa: F401 - 递归 JsonObject 类型的前向引用需要

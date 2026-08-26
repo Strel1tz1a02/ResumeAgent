@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.ai_chat.protocol import RunStatus
+from app.workflow_runtime.protocol import RunStatus
 from app.schemas.models import ResumeData
 
 Importance = Literal["must", "should", "nice"]

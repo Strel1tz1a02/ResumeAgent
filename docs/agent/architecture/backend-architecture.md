@@ -13,7 +13,8 @@ apps/backend/app/
 ├── models.py            # SQLAlchemy declarative Base + ORM models
 ├── db_engine.py         # SQLite engine/session factories (async + sync) + PRAGMAs
 ├── llm.py               # LangChain multi-provider
-├── ai_chat/              # LangGraph runtime, LangChain tools, approval and durable Tool Calls
+├── workflow_runtime/     # Graph/Run/Interaction/Model/Tool 横向能力包
+├── ai_chat/              # Conversation 服务、消息/Run 与 SQL 持久化组装
 ├── pdf.py               # Playwright PDF rendering
 ├── routers/             # API endpoints (health, config, resumes, jobs, applications, enrichment)
 ├── services/            # parser.py, improver.py, cover_letter.py
@@ -22,10 +23,19 @@ apps/backend/app/
 └── prompts/templates.py # LLM prompts
 ```
 
-`ai_chat` keeps four tool concerns separate: LangChain `StructuredTool` definitions,
-`ToolApprovalService` risk routing, `ToolCallStore` idempotent persistence, and
-`ToolService` orchestration. Tool implementations do not contain approval or risk
-logic, and model-visible schemas are passed directly to `bind_tools()`.
+`workflow_runtime` keeps tool concerns separate: each `ToolOperation` owns its
+schema and inherent risk; `ToolApprovalService` routes approval;
+`ToolCallStore` is the persistence port; and `ToolLifecycleService` orchestrates
+preparation, input, execution, replay and delivery. `ai_chat/persistence` only
+implements the ToolCallStore and InteractionStore ports for the Conversation
+SQLAlchemy schema. Interaction resolution itself is owned by
+`workflow_runtime/interactions.py`, not by `ConversationService`.
+
+`ConversationWorkflow` only adds Conversation binding validation to the generic
+`Workflow` contract. Each request creates a Run, calls the business
+`init_state()`, and executes `build_graph()` with the Run ID as its checkpoint
+thread. Conversation continuity comes from persisted messages plus Memory, not
+from an outer loop graph.
 
 ## API Endpoints
 

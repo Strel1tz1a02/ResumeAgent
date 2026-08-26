@@ -5,20 +5,21 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from app.ai_chat.context import ModelContext
-from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.streaming.model import AiChatModel, complete_tool_calls
-from app.ai_chat.tools.operation import RegisteredTool
-from app.ai_chat.tools.store import ToolCallStore
-from app.experience import ExperienceAdapter
+from langchain_core.messages import AIMessageChunk
+
+from app.ai_chat.persistence import SqlAlchemyToolCallStore
+from app.experience import ExperienceWorkflow
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeOperation,
 )
-from langchain_core.messages import AIMessageChunk
+from app.workflow_runtime.context import ModelContext
+from app.workflow_runtime.errors import ToolProtocolError
+from app.workflow_runtime.model import (
+    ModelClient,
+    complete_tool_calls,
+)
+from app.workflow_runtime.tools import RegisteredTool, ToolLifecycleService
 
 
 class _ChunkModel:
@@ -83,43 +84,43 @@ def _model_context(messages: list[dict]) -> ModelContext:  # type: ignore[type-a
     }
 
 
-async def test_runtime_binding_is_an_immutable_snapshot(isolated_db) -> None:
-    """绑定后的 Runtime 不受源字典后续修改，也不污染未绑定实例。"""
+async def test_tool_binding_is_an_immutable_snapshot(isolated_db) -> None:
+    """绑定后的工具集不受源字典后续修改，也不污染未绑定实例。"""
     tool = RegisteredTool(ContentChangeOperation())
     source = {tool.name: tool}
-    base = AiChatRuntime(
-        _RecordingModel(),  # type: ignore[arg-type]
-        ToolService(ToolCallStore(isolated_db.session, RepositoryFactory())),
-        _RecordingContextAssembler(),  # type: ignore[arg-type]
-    )
+    base = ToolLifecycleService(SqlAlchemyToolCallStore(isolated_db.session))
 
-    bound = base.bind_tools(source)
+    bound = base.bind_tools(source, ExperienceWorkflow().get_tool_approval_policy())
     source.clear()
 
-    assert tuple(base.tools.model_tools) == ()
-    assert tuple(bound.tools.model_tools) == ("content_change",)
+    assert tuple(base.model_tools) == ()
+    assert tuple(bound.model_tools) == ("content_change",)
 
 
 async def test_runtime_exposes_only_registered_tools_to_model(isolated_db) -> None:
-    """模型的 Tool Schema 输入只来自绑定后的 ToolService。"""
+    """模型的 Tool Schema 输入只来自绑定后的 ToolLifecycle。"""
     model = _RecordingModel()
-    tools = ToolService(ToolCallStore(isolated_db.session, RepositoryFactory()))
-    runtime = AiChatRuntime(
-        model,
-        tools,
-        _RecordingContextAssembler(),  # type: ignore[arg-type]
-    ).bind_tools(ExperienceAdapter().get_tools())
+    tools = ToolLifecycleService(SqlAlchemyToolCallStore(isolated_db.session))
+    client = ModelClient(
+        context=_RecordingContextAssembler(),  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+    )
+    tools = tools.bind_tools(
+        ExperienceWorkflow().get_tools(),
+        ExperienceWorkflow().get_tool_approval_policy(),
+    )
 
     _ = [
         event
-        async for event in runtime.stream_model(
+        async for event in client.stream(
             run_id=1,
             context=_model_context([]),
+            tools=tools,
             tools_enabled=True,
         )
     ]
 
-    assert model.tools == runtime.tools.model_tools
+    assert model.tools == tools.model_tools
     assert model.max_tokens == 32_768
 
 
@@ -128,11 +129,16 @@ async def test_runtime_always_assembles_context_before_model(isolated_db) -> Non
 
     model = _RecordingModel()
     assembler = _RecordingContextAssembler()
-    runtime = AiChatRuntime(
-        model,  # type: ignore[arg-type]
-        ToolService(ToolCallStore(isolated_db.session, RepositoryFactory())),
-        assembler,  # type: ignore[arg-type]
-    ).bind_tools(ExperienceAdapter().get_tools())
+    client = ModelClient(
+        context=assembler,  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+    )
+    tools = ToolLifecycleService(
+        SqlAlchemyToolCallStore(isolated_db.session)
+    ).bind_tools(
+        ExperienceWorkflow().get_tools(),
+        ExperienceWorkflow().get_tool_approval_policy(),
+    )
     messages = [
         {"role": "system", "content": "domain context"},
         {"role": "user", "content": "current question"},
@@ -140,9 +146,10 @@ async def test_runtime_always_assembles_context_before_model(isolated_db) -> Non
 
     _ = [
         event
-        async for event in runtime.stream_model(
+        async for event in client.stream(
             run_id=9,
             context=_model_context(messages),
+            tools=tools,
             tools_enabled=True,
         )
     ]
@@ -167,12 +174,14 @@ async def test_recovers_deepseek_dsml_as_atomic_tool_call(monkeypatch) -> None:
     model = _ChunkModel([dsml[:19], dsml[19:77], dsml[77:]])
     config = SimpleNamespace(provider="deepseek", reasoning_effort=None)
     monkeypatch.setattr(
-        "app.ai_chat.streaming.model.get_chat_model", lambda **_kwargs: (model, config)
+        "app.workflow_runtime.model.get_chat_model", lambda **_kwargs: (model, config)
     )
 
     events = [
         event
-        async for event in AiChatModel().stream(
+        async for event in ModelClient(
+            context=_RecordingContextAssembler(),  # type: ignore[arg-type]
+        ).stream_messages(
             messages=[{"role": "user", "content": "更新技能"}],
             tools={"content_change": RegisteredTool(ContentChangeOperation()).tool},
             tools_enabled=True,
@@ -223,13 +232,15 @@ async def test_assembles_langchain_native_tool_call_chunks(monkeypatch) -> None:
         ]
     )
     monkeypatch.setattr(
-        "app.ai_chat.streaming.model.get_chat_model",
+        "app.workflow_runtime.model.get_chat_model",
         lambda **_kwargs: (model, SimpleNamespace(provider="openai")),
     )
 
     events = [
         event
-        async for event in AiChatModel().stream(
+        async for event in ModelClient(
+            context=_RecordingContextAssembler(),  # type: ignore[arg-type]
+        ).stream_messages(
             messages=[{"role": "user", "content": "更新技能"}],
             tools={"content_change": RegisteredTool(ContentChangeOperation()).tool},
             tools_enabled=True,
@@ -246,7 +257,7 @@ async def test_assembles_langchain_native_tool_call_chunks(monkeypatch) -> None:
 
 
 def test_stream_boundary_rejects_incomplete_tool_call_arguments() -> None:
-    """非法 JSON 分片必须停在流聚合边界，不能进入 ToolService。"""
+    """非法 JSON 分片必须停在流聚合边界，不能进入 ToolLifecycle。"""
     response = AIMessageChunk(
         content="",
         tool_call_chunks=[

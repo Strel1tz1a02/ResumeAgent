@@ -1,11 +1,9 @@
 """JD 导入 Tool 处理器测试。"""
 
+from sqlalchemy import select
+
+from app.ai_chat.persistence import SqlAlchemyToolCallStore, ToolCallRepository
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
-from app.ai_chat.tools.store import ToolCallStore
-from app.ai_chat.tools.operation import RegisteredTool
-from app.ai_chat.tools.types import ToolContext
 from app.jd_import.agent.types import (
     Assessment,
     CandidateJD,
@@ -14,14 +12,19 @@ from app.jd_import.agent.types import (
 )
 from app.jd_import.models import JDInformation
 from app.jd_import.tools import AskJDQuestionsOperation, PersistJDOperation
-from sqlalchemy import select
+from app.workflow_runtime.tools import (
+    RegisteredTool,
+    ToolApprovalPolicy,
+    ToolContext,
+    ToolLifecycleService,
+)
 
 
-async def _context(isolated_db, *, adapter_context=None):  # type: ignore[no-untyped-def]
+async def _context(isolated_db, *, workflow_context=None):  # type: ignore[no-untyped-def]
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="JDImportAdapter",
+            workflow_name="JDImportWorkflow",
             subject={"type": "jd_import", "id": "new"},
             scope={},
             language="zh",
@@ -33,15 +36,15 @@ async def _context(isolated_db, *, adapter_context=None):  # type: ignore[no-unt
         )
         await session.commit()
     return ToolContext(
-        conversation_id=conversation.id,
+        thread_id=conversation.id,
         run_id=run.id,
         subject=conversation.subject,
         scope=conversation.scope,
-        adapter_context=adapter_context or {},
+        workflow_context=workflow_context or {},
     )
 
 
-def _service(isolated_db) -> ToolService:  # type: ignore[no-untyped-def]
+def _service(isolated_db) -> ToolLifecycleService:  # type: ignore[no-untyped-def]
     tools = (
         RegisteredTool(AskJDQuestionsOperation()),
         RegisteredTool(
@@ -49,11 +52,11 @@ def _service(isolated_db) -> ToolService:  # type: ignore[no-untyped-def]
             model_visible=False,
         ),
     )
-    return ToolService(
-        ToolCallStore(isolated_db.session, RepositoryFactory())
+    return ToolLifecycleService(
+        SqlAlchemyToolCallStore(isolated_db.session)
     ).bind_tools(
         {item.name: item for item in tools},
-        ToolApprovalPolicy({item.name: ToolRisk.LOW for item in tools}),
+        ToolApprovalPolicy(),
     )
 
 
@@ -65,7 +68,7 @@ async def test_question_tool_builds_server_owned_batch(isolated_db) -> None:
     assessment = Assessment(candidates=[candidate], conflicts=[])
     context = await _context(
         isolated_db,
-        adapter_context={
+        workflow_context={
             "assessment": assessment.model_dump(mode="json"),
             "asked_question_keys": [],
             "round": 0,
@@ -120,7 +123,7 @@ async def test_persist_tool_creates_jd_and_replays_result(isolated_db) -> None:
     assert replay.replayed is True
     async with isolated_db.session() as session:
         rows = list((await session.scalars(select(JDInformation))).all())
-        tool = await RepositoryFactory().create(session).tool_calls.get(call["tool_call_id"])
+        tool = await ToolCallRepository(session).get(call["tool_call_id"])
     assert len(rows) == 1
     assert rows[0].status == "confirmed"
     assert tool is not None

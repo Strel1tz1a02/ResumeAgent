@@ -6,7 +6,7 @@
 |------|------|------|------|--------|------|
 | OpenAI/Anthropic/DeepSeek/Google/Groq/Ollama/OpenRouter | LLM API/本地服务 | 聊天、抽取、规划、生成、评估 | provider API key；Ollama 可本地无 key | 高 | apps/backend/pyproject.toml；apps/backend/app/llm.py |
 | SQLite 主库 | DB | 业务对象、Run、Tool Call/Interaction、Outbox、API key ciphertext | 文件系统权限 | 高 | apps/backend/app/db_engine.py；apps/backend/app/models.py |
-| SQLite LangGraph checkpoint | DB | Graph 执行位置和临时状态 | 文件系统权限 | 高（Agent 恢复） | apps/backend/app/config.py；apps/backend/app/ai_chat/graph/runner.py |
+| SQLite LangGraph checkpoint | DB | Graph 执行位置和临时状态 | 文件系统权限 | 高（Agent 恢复） | apps/backend/app/config.py；apps/backend/app/workflow_runtime/graph/runner.py |
 | Redis / ARQ | Queue/cache | 记忆压缩、简历索引任务 | 本地 Compose 未配置密码 | 中高 | docker-compose.yml；apps/backend/app/ai_chat/memory/worker.py |
 | Qdrant | Vector DB | Experience dense+sparse 检索 | URL + 可选 API key | 高（Resume Generation） | apps/backend/app/resume_generation/retriever.py；apps/backend/.env.example |
 | FastEmbed | 本地 embedding | Qdrant dense/sparse 表示 | 无 | 中 | apps/backend/app/resume_generation/retriever.py |
@@ -20,7 +20,7 @@
 | Store | 角色 | 访问层 | 关键风险 | 证据 |
 |-------|------|--------|----------|------|
 | 主 SQLite | 领域数据与 Runtime durable truth | SQLAlchemy repositories、database.py | 单机写并发；大量手写启动迁移 | apps/backend/app/db_engine.py；apps/backend/app/database.py |
-| checkpoint SQLite | Graph position/temp state | AsyncSqliteSaver / LangGraphDriver | 与主库非原子；硬崩溃后需对账 | apps/backend/app/ai_chat/graph/runner.py |
+| checkpoint SQLite | Graph position/temp state | AsyncSqliteSaver / LangGraphExecutor | 与主库非原子；硬崩溃后需对账 | apps/backend/app/workflow_runtime/graph/runner.py |
 | Tool Call 表 | 当前 Interaction request/resolution/result | ToolCallStore、approval/input/execution | 通用 Interaction 与 Tool 生命周期耦合 | apps/backend/app/ai_chat/models/models.py |
 | Redis | ARQ 队列 | memory/outbox/index workers | 本地无 auth；任务与 DB 一致性依赖 outbox | docker-compose.yml；apps/backend/app/background_jobs/ |
 | Qdrant | 向量索引 | resume_generation/retriever.py | 索引新鲜度、外部可用性 | apps/backend/app/resume_generation/index_worker.py |
@@ -62,7 +62,7 @@
 - apps/backend/app/crypto.py
 - apps/backend/app/db_engine.py
 - apps/backend/app/llm.py
-- apps/backend/app/ai_chat/graph/runner.py
+- apps/backend/app/workflow_runtime/graph/runner.py
 - apps/backend/app/jd_import/sources/playwright_mcp.py
 - apps/backend/app/resume_generation/retriever.py
 - apps/frontend/next.config.ts

@@ -80,20 +80,23 @@ unique index. Jobs' dynamic pipeline fields (`preview_hash(es)`, `job_keywords`,
 | Retry Logic | 2 retries, temperature 0.1→0.0 |
 | Timeouts | 30s (health), 120s (completion), 180s (JSON) |
 
-### AI Chat Tool boundaries
+### Workflow Tool boundaries
 
-- `tools/operation.py` registers each capability as a LangChain `StructuredTool`; the Tool owns its description and Pydantic argument schema, but no risk or approval state.
-- `tools/approval/` receives a complete validated Tool Call and owns risk routing plus approval persistence.
-- `tools/store.py` owns durable state validation, atomic claims, replay and transaction access.
-- `services/tool_service.py` orchestrates preparation, approval persistence, LangChain Tool execution and result solidification.
+- `workflow_runtime/tools/operation.py` registers each capability as a LangChain `StructuredTool`; the Tool owns its description, Pydantic argument schema and inherent risk.
+- `workflow_runtime/tools/approval_service.py` receives a complete validated Tool Call and owns risk routing plus approval persistence.
+- `workflow_runtime/tools/persistence.py` defines the storage port; `in_memory_store.py` supports one-shot workflows, while `ai_chat/persistence/` supplies the Conversation SQLAlchemy implementation.
+- `ToolLifecycleService` orchestrates preparation, approval, external input, execution, replay and result delivery.
 - Business Graphs only route between model, validation, risk assessment, approval and execution nodes.
 
 ### Agent Runtime control plane
 
-- Business adapters own their Graph topology and domain state; `graph/driver.py` is the only LangGraph execution and recovery boundary.
-- `protocol.py` defines `InteractionRequest`, `ResolveInteractionCommand`, `GraphResumeCommand`, and `GraphOutcome`.
-- `services/run_lifecycle.py` is the only Run lifecycle writer; checkpoints only own Graph position.
-- `context/assembler.py` is the only Agent message assembly boundary.
+- Business Workflows own `init_state()` and one Run's Graph topology. Conversation starts that Graph directly with the Run ID as its checkpoint thread; there is no outer Conversation Graph.
+- `workflow_runtime/graph/driver.py` is the only LangGraph execution and recovery boundary and recursively discovers subgraph interrupts.
+- `protocol.py` separates a fresh Workflow input from same-Run Interaction recovery (`ResolveInteractionCommand`/`GraphResumeCommand`).
+- `workflow_runtime/interactions.py` owns Interaction persistence/recovery/resume orchestration through an `InteractionStore` port.
+- `ai_chat/persistence/interaction_store.py` maps a Tool Call to its Conversation Workflow/Run; it does not own recovery policy.
+- `services/conversation_run_writer.py` atomically settles the current Conversation message/Run; checkpoints only own Graph position.
+- `workflow_runtime/context.py` is the only Agent message assembly boundary.
 - `streaming/sse.py` exposes one `RuntimeEvent` envelope to every frontend consumer.
 
 ## Prompt Guidelines

@@ -26,10 +26,22 @@ _IMPORTANCE_WEIGHT = {"must": 3.0, "should": 2.0, "nice": 1.0}
 _WORK_KINDS = {"work", "internship"}
 _MIN_RELEVANCE = 0.45
 _MIN_STRENGTH = 0.4
+_RISK_PENALTY_PER_ITEM = 0.15
+_MAX_RISK_PENALTY = 0.45
+_UNIQUENESS_BONUS_WEIGHT = 0.75
 
 
 def _judgment_score(item: EvidenceJudgment) -> float:
-    return item.relevance * 0.5 + item.evidence_strength * 0.35 + item.uniqueness * 0.15
+    base_score = (
+        item.relevance * 0.5
+        + item.evidence_strength * 0.35
+        + item.uniqueness * 0.15
+    )
+    risk_penalty = min(
+        _MAX_RISK_PENALTY,
+        len(item.unsupported_risk) * _RISK_PENALTY_PER_ITEM,
+    )
+    return max(0.0, base_score - risk_penalty)
 
 
 def _section(kind: str) -> str:
@@ -53,7 +65,6 @@ def assemble_plan(
         if item.experience_id in experience_by_id
         and item.relevance >= _MIN_RELEVANCE
         and item.evidence_strength >= _MIN_STRENGTH
-        and not item.unsupported_risk
         and item.coverage_item_ids
     ]
     grouped: dict[int, list[EvidenceJudgment]] = defaultdict(list)
@@ -101,7 +112,8 @@ def assemble_plan(
             utility = (
                 coverage_gain
                 + quality
-                + 0.2 * max(row.uniqueness for row in chosen_rows)
+                + _UNIQUENESS_BONUS_WEIGHT
+                * max(row.uniqueness for row in chosen_rows)
                 - redundancy_penalty
             )
             candidate = (utility, experience_id, chosen_rows, candidate_coverage)
@@ -270,15 +282,31 @@ def materialize_resume(
                 )
             )
 
-    existing_skill_keys = {
-        item.casefold() for item in output.additional.technicalSkills
-    }
+    skill_sources: dict[str, tuple[str, list[int]]] = {}
+
+    def record_skill(skill: str, evidence_ids: list[int]) -> None:
+        display = skill.strip()
+        key = display.casefold()
+        if not key:
+            return
+        if key not in skill_sources:
+            skill_sources[key] = (display, [])
+        sources = skill_sources[key][1]
+        for evidence_id in evidence_ids:
+            if evidence_id not in sources:
+                sources.append(evidence_id)
+
+    for selected in plan.selected_experiences:
+        snapshot = snapshot_by_id[selected.experience_id]
+        for skill in snapshot.technologies:
+            record_skill(skill, selected.evidence_ids)
     for promoted in plan.promoted_skills:
-        if promoted.skill.casefold() not in existing_skill_keys:
-            output.additional.technicalSkills.append(promoted.skill)
-            existing_skill_keys.add(promoted.skill.casefold())
+        record_skill(promoted.skill, promoted.evidence_ids)
+
+    for skill, evidence_ids in skill_sources.values():
+        output.additional.technicalSkills.append(skill)
         provenance.skills.append(
-            SkillProvenance(skill=promoted.skill, evidence_ids=promoted.evidence_ids)
+            SkillProvenance(skill=skill, evidence_ids=evidence_ids)
         )
     return output, provenance
 

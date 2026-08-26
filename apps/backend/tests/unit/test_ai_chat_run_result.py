@@ -4,26 +4,28 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
-from app.ai_chat.adapters import AdapterRegistry
 from app.ai_chat.errors import ConversationEndedError
-from app.ai_chat.graph import GraphRecovery
-from app.ai_chat.protocol import (
+from app.ai_chat.persistence import (
+    ConversationInteractionStore,
+    SqlAlchemyToolCallStore,
+)
+from app.ai_chat.repositories import RepositoryFactory
+from app.ai_chat.services import ConversationService
+from app.jd_import import JDImportWorkflow
+from app.jd_import.agent.types import Assessment, CandidateJD
+from app.jd_import.graph import JDImportGraphDependencies
+from app.scripts.migrate_remove_ai_chat_run_result import migrate
+from app.workflow_runtime import InteractionCoordinator, WorkflowCatalog
+from app.workflow_runtime.events import RuntimeEvent
+from app.workflow_runtime.graph import GraphRecovery
+from app.workflow_runtime.protocol import (
     GraphOutcome,
     InteractionRequest,
     ResolveInteractionCommand,
 )
-from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.ai_chat_service import AiChatService
-from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.tools.store import ToolCallStore
-from app.ai_chat.streaming.events import RuntimeEvent
-from app.ai_chat.tools.types import ToolContext
-from app.jd_import.adapters import JDImportAdapter
-from app.jd_import.agent.types import Assessment, CandidateJD
-from app.jd_import.graph import JDImportGraphDependencies
-from app.scripts.migrate_remove_ai_chat_run_result import migrate
-from sqlalchemy import create_engine
+from app.workflow_runtime.tools import ToolContext, ToolLifecycleService
 
 
 def test_result_column_is_removed_idempotently(tmp_path: Path) -> None:
@@ -91,17 +93,18 @@ class _QuestionRunner:
 async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> None:  # type: ignore[no-untyped-def]
     repositories = RepositoryFactory()
     dependencies = JDImportGraphDependencies(None, None, None)  # type: ignore[arg-type]
-    adapter = JDImportAdapter(dependencies)
-    registry = AdapterRegistry()
-    registry.register(adapter)
-    tools = ToolService(ToolCallStore(isolated_db.session, repositories)).bind_tools(
-        adapter.get_tools(), adapter.get_tool_approval_policy()
+    workflow = JDImportWorkflow(dependencies)
+    catalog = WorkflowCatalog()
+    catalog.register(workflow)
+    base_tools = ToolLifecycleService(SqlAlchemyToolCallStore(isolated_db.session))
+    tools = base_tools.bind_tools(
+        workflow.get_tools(), workflow.get_tool_approval_policy()
     )
 
     async with isolated_db.session() as session:
         repos = repositories.create(session)
         conversation = await repos.conversations.create(
-            adapter="JDImportAdapter",
+            workflow_name="JDImportWorkflow",
             subject={"type": "jd_import", "id": "new"},
             scope={},
             language="zh",
@@ -117,11 +120,11 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
         await session.commit()
 
     context = ToolContext(
-        conversation_id=conversation.id,
+        thread_id=conversation.id,
         run_id=run.id,
         subject={"type": "jd_import", "id": "new"},
         scope={},
-        adapter_context={
+        workflow_context={
             "assessment": Assessment(
                 candidates=[CandidateJD(jd_key="jd-1", missing_fields=["company"])],
                 conflicts=[],
@@ -148,7 +151,19 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
     call = await tools.request_input(call["tool_call_id"])
     batch = call["interaction_payload"]
     runner = _QuestionRunner(run.id, call["tool_call_id"], batch["batch_id"])
-    service = AiChatService(registry, runner, repositories)  # type: ignore[arg-type]
+    conversations = ConversationService(
+        catalog.get,
+        repositories,
+        isolated_db.session,
+        runner,  # type: ignore[arg-type]
+        base_tools,
+    )
+    interactions = InteractionCoordinator(
+        catalog.get,
+        runner,  # type: ignore[arg-type]
+        base_tools,
+        ConversationInteractionStore(isolated_db.session, repositories),
+    )
     answer = {
         "batch_id": batch["batch_id"],
         "client_resolution_id": "answer-1",
@@ -162,7 +177,7 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
     }
     events = [
         event
-        async for event in service.resolve_interaction(
+        async for event in interactions.resolve(
             ResolveInteractionCommand(
                 run_id=run.id,
                 interaction_id=call["tool_call_id"],
@@ -178,7 +193,7 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
     ]
     replay = [
         event
-        async for event in service.resolve_interaction(
+        async for event in interactions.resolve(
             ResolveInteractionCommand(
                 run_id=run.id,
                 interaction_id=call["tool_call_id"],
@@ -202,11 +217,11 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
     resolved = await tools.get_call(call["tool_call_id"])
     assert resolved["status"] == "resolved"
 
-    await service.close_conversation(conversation.id, "user_closed")
+    await conversations.close(conversation.id, "user_closed")
     with pytest.raises(ConversationEndedError):
         _ = [
             event
-            async for event in service.resolve_interaction(
+            async for event in interactions.resolve(
                 ResolveInteractionCommand(
                     run_id=run.id,
                     interaction_id=call["tool_call_id"],
@@ -222,14 +237,14 @@ async def test_question_resolution_uses_tool_call_and_replays(isolated_db) -> No
         ]
 
 
-async def test_close_conversation_settles_run_and_message_through_lifecycle(
+async def test_conversation_service_closes_run_and_message_atomically(
     isolated_db,
 ) -> None:  # type: ignore[no-untyped-def]
     repositories = RepositoryFactory()
     async with isolated_db.session() as session:
         repos = repositories.create(session)
         conversation = await repos.conversations.create(
-            adapter="unused",
+            workflow_name="unused",
             subject={"type": "test", "id": "1"},
             scope={},
             language="zh",
@@ -248,8 +263,14 @@ async def test_close_conversation_settles_run_and_message_through_lifecycle(
         )
         await session.commit()
 
-    service = AiChatService(AdapterRegistry(), object(), repositories)  # type: ignore[arg-type]
-    await service.close_conversation(conversation.id, "user_closed")
+    service = ConversationService(
+        WorkflowCatalog().get,
+        repositories,
+        isolated_db.session,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+    )
+    await service.close(conversation.id, "user_closed")
 
     async with isolated_db.session() as session:
         repos = repositories.create(session)
@@ -260,3 +281,65 @@ async def test_close_conversation_settles_run_and_message_through_lifecycle(
         assert stored_conversation.status == "ended"
         assert stored_run is not None and stored_run.status == "cancelled"
         assert stored_message is not None and stored_message.status == "cancelled"
+
+
+async def test_conversation_service_deletes_subject_checkpoints(
+    isolated_db,
+) -> None:  # type: ignore[no-untyped-def]
+    repositories = RepositoryFactory()
+    async with isolated_db.session() as session:
+        repos = repositories.create(session)
+        matching = [
+            await repos.conversations.create(
+                workflow_name="ExampleWorkflow",
+                subject={"type": "experience", "id": "7"},
+                scope={"field": field},
+                language="zh",
+            )
+            for field in ("background", "tasks")
+        ]
+        retained = await repos.conversations.create(
+            workflow_name="ExampleWorkflow",
+            subject={"type": "experience", "id": "8"},
+            scope={},
+            language="zh",
+        )
+        matching_runs = [
+            await repos.runs.create(
+                conversation_id=row.id,
+                kind="user_turn",
+                tools_enabled=True,
+            )
+            for row in matching
+        ]
+        await repos.runs.create(
+            conversation_id=retained.id,
+            kind="user_turn",
+            tools_enabled=True,
+        )
+        await session.commit()
+
+    deleted_threads: list[int] = []
+
+    class _ThreadStore:
+        async def delete_thread(self, run_id: int) -> None:
+            deleted_threads.append(run_id)
+
+    service = ConversationService(
+        WorkflowCatalog().get,
+        repositories,
+        isolated_db.session,
+        _ThreadStore(),
+        object(),  # type: ignore[arg-type]
+    )
+    deleted = await service.delete_subject(
+        "ExampleWorkflow", {"type": "experience", "id": "7"}
+    )
+
+    assert deleted == 2
+    assert deleted_threads == [row.id for row in matching_runs]
+    async with isolated_db.session() as session:
+        repos = repositories.create(session)
+        assert await repos.conversations.get(retained.id) is not None
+        for row in matching:
+            assert await repos.conversations.get(row.id) is None

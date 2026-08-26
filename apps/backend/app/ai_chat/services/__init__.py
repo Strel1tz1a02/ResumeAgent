@@ -1,7 +1,7 @@
-"""通用 AI Chat 的应用服务。"""
+"""Conversation 应用服务与持久化协作者。"""
 
-from app.ai_chat.services.ai_chat_service import AiChatService
-from app.ai_chat.services.run_lifecycle import RunLifecycleService
-from app.ai_chat.services.tool_service import ToolService
+from app.ai_chat.services.conversation_service import ConversationService
 
-__all__ = ["AiChatService", "RunLifecycleService", "ToolService"]
+__all__ = [
+    "ConversationService",
+]

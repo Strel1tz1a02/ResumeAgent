@@ -9,14 +9,14 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel
 
-from app.ai_chat.context import ContextAssembler, ModelContext
-from app.ai_chat.streaming.model import AiChatModel, complete_tool_calls
-from app.ai_chat.tools.operation import RegisteredTool
 from app.experience.prompts.ai_chat import system_prompt
 from app.experience.tools.content_change import (
     ContentChangeArguments,
     ContentChangeOperation,
 )
+from app.workflow_runtime.context import ContextAssembler, ModelContext
+from app.workflow_runtime.model import ModelClient, complete_tool_calls
+from app.workflow_runtime.tools import RegisteredTool
 from tests.evals.golden.experience_rewrite_cases import EXPERIENCE_REWRITE_CASES
 from tests.evals.quality_eval_support import (
     judge_outputs,
@@ -96,7 +96,9 @@ async def _rewrite_candidate(case: dict[str, Any]) -> dict[str, Any]:
         tools=[convert_to_openai_tool(registered.tool)],
     )
     response = AIMessageChunk(content="")
-    async for chunk in AiChatModel().stream(
+    async for chunk in ModelClient(
+        context=ContextAssembler(memory=_EmptyMemory()),  # type: ignore[arg-type]
+    ).stream_messages(
         messages=messages,
         tools={registered.name: registered.tool},
         tools_enabled=True,

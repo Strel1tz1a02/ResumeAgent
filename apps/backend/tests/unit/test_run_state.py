@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from app.ai_chat.run_state import RunStateMachine
+from app.workflow_runtime.runs import RunStateMachine
 
 
 @dataclass

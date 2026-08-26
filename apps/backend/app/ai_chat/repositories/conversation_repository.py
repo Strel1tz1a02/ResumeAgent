@@ -18,14 +18,14 @@ class ConversationRepository:
     async def create(
         self,
         *, # * 后面的参数必须通过“参数名”传入，不能按位置传入
-        adapter: str,
+        workflow_name: str,
         subject: dict[str, Any],
         scope: dict[str, Any],
         language: str,
     ) -> AiChatConversation:
         """持久化新的使用中会话，并回填整数 ID。"""
         row = AiChatConversation(
-            adapter=adapter,
+            workflow_name=workflow_name,
             subject=subject,
             scope=scope,
             language=language,
@@ -57,12 +57,12 @@ class ConversationRepository:
         return bool(result.rowcount)
 
     async def ids_for_subject(
-        self, adapter: str, subject: dict[str, Any]
+        self, workflow_name: str, subject: dict[str, Any]
     ) -> list[int]:
         """返回绑定到不透明业务主体的会话 ID。"""
         result = await self._session.execute(
             select(AiChatConversation.id).where(
-                AiChatConversation.adapter == adapter,
+                AiChatConversation.workflow_name == workflow_name,
                 AiChatConversation.subject == subject,
             )
         )

@@ -17,7 +17,7 @@ from app.scripts.migrate_ai_chat_memory_background import migrate
 async def _conversation(isolated_db) -> int:  # type: ignore[no-untyped-def]
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).conversations.create(
-            adapter="TestAdapter",
+            workflow_name="TestWorkflow",
             subject={"type": "experience", "id": "1"},
             scope={"field": "background"},
             language="zh",

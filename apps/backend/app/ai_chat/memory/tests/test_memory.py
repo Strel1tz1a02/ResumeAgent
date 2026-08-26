@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select, text
+
 from app.ai_chat.memory.errors import (
     MemoryCompactionTimeoutError,
     MemoryContextFullError,
@@ -25,10 +27,10 @@ from app.ai_chat.memory.settings import memory_settings
 from app.ai_chat.memory.summarizer import MemorySummarizer
 from app.ai_chat.memory.token_budget import MemoryTokenBudget
 from app.ai_chat.models import AiChatRunMemory
+from app.ai_chat.persistence import ToolCallRepository
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.repositories.memory_repository import MemoryRepository
 from app.ai_chat.repositories.origin_run_repository import OriginRunRepository
-from sqlalchemy import func, select, text
 
 
 def test_operations_enforce_core_and_other_boundaries() -> None:
@@ -122,15 +124,15 @@ def test_internal_string_token_counter_accepts_a_string(
             return 37
 
     monkeypatch.setattr(
-        "app.ai_chat.memory.token_budget.get_llm_config",
+        "app.workflow_runtime.token_budget.get_llm_config",
         lambda: SimpleNamespace(provider="openai", model="test"),
     )
     monkeypatch.setattr(
-        "app.ai_chat.memory.token_budget.get_model_name",
+        "app.workflow_runtime.token_budget.get_model_name",
         lambda _config: "test",
     )
     monkeypatch.setattr(
-        "app.ai_chat.memory.token_budget.get_chat_model",
+        "app.workflow_runtime.token_budget.get_chat_model",
         lambda *_args, **_kwargs: (_TokenModel(), _args[0]),
     )
     monkeypatch.setattr(
@@ -149,7 +151,7 @@ def test_internal_string_token_counter_accepts_a_string(
 async def _conversation(isolated_db) -> int:
     async with isolated_db.session() as session:
         row = await RepositoryFactory().create(session).conversations.create(
-            adapter="TestAdapter",
+            workflow_name="TestWorkflow",
             subject={"type": "experience", "id": "1"},
             scope={"field": "background"},
             language="zh",
@@ -188,8 +190,8 @@ async def _terminal_run(
             status="completed" if status == "completed" else "failed",
         )
         if with_tool:
-            call = await repositories.tool_calls.create(
-                conversation_id=conversation_id,
+            call = await ToolCallRepository(session).create(
+                thread_id=conversation_id,
                 run_id=run.id,
                 tool_call_index=0,
                 provider_tool_call_id=None,

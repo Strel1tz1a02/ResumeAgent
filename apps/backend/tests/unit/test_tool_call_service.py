@@ -11,32 +11,36 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import ToolCall as LangChainToolCall
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from app.ai_chat.errors import IdempotencyConflictError, ToolProtocolError
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.ai_chat.models import AiChatMessage, AiChatToolCall
-from app.ai_chat.repositories import (
-    AiChatRepositories,
-    RepositoryFactory,
-)
-from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
-from app.ai_chat.tools.operation import RegisteredTool, ToolOperation
-from app.ai_chat.tools.preparation import ToolCallPreparationService
-from app.ai_chat.repositories.tool_repository import ToolCallRepository
-from app.ai_chat.tools.store import ToolCallStore
-from app.ai_chat.tools.types import ToolCall, ToolContext, ToolResult
+from app.ai_chat.persistence import SqlAlchemyToolCallStore, ToolCallRepository
+from app.ai_chat.repositories import RepositoryFactory
 from app.database import Database
+from app.scripts.migrate_ai_chat_interaction_payload import (
+    migrate as migrate_ai_chat_interaction_payload,
+)
 from app.scripts.migrate_ai_chat_tool_call_state import (
     migrate as migrate_ai_chat_tool_call_state,
 )
 from app.scripts.migrate_ai_chat_tool_input_state import (
     migrate as migrate_ai_chat_tool_input_state,
 )
-from app.scripts.migrate_ai_chat_interaction_payload import (
-    migrate as migrate_ai_chat_interaction_payload,
+from app.workflow_runtime.errors import IdempotencyConflictError, ToolProtocolError
+from app.workflow_runtime.tools import (
+    RegisteredTool,
+    ToolApprovalPolicy,
+    ToolCall,
+    ToolContext,
+    ToolLifecycleService,
+    ToolOperation,
+    ToolResult,
+    ToolRisk,
 )
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, func, select
-from sqlalchemy.exc import IntegrityError
+from app.workflow_runtime.tools.preparation import ToolCallPreparationService
 
 
 class _DemoArguments(BaseModel):
@@ -129,10 +133,10 @@ class _ExecutionHandler(_DemoHandler):
         self.received_payloads.append(
             (dict(proposal_payload), dict(guard_payload))
         )
-        assert context.session is not None
-        context.session.add(
+        session = context.resources.require(AsyncSession, "missing test transaction")
+        session.add(
             AiChatMessage(
-                conversation_id=context.conversation_id,
+                conversation_id=context.thread_id,
                 run_id=context.run_id,
                 sequence=1,
                 role="assistant",
@@ -167,10 +171,10 @@ class _BlockingExecutionHandler(_ExecutionHandler):
         )
         self.entered.set()
         await self.release.wait()
-        assert context.session is not None
-        context.session.add(
+        session = context.resources.require(AsyncSession, "missing test transaction")
+        session.add(
             AiChatMessage(
-                conversation_id=context.conversation_id,
+                conversation_id=context.thread_id,
                 run_id=context.run_id,
                 sequence=1,
                 role="assistant",
@@ -241,23 +245,17 @@ class _ObservedToolCallRepository(ToolCallRepository):
         )
 
 
-class _ObservedRepositoryFactory(RepositoryFactory):
+class _ObservedToolCallRepositoryFactory:
     def __init__(self, observation: _RepositoryObservation) -> None:
         self._observation = observation
 
-    def create(self, session):  # type: ignore[no-untyped-def]
-        repositories = super().create(session)
-        return AiChatRepositories(
-            conversations=repositories.conversations,
-            messages=repositories.messages,
-            runs=repositories.runs,
-            tool_calls=_ObservedToolCallRepository(session, self._observation),
-        )
+    def __call__(self, session):  # type: ignore[no-untyped-def]
+        return _ObservedToolCallRepository(session, self._observation)
 
 
 def _tool_context(conversation_id: int, run_id: int) -> ToolContext:
     return ToolContext(
-        conversation_id=conversation_id,
+        thread_id=conversation_id,
         run_id=run_id,
         subject={"type": "test", "id": "1"},
         scope={"field": "test"},
@@ -295,22 +293,23 @@ def _registered(operation: ToolOperation) -> RegisteredTool:
     )
 
 
-def _new_service(session_factory, repositories):  # type: ignore[no-untyped-def]
-    return ToolService(ToolCallStore(session_factory, repositories))
+def _new_service(  # type: ignore[no-untyped-def]
+    session_factory,
+    repository_factory=ToolCallRepository,
+):
+    return ToolLifecycleService(
+        SqlAlchemyToolCallStore(session_factory, repository_factory)
+    )
 
 
 def _bind(
-    service: ToolService,
+    service: ToolLifecycleService,
     operations: dict[str, ToolOperation],
-) -> ToolService:
+) -> ToolLifecycleService:
     tools = {name: _registered(operation) for name, operation in operations.items()}
     return service.bind_tools(
         tools,
         ToolApprovalPolicy(
-            {
-                name: getattr(operation, "risk", ToolRisk.LOW)
-                for name, operation in operations.items()
-            },
             {
                 name: lambda data: {"value": data["value"]}
                 for name in operations
@@ -319,9 +318,9 @@ def _bind(
     )
 
 
-def _tool_service(isolated_db, handler: ToolOperation) -> ToolService:  # type: ignore[no-untyped-def]
+def _tool_service(isolated_db, handler: ToolOperation) -> ToolLifecycleService:  # type: ignore[no-untyped-def]
     return _bind(
-        _new_service(isolated_db.session, RepositoryFactory()),
+        _new_service(isolated_db.session),
         {handler.name: handler},
     )
 
@@ -329,7 +328,7 @@ async def _create_conversation_run(isolated_db) -> tuple[int, int]:  # type: ign
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="test",
+            workflow_name="test",
             subject={"type": "test", "id": "1"},
             scope={"field": "test"},
             language="zh",
@@ -346,8 +345,8 @@ async def _create_conversation_run(isolated_db) -> tuple[int, int]:  # type: ign
 async def _create_received_tool_call(isolated_db) -> int:  # type: ignore[no-untyped-def]
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-a",
@@ -362,7 +361,7 @@ async def test_bind_tools_returns_an_isolated_immutable_service(isolated_db) -> 
     handler = _DemoHandler()
     service = _new_service(
         session_factory=isolated_db.session,
-        repositories=RepositoryFactory(),
+        repository_factory=ToolCallRepository,
     )
 
     bound = _bind(service, {"demo": handler})
@@ -487,6 +486,14 @@ def test_registration_controls_only_model_visibility() -> None:
     assert not hasattr(registrations[0], "deliver_result_to_model")
 
 
+def test_registered_tool_requires_risk_in_operation_definition() -> None:
+    operation = _DemoHandler()
+    operation.risk = "medium"  # type: ignore[assignment]
+
+    with pytest.raises(ToolProtocolError, match="declare a valid risk"):
+        RegisteredTool(operation)
+
+
 def test_tool_operation_requires_prepare_and_execute() -> None:
     """业务操作缺少准备或执行方法时不能注册实例。"""
 
@@ -494,6 +501,7 @@ def test_tool_operation_requires_prepare_and_execute() -> None:
         name = "complete"
         description = "complete"
         args_schema = _DemoArguments
+        risk = ToolRisk.LOW
 
         async def prepare(self, context, arguments):  # type: ignore[no-untyped-def]
             return self.show_result({"outcome": "validated"})
@@ -518,6 +526,7 @@ def test_tool_operation_requires_prepare_and_execute() -> None:
                 "name": f"missing_{missing}",
                 "description": "incomplete",
                 "args_schema": _DemoArguments,
+                "risk": ToolRisk.LOW,
                 **methods,
             },
         )
@@ -532,42 +541,36 @@ def test_fresh_process_exposes_only_the_unified_tool_contract() -> None:
 import importlib
 from pathlib import Path
 
-try:
-    importlib.import_module("app.ai_chat.tools.lifecycle")
-except ModuleNotFoundError as exc:
-    assert exc.name == "app.ai_chat.tools.lifecycle"
-else:
-    raise AssertionError("legacy lifecycle module is still importable")
-
-try:
-    importlib.import_module("app.ai_chat.tools.results")
-except ModuleNotFoundError as exc:
-    assert exc.name == "app.ai_chat.tools.results"
-else:
-    raise AssertionError("split Tool result types are still importable")
-
-try:
-    importlib.import_module("app.ai_chat.tools.contracts")
-except ModuleNotFoundError as exc:
-    assert exc.name == "app.ai_chat.tools.contracts"
-else:
-    raise AssertionError("old Tool contracts module is still importable")
-
-import app.ai_chat.tools as tools
-import app.ai_chat.tools.types as tool_types
-from app.ai_chat.context import ContextAssembler
-from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
-from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services import ToolService
-from app.ai_chat.streaming.model import AiChatModel
-from app.ai_chat.tools.operation import RegisteredTool, ToolOperation
-from app.ai_chat.repositories.tool_repository import ToolCallRepository
-from app.ai_chat.tools.store import ToolCallStore
+from app.ai_chat.persistence import SqlAlchemyToolCallStore, ToolCallRepository
 from app.database import db
-from app.experience import ExperienceAdapter
+from app.experience import ExperienceWorkflow
 from app.experience.graph import build_experience_graph
 from app.experience.tools.content_change import ContentChangeOperation
+from app.workflow_runtime.context import ContextAssembler
+from app.workflow_runtime.model import ModelClient
+from app.workflow_runtime import tools
+from app.workflow_runtime.tools import (
+    RegisteredTool,
+    ToolLifecycleService,
+    ToolOperation,
+)
+
+for legacy_module in (
+    "app.ai_chat.graph.runtime",
+    "app.ai_chat.tools.contracts",
+    "app.ai_chat.tools.lifecycle",
+    "app.ai_chat.tools.results",
+    "app.ai_chat.tools.types",
+    "app.ai_chat.tools.operation",
+    "app.ai_chat.tools.registry",
+):
+    try:
+        importlib.import_module(legacy_module)
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise AssertionError(f"legacy runtime module is still importable: {legacy_module}")
 
 for alias in (
     "ApprovalProposal",
@@ -583,7 +586,6 @@ for alias in (
     "ToolValidationResult",
     "ValidatedToolCall",
 ):
-    assert not hasattr(tool_types, alias), alias
     assert not hasattr(tools, alias), alias
 for name in (
     "ApprovalAction",
@@ -593,27 +595,29 @@ for name in (
     "ToolContext",
     "ToolResult",
 ):
-    assert getattr(tools, name) is getattr(tool_types, name), name
+    assert hasattr(tools, name), name
 assert ToolOperation.__abstractmethods__ == {"prepare", "execute"}
 assert not hasattr(ContentChangeOperation, "security")
 assert not hasattr(ToolCallRepository, "request_approval")
 assert not hasattr(ToolCallRepository, "claim_resolution")
-assert set(AiChatRuntime.__dataclass_fields__) == {"model", "tools", "context"}
-assert not hasattr(AiChatRuntime, "receive_tool_call")
-assert "decision" not in tool_types.ToolCall.__annotations__
-assert "client_resolution_id" not in tool_types.ToolCall.__annotations__
-assert "proposal_payload" not in tool_types.ToolCall.__annotations__
-assert "interaction_payload" in tool_types.ToolCall.__annotations__
+assert set(ModelClient.__dataclass_fields__) == {
+    "model", "context", "max_tokens"
+}
+assert "decision" not in tools.ToolCall.__annotations__
+assert "client_resolution_id" not in tools.ToolCall.__annotations__
+assert "proposal_payload" not in tools.ToolCall.__annotations__
+assert "interaction_payload" in tools.ToolCall.__annotations__
 assert {"decision", "client_resolution_id"}.issubset(
-    tool_types.ApprovalDecision.__annotations__
+    tools.ApprovalDecision.__annotations__
 )
 
-adapter = ExperienceAdapter()
-service = ToolService(ToolCallStore(db.session, RepositoryFactory())).bind_tools(
-    adapter.get_tools(), adapter.get_tool_approval_policy()
+workflow = ExperienceWorkflow()
+service = ToolLifecycleService(SqlAlchemyToolCallStore(db.session)).bind_tools(
+    workflow.get_tools(), workflow.get_tool_approval_policy()
 )
 graph = build_experience_graph(
-    AiChatRuntime(AiChatModel(), service, ContextAssembler(MemoryService()))
+    ModelClient(context=ContextAssembler(MemoryService())),
+    service,
 )
 assert set(graph.nodes) == {
     "llm", "validator", "risk_assessment", "approver", "executor"
@@ -690,7 +694,7 @@ async def test_validate_call_rejects_schema_coerced_non_finite_number(
 
     assert handler.validation_count == 0
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get_by_run_index(
+        row = await ToolCallRepository(session).get_by_run_index(
             run_id,
             0,
         )
@@ -703,7 +707,7 @@ async def test_validate_call_rejects_unknown_handler_before_materializing(
     isolated_db,
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
-    service = _new_service(isolated_db.session, RepositoryFactory())
+    service = _new_service(isolated_db.session)
 
     with pytest.raises(ToolProtocolError, match="Unknown tool: unknown"):
         await service.validate_call(
@@ -739,7 +743,7 @@ async def test_validate_call_keeps_invalid_arguments_as_durable_received_row(
         )
 
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get_by_run_index(
+        row = await ToolCallRepository(session).get_by_run_index(
             run_id, 0
         )
     assert row is not None
@@ -753,8 +757,8 @@ async def test_validate_call_rejects_corrupt_received_row_before_mutation(
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     handler = _DemoHandler()
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-0",
@@ -779,7 +783,7 @@ async def test_validate_call_rejects_corrupt_received_row_before_mutation(
 
     assert handler.validation_count == 0
     async with isolated_db.session() as session:
-        durable = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
+        durable = await ToolCallRepository(session).get(tool_call_id)
     assert durable is not None
     assert durable.status == "received"
     assert durable.decision == "approve"
@@ -800,7 +804,7 @@ async def test_validate_call_prepares_and_persists_trusted_payloads(isolated_db)
     assert service.approval.risk("demo") is ToolRisk.MEDIUM
     assert handler.validation_count == 1
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             dispatched["tool_call_id"]
         )
     assert row is not None
@@ -821,7 +825,7 @@ async def test_validate_call_resolves_immediate_result_before_returning(isolated
     assert "client_resolution_id" not in dispatched
     assert dispatched["replayed"] is False
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             dispatched["tool_call_id"]
         )
     assert row is not None
@@ -867,7 +871,7 @@ async def test_validate_call_concurrent_prepared_validation_keeps_one_durable_wi
     assert second_result["status"] == "validated"
     assert first_result["tool_call_id"] == second_result["tool_call_id"]
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             first_result["tool_call_id"]
         )
     assert row is not None
@@ -903,7 +907,7 @@ async def test_validate_call_concurrent_immediate_result_replays_durable_winner(
     )
     assert sorted((first_result["replayed"], second_result["replayed"])) == [False, True]
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             first_result["tool_call_id"]
         )
     assert row is not None
@@ -926,8 +930,8 @@ async def test_validate_call_maps_existing_durable_status(
     handler = _DemoHandler()
     service = _tool_service(isolated_db, handler)
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-0",
@@ -985,8 +989,8 @@ async def test_validate_call_rejects_durable_decision_without_resolution_token(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-0",
@@ -1053,8 +1057,8 @@ async def test_service_rejects_inconsistent_durable_tool_call_state(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-0",
@@ -1097,8 +1101,8 @@ async def test_service_rejects_incomplete_lifecycle_metadata(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.create(
-            conversation_id=conversation_id,
+        row = await ToolCallRepository(session).create(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-0",
@@ -1139,7 +1143,7 @@ async def test_request_approval_is_durable_and_idempotent(isolated_db) -> None:
     assert replay["replayed"] is True
     assert request["interaction_payload"] == {"value": "input"}
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None
@@ -1154,7 +1158,7 @@ async def test_request_approval_concurrent_calls_converge_on_durable_request(
     service = _bind(
         _new_service(
             session_factory=isolated_db.session,
-            repositories=_ObservedRepositoryFactory(observation),
+            repository_factory=_ObservedToolCallRepositoryFactory(observation),
         ),
         {"demo": _DemoHandler()},
     )
@@ -1176,7 +1180,7 @@ async def test_request_approval_concurrent_calls_converge_on_durable_request(
     assert first_result["tool_call_id"] == second_result["tool_call_id"]
     assert first_result["status"] == second_result["status"] == "awaiting_approval"
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None and row.status == "awaiting_approval"
@@ -1228,7 +1232,7 @@ async def test_record_decision_persists_approval_before_execution(isolated_db) -
     assert approved["replayed"] is False
     assert approval_replay["replayed"] is True
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None
@@ -1261,7 +1265,7 @@ async def test_record_decision_replays_resolved_approval_only_for_exact_identity
     assert "client_resolution_id" not in replay
     assert replay["replayed"] is True
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None
@@ -1315,7 +1319,7 @@ async def test_record_decision_rejects_without_calling_handler_execute(
     result = await service.execute_call(context, prepared["tool_call_id"])
     assert result.decision == "reject"
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None
@@ -1394,7 +1398,7 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
     decision_service = _bind(
         _new_service(
             session_factory=isolated_db.session,
-            repositories=_ObservedRepositoryFactory(observation),
+            repository_factory=_ObservedToolCallRepositoryFactory(observation),
         ),
         {"demo": handler},
     )
@@ -1418,10 +1422,12 @@ async def test_record_decision_concurrent_resolution_token_has_one_stable_owner(
         isinstance(item, dict) and item.get("status") == "approved"
         for item in outcomes
     ) == 1
-    assert sum(isinstance(item, IdempotencyConflictError) for item in outcomes) == 1
+    assert sum(
+        isinstance(item, IdempotencyConflictError) for item in outcomes
+    ) == 1, outcomes
     assert not any(isinstance(item, IntegrityError) for item in outcomes)
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         rows = [
             await repository.get(first["tool_call_id"]),
             await repository.get(second["tool_call_id"]),
@@ -1453,8 +1459,7 @@ async def test_execute_call_rolls_back_failure_then_retries_atomically(
         await service.execute_call(context, prepared["tool_call_id"])
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session)
-        failed_row = await repository.tool_calls.get(prepared["tool_call_id"])
+        failed_row = await ToolCallRepository(session).get(prepared["tool_call_id"])
         side_effect_count = await session.scalar(
             select(func.count()).select_from(AiChatMessage)
         )
@@ -1507,7 +1512,7 @@ async def test_execute_call_rejects_context_for_another_persisted_run(
 
     assert handler.execution_count == 0
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
     assert row is not None and row.status == "validated"
@@ -1523,7 +1528,7 @@ async def test_execute_call_uses_only_persisted_payloads_and_replays_result(
     prepared = await service.validate_call(context, _tool_call(value="input"))
     assert prepared["status"] == "validated"
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(
+        row = await ToolCallRepository(session).get(
             prepared["tool_call_id"]
         )
         assert row is not None
@@ -1566,7 +1571,7 @@ async def test_execute_call_concurrent_claim_runs_business_side_effect_once(
     service = _bind(
         _new_service(
             session_factory=isolated_db.session,
-            repositories=_ObservedRepositoryFactory(observation),
+            repository_factory=_ObservedToolCallRepositoryFactory(observation),
         ),
         {"demo": handler},
     )
@@ -1616,8 +1621,8 @@ async def test_materialize_rejects_json_values_with_different_types(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        await RepositoryFactory().create(session).tool_calls.materialize(
-            conversation_id=conversation_id,
+        await ToolCallRepository(session).materialize(
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-a",
@@ -1631,8 +1636,8 @@ async def test_materialize_rejects_json_values_with_different_types(
             ToolProtocolError,
             match="index was reused inconsistently",
         ):
-            await RepositoryFactory().create(session).tool_calls.materialize(
-                conversation_id=conversation_id,
+            await ToolCallRepository(session).materialize(
+                thread_id=conversation_id,
                 run_id=run_id,
                 tool_call_index=0,
                 provider_tool_call_id="provider-b",
@@ -1646,8 +1651,8 @@ async def test_materialize_is_atomic_under_concurrent_replay(isolated_db) -> Non
 
     async def worker(provider_id: str) -> int:
         async with isolated_db.session() as session:
-            row = await RepositoryFactory().create(session).tool_calls.materialize(
-                conversation_id=conversation_id,
+            row = await ToolCallRepository(session).materialize(
+                thread_id=conversation_id,
                 run_id=run_id,
                 tool_call_index=0,
                 provider_tool_call_id=provider_id,
@@ -1661,10 +1666,10 @@ async def test_materialize_is_atomic_under_concurrent_replay(isolated_db) -> Non
 
     assert first == second
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
             await repository.materialize(
-                conversation_id=conversation_id,
+                thread_id=conversation_id,
                 run_id=run_id,
                 tool_call_index=0,
                 provider_tool_call_id="provider-c",
@@ -1678,9 +1683,9 @@ async def test_materialize_converts_provider_identity_conflict_to_protocol_error
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         await repository.materialize(
-            conversation_id=conversation_id,
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-a",
@@ -1690,10 +1695,10 @@ async def test_materialize_converts_provider_identity_conflict_to_protocol_error
         await session.commit()
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
             await repository.materialize(
-                conversation_id=conversation_id,
+                thread_id=conversation_id,
                 run_id=run_id,
                 tool_call_index=1,
                 provider_tool_call_id="provider-a",
@@ -1707,9 +1712,9 @@ async def test_materialize_rejects_crossed_index_and_provider_conflicts(
 ) -> None:
     conversation_id, run_id = await _create_conversation_run(isolated_db)
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         await repository.materialize(
-            conversation_id=conversation_id,
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=0,
             provider_tool_call_id="provider-a",
@@ -1717,7 +1722,7 @@ async def test_materialize_rejects_crossed_index_and_provider_conflicts(
             arguments={"value": "same"},
         )
         await repository.materialize(
-            conversation_id=conversation_id,
+            thread_id=conversation_id,
             run_id=run_id,
             tool_call_index=1,
             provider_tool_call_id="provider-b",
@@ -1727,10 +1732,10 @@ async def test_materialize_rejects_crossed_index_and_provider_conflicts(
         await session.commit()
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         with pytest.raises(ToolProtocolError, match="index was reused inconsistently"):
             await repository.materialize(
-                conversation_id=conversation_id,
+                thread_id=conversation_id,
                 run_id=run_id,
                 tool_call_index=1,
                 provider_tool_call_id="provider-a",
@@ -1745,7 +1750,7 @@ async def test_repository_transition_persists_approval_before_execution(
     tool_call_id = await _create_received_tool_call(isolated_db)
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         row = await repository.get(tool_call_id)
         assert row is not None
         assert await repository.save_validation(
@@ -1779,7 +1784,7 @@ async def test_repository_transition_persists_approval_before_execution(
         await session.commit()
 
     async with isolated_db.session() as session:
-        row = await RepositoryFactory().create(session).tool_calls.get(tool_call_id)
+        row = await ToolCallRepository(session).get(tool_call_id)
     assert row is not None
     assert row.status == "resolved"
     assert row.decision == "approve"
@@ -1795,7 +1800,7 @@ async def test_repository_transition_rejects_or_executes_validated_call_once(
     direct_id = await _create_received_tool_call(isolated_db)
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         for tool_call_id in (rejected_id, direct_id):
             row = await repository.get(tool_call_id)
             assert row is not None
@@ -1816,7 +1821,7 @@ async def test_repository_transition_rejects_or_executes_validated_call_once(
         await session.commit()
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         rejected = await repository.get(rejected_id)
         direct = await repository.get(direct_id)
     assert rejected is not None
@@ -1963,7 +1968,7 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
         service = _bind(
             _new_service(
                 session_factory=database.session,
-                repositories=RepositoryFactory(),
+                repository_factory=ToolCallRepository,
             ),
             {"demo": _NeverValidateHandler()},
         )
@@ -1982,7 +1987,7 @@ async def test_migrated_validated_call_replays_without_regenerating_payloads(
         assert dispatched["status"] == "validated"
         assert service.approval.risk("demo") is ToolRisk.MEDIUM
         async with database.session() as session:
-            row = await RepositoryFactory().create(session).tool_calls.get(1)
+            row = await ToolCallRepository(session).get(1)
         assert row is not None
         assert row.status == "validated"
         assert row.interaction_payload == {"proposal": 1}
@@ -1995,7 +2000,7 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="test",
+            workflow_name="test",
             subject={"type": "test", "id": "1"},
             scope={"field": "test"},
             language="zh",
@@ -2005,15 +2010,16 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
             kind="user_turn",
             tools_enabled=True,
         )
-        row = await repositories.tool_calls.create(
-            conversation_id=conversation.id,
+        tool_calls = ToolCallRepository(session)
+        row = await tool_calls.create(
+            thread_id=conversation.id,
             run_id=run.id,
             tool_call_index=0,
             provider_tool_call_id=None,
             tool_name="demo",
             arguments={},
         )
-        assert await repositories.tool_calls.save_validation(
+        assert await tool_calls.save_validation(
             row,
             interaction_payload={"proposal": "trusted"},
             guard_payload={"guard": "trusted"},
@@ -2021,12 +2027,12 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
         await session.commit()
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         assert await repository.claim_execution(row.id, from_status="validated") is True
         await session.rollback()
 
     async with isolated_db.session() as session:
-        repository = RepositoryFactory().create(session).tool_calls
+        repository = ToolCallRepository(session)
         persisted = await repository.get(row.id)
         assert persisted is not None
         assert persisted.status == "validated"
@@ -2039,7 +2045,7 @@ async def test_claim_execution_retries_after_rollback_and_resolves(isolated_db) 
         await session.commit()
 
     async with isolated_db.session() as session:
-        persisted = await RepositoryFactory().create(session).tool_calls.get(row.id)
+        persisted = await ToolCallRepository(session).get(row.id)
     assert persisted is not None
     assert persisted.status == "resolved"
     assert persisted.tool_result == {"outcome": "done"}
@@ -2049,7 +2055,7 @@ async def test_resolved_call_without_result_is_rejected_by_database(isolated_db)
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="test",
+            workflow_name="test",
             subject={"type": "test", "id": "1"},
             scope={"field": "test"},
             language="zh",
@@ -2061,7 +2067,7 @@ async def test_resolved_call_without_result_is_rejected_by_database(isolated_db)
         )
         session.add(
             AiChatToolCall(
-                conversation_id=conversation.id,
+                thread_id=conversation.id,
                 run_id=run.id,
                 tool_call_index=0,
                 provider_tool_call_id=None,

@@ -2,23 +2,21 @@
 
 import json
 
-from app.ai_chat.context import ContextAssembler
-from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.memory import MemoryService
-from app.ai_chat.protocol import GraphResumeCommand
+from langchain_core.messages import AIMessageChunk
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+from app.ai_chat.persistence import SqlAlchemyToolCallStore
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services.tool_service import ToolService
-from app.ai_chat.tools.store import ToolCallStore
-from app.jd_import.adapters import JDImportAdapter
+from app.jd_import import JDImportWorkflow
 from app.jd_import.agent.input_parser import parse_mixed_input
 from app.jd_import.agent.model import ExtractionResult, UrlSelection
 from app.jd_import.agent.state import initial_state
 from app.jd_import.agent.types import CandidateJD, EvidenceFact, RequirementFact
 from app.jd_import.graph import JDImportGraphDependencies, build_jd_import_graph
 from app.jd_import.sources import PageSourceResult, UrlPolicy
-from langchain_core.messages import AIMessageChunk
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
+from app.workflow_runtime.protocol import GraphResumeCommand
+from app.workflow_runtime.tools import ToolLifecycleService
 
 
 class FakeExtractionModel:
@@ -167,7 +165,7 @@ async def test_mixed_input_happy_path_completes(isolated_db) -> None:  # type: i
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="JDImportAdapter",
+            workflow_name="JDImportWorkflow",
             subject={"type": "jd_import", "id": "new"},
             scope={},
             language="zh",
@@ -184,16 +182,15 @@ async def test_mixed_input_happy_path_completes(isolated_db) -> None:  # type: i
         page_sources=FakePages(),
         url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
     )
-    adapter = JDImportAdapter(dependencies)
-    tools = ToolService(
-        ToolCallStore(isolated_db.session, RepositoryFactory())
-    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    runtime = AiChatRuntime(
+    workflow = JDImportWorkflow(dependencies)
+    tools = ToolLifecycleService(
+        SqlAlchemyToolCallStore(isolated_db.session)
+    ).bind_tools(workflow.get_tools(), workflow.get_tool_approval_policy())
+    graph = build_jd_import_graph(
         NoPlanningModel(),  # type: ignore[arg-type]
         tools,
-        ContextAssembler(MemoryService()),
-    )
-    graph = build_jd_import_graph(runtime, dependencies).compile()
+        dependencies,
+    ).compile()
     raw = "Acme Engineer full-time Remote Python https://example.com/job"
     state = initial_state(
         conversation_id=conversation.id,
@@ -210,7 +207,7 @@ async def test_empty_url_snapshot_finishes_with_source_error(isolated_db) -> Non
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="JDImportAdapter",
+            workflow_name="JDImportWorkflow",
             subject={"type": "jd_import", "id": "new"},
             scope={},
             language="zh",
@@ -227,16 +224,15 @@ async def test_empty_url_snapshot_finishes_with_source_error(isolated_db) -> Non
         page_sources=EmptyPages(),
         url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
     )
-    adapter = JDImportAdapter(dependencies)
-    tools = ToolService(
-        ToolCallStore(isolated_db.session, RepositoryFactory())
-    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    runtime = AiChatRuntime(
+    workflow = JDImportWorkflow(dependencies)
+    tools = ToolLifecycleService(
+        SqlAlchemyToolCallStore(isolated_db.session)
+    ).bind_tools(workflow.get_tools(), workflow.get_tool_approval_policy())
+    graph = build_jd_import_graph(
         NoPlanningModel(),  # type: ignore[arg-type]
         tools,
-        ContextAssembler(MemoryService()),
-    )
-    graph = build_jd_import_graph(runtime, dependencies).compile()
+        dependencies,
+    ).compile()
     raw = "https://jobs.example.com/1"
     state = initial_state(
         conversation_id=conversation.id,
@@ -259,7 +255,7 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="JDImportAdapter",
+            workflow_name="JDImportWorkflow",
             subject={"type": "jd_import", "id": "new"},
             scope={},
             language="zh",
@@ -276,16 +272,15 @@ async def test_question_tool_answer_loops_back_to_extraction(isolated_db) -> Non
         page_sources=FakePages(),
         url_policy=UrlPolicy(lambda _host: ["93.184.216.34"]),
     )
-    adapter = JDImportAdapter(dependencies)
-    tools = ToolService(
-        ToolCallStore(isolated_db.session, RepositoryFactory())
-    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    runtime = AiChatRuntime(
+    workflow = JDImportWorkflow(dependencies)
+    tools = ToolLifecycleService(
+        SqlAlchemyToolCallStore(isolated_db.session)
+    ).bind_tools(workflow.get_tools(), workflow.get_tool_approval_policy())
+    graph = build_jd_import_graph(
         QuestionPlanningModel(),  # type: ignore[arg-type]
         tools,
-        ContextAssembler(MemoryService()),
-    )
-    graph = build_jd_import_graph(runtime, dependencies).compile(
+        dependencies,
+    ).compile(
         checkpointer=MemorySaver()
     )
     raw = "Engineer Python"

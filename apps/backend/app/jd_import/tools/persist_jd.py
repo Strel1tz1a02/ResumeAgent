@@ -1,13 +1,17 @@
 """仅供系统调用、用于原子持久化单个 JD 的 Tool。"""
 
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.operation import ToolOperation
-from app.ai_chat.tools.types import ToolContext, ToolResult
 from app.ai_chat.types import JsonObject
 from app.jd_import.agent.types import CandidateJD
 from app.jd_import.repositories import JDImportRepository
+from app.workflow_runtime.tools import (
+    ToolContext,
+    ToolOperation,
+    ToolResult,
+    ToolRisk,
+)
 
 
 class PersistJDArguments(BaseModel):
@@ -20,6 +24,7 @@ class PersistJDOperation(ToolOperation):
     name = "persist_jd"
     description = "Persist one validated JD candidate."
     args_schema = PersistJDArguments
+    risk = ToolRisk.LOW
 
     async def prepare(
         self, context: ToolContext, arguments: JsonObject
@@ -33,8 +38,10 @@ class PersistJDOperation(ToolOperation):
         context: ToolContext,
         prepared_data: JsonObject,
     ) -> ToolResult:
-        if context.session is None:
-            raise ToolProtocolError("persist_jd requires a transaction-bound session")
+        session = context.resources.require(
+            AsyncSession,
+            "persist_jd requires a transaction-bound session",
+        )
         candidate = PersistJDArguments.model_validate(prepared_data).candidate
         required_missing = {"company", "job_name", "requirements"}.intersection(
             candidate.missing_fields
@@ -45,7 +52,7 @@ class PersistJDOperation(ToolOperation):
             and candidate.requirements
             and not required_missing
         )
-        information = await JDImportRepository(context.session).create(
+        information = await JDImportRepository(session).create(
             information_fields={
                 "source_url": candidate.source_url.value if candidate.source_url else None,
                 "company": candidate.company.value if candidate.company else "",

@@ -2,7 +2,7 @@
 
 > 目标：把“我设计了项目，但代码主要由 AI 生成”转化为“我能解释、调试、修改并为关键设计辩护”。
 >
-> 适用范围：当前仓库中的个人经历库、通用 `ai_chat` 运行时、`ExperienceAdapter`、LangGraph、Tool Call、Human-in-the-loop 与前端 SSE 接入。
+> 适用范围：当前仓库中的个人经历库、通用 `ai_chat` 运行时、`ExperienceWorkflow`、LangGraph、Tool Call、Human-in-the-loop 与前端 SSE 接入。
 
 ## 1. 学完后的验收标准
 
@@ -14,7 +14,7 @@
 4. 说明为什么本项目需要 Agent，而不只是一次普通 LLM 请求。
 5. 解释 Tool Call 为什么不能绕过领域 Service 直接写 Repository。
 6. 解释审批、幂等、revision guard、断流恢复分别防止什么问题。
-7. 能独立增加一个小型 Tool 或 Adapter，并补充有效测试。
+7. 能独立增加一个小型 Tool 或 Workflow，并补充有效测试。
 8. 能完成 3 分钟项目介绍、10 分钟架构讲解和 30 分钟代码深挖。
 
 ## 2. 阅读规则
@@ -41,13 +41,14 @@
 → 前端发消息
 → SSE 请求
 → 业务 Router
-→ AiChatService
-→ ExperienceAdapter
+→ ConversationService
+→ ExperienceWorkflow
 → ExperienceGraph
 → 模型产生 Tool Call
-→ ToolService 调用业务 Operation 形成提案
+→ ToolLifecycleService 调用业务 Operation 形成提案
 → interrupt + checkpoint
 → 用户批准
+→ InteractionCoordinator
 → 领域 Service 写入
 → Graph 恢复并续答
 → SSE 更新页面
@@ -134,19 +135,20 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 按顺序阅读：
 
 1. `docs/superpowers/specs/2026-08-01-ai-chat-functional-boundaries-design.zh-CN.md` 的第 1、2、3 节；
-2. `apps/backend/app/main.py` 中 `_register_business_adapters()`、`lifespan()` 和 Router 挂载；
-3. `apps/backend/app/ai_chat/adapters/base.py`；
-4. `apps/backend/app/ai_chat/adapters/registry.py`；
+2. `apps/backend/app/main.py` 中 `_register_business_workflows()`、`lifespan()` 和 Router 挂载；
+3. `apps/backend/app/ai_chat/workflow.py`；
+4. `apps/backend/app/workflow_runtime/graph/catalog.py`；
 5. `apps/backend/app/ai_chat/container.py`。
 
 核心问题：
 
 - 通用聊天层、业务 AI 接入层、领域层分别负责什么？
 - 为什么 `ai_chat` 不能直接导入 `ExperienceService`？
-- 为什么 Adapter 是长期复用且无请求状态的？
-- 为什么注册表保存稳定名称，而不是到处直接实例化 Adapter？
+- 为什么 Workflow 是长期复用且无请求状态的？
+- 为什么一个 Conversation 包含多个 Run，而每个 Run 使用独立的业务 Graph checkpoint？
+- 为什么注册表保存稳定名称，而不是到处直接实例化 Workflow？
 
-产出：三层边界图 + `BaseAdapter` 四个抽象方法的职责表。
+产出：三层边界图 + `Workflow` 与 `ConversationWorkflow` 的职责表。
 
 #### 第 2 课：Experience 聚合与 API 数据契约
 
@@ -207,19 +209,19 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 ### 阶段 B：通用 Agent 运行时
 
-#### 第 5 课：通用类型、Adapter 契约与依赖装配
+#### 第 5 课：通用类型、Workflow 契约与依赖装配
 
 按顺序阅读：
 
-1. `apps/backend/app/ai_chat/types.py`；
-2. `apps/backend/app/ai_chat/graph/state.py`；
-3. `apps/backend/app/ai_chat/tools/types.py`；
-4. `apps/backend/app/ai_chat/adapters/base.py`；
-5. `apps/backend/app/ai_chat/graph/runtime.py`；
+1. `apps/backend/app/workflow_runtime/types.py`；
+2. `apps/backend/app/workflow_runtime/protocol.py`；
+3. `apps/backend/app/workflow_runtime/tools/types.py`；
+4. `apps/backend/app/workflow_runtime/model.py`；
+5. `apps/backend/app/ai_chat/workflow.py`；
 6. `apps/backend/app/ai_chat/container.py`；
 7. `apps/backend/app/main.py`。
 
-核心问题：Adapter 为什么要把统一 `AdapterInput` 转换成扩展 `BaseState` 的完整业务 State？哪些值必须 JSON 可序列化？
+核心问题：为什么 Workflow 能力是横向工具包，而不是 Conversation 的父层？为什么新 Run 的初始输入与同一 Run 的 GraphResumeCommand 必须分开？
 
 产出：三种输入/状态结构的对照表。
 
@@ -237,18 +239,19 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 产出：四张数据结构卡 + 状态转换表。
 
-#### 第 7 课：AiChatService 的创建会话与普通消息轮次
+#### 第 7 课：Conversation 完整门面与内部执行
 
 不要一次通读整个文件，只追两条路径：
 
-1. `AiChatService.create_conversation()`；
-2. `AiChatService.stream_message()`；
-3. `_start_run()`、`_build_input()`、`_execute()` 等被直接调用的内部函数；
-4. 对应 Repository 方法。
+1. `ConversationService.create()` 与 `stream_message()`；
+2. `ConversationTurnCoordinator.stream_message()`；
+3. `_stream_new_run()`、`_build_input()`、`_execute()` 等内部函数；
+4. `ConversationWorkflow` 与 `CheckpointedWorkflowExecutor.stream()`；
+5. 对应 Repository 方法。
 
-文件：`apps/backend/app/ai_chat/services/service.py`。
+文件：`conversation_service.py` 与 `conversation_execution.py`。
 
-核心问题：用户消息为什么先落库再调用模型？assistant 消息为什么先以 `generating` 创建？失败时保留什么？
+核心问题：用户消息为什么先落库再调用模型？为什么每条用户输入创建新 Run，并以 Run ID 隔离业务 Graph checkpoint？
 
 产出：普通文本轮次的事务时间线。
 
@@ -256,16 +259,16 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 按顺序阅读：
 
-1. `apps/backend/app/ai_chat/streaming/model.py`；
-2. `apps/backend/app/ai_chat/streaming/compatibility/dsml.py`；
-3. `apps/backend/app/ai_chat/streaming/events.py`；
-4. `apps/backend/app/ai_chat/graph/runtime.py`。
+1. `apps/backend/app/workflow_runtime/model.py`；
+2. `apps/backend/app/workflow_runtime/compatibility/dsml.py`；
+3. `apps/backend/app/workflow_runtime/events.py`；
+4. `apps/backend/app/workflow_runtime/tools/runtime.py`。
 
 核心问题：业务图如何直接消费 `AIMessageChunk`？为什么必须等 Tool Call 参数聚合完整后才能校验？
 
 产出：`AIMessageChunk` 到文本增量和完整 Tool Call 的处理流程。
 
-### 阶段 C：ExperienceAdapter 与 LangGraph
+### 阶段 C：ExperienceWorkflow 与 LangGraph
 
 #### 第 9 课：业务 API、SSE 与前端会话状态
 
@@ -281,13 +284,13 @@ Agent 最终仍要调用普通业务能力。必须先理解字段保存、Evide
 
 产出：前端状态、HTTP 请求和 SSE 事件对照表。
 
-#### 第 10 课：Adapter 如何加载业务上下文
+#### 第 10 课：Workflow 如何加载业务上下文
 
 按顺序阅读：
 
-1. `apps/backend/app/experience/adapters/adapter.py::validate_request()`；
-2. `ExperienceAdapter.parse_input()`；
-3. `apps/backend/app/ai_chat/context/assembler.py`；
+1. `apps/backend/app/experience/workflow.py::validate_request()`；
+2. `ExperienceWorkflow.init_state()`；
+3. `apps/backend/app/workflow_runtime/context.py`；
 4. `apps/backend/app/experience/prompts/ai_chat.py`；
 5. `apps/backend/app/experience/graph/state.py`。
 
@@ -308,7 +311,7 @@ START
 → END
 ```
 
-再阅读 `apps/backend/app/ai_chat/graph/runner.py::stream()`、`graph/driver.py::stream()` 和 `normalize()`。
+再阅读 `apps/backend/app/workflow_runtime/graph/runner.py::stream()`、`graph/driver.py::stream()` 和 `normalize()`。
 
 核心问题：Graph 节点为什么返回局部 State？条件边如何选择分支？Graph 事件和 Service 持久化为什么分属不同位置？
 
@@ -319,14 +322,14 @@ START
 按顺序阅读：
 
 1. `apps/backend/app/experience/tools/content_change.py`；
-2. `apps/backend/app/ai_chat/tools/operation.py`；
-3. `apps/backend/app/ai_chat/tools/approval/service.py`；
-4. `apps/backend/app/ai_chat/tools/store.py`；
-5. `apps/backend/app/ai_chat/services/tool_service.py`；
+2. `apps/backend/app/workflow_runtime/tools/operation.py`；
+3. `apps/backend/app/workflow_runtime/tools/approval_service.py`；
+4. `apps/backend/app/workflow_runtime/tools/persistence.py` 与 `in_memory_store.py`；
+5. `apps/backend/app/workflow_runtime/tools/service.py`；
 6. `builder.py` 中 `validator`、`risk_assessment`、`approver`、`executor`；
 7. `apps/backend/app/experience/services/experience_ai_mutation_service.py`。
 
-核心问题：为什么 LangChain Tool 只包含能力与参数协议？审批判断、幂等固化和执行编排为什么分别属于 `ToolApprovalService`、`ToolCallStore` 和 `ToolService`？可展示的 `interaction_payload` 与可信执行数据为什么不能合并成一个前端对象？
+核心问题：为什么风险等级必须由 `ToolOperation.risk` 声明，而不能散落在 Workflow？审批路由、幂等固化和执行编排为什么分别属于 `ToolApprovalService`、`ToolCallStore` 端口和 `ToolLifecycleService`？可展示的 `interaction_payload` 与可信执行数据为什么不能合并成一个前端对象？
 
 产出：Tool Call 生命周期图 + `content_change` 参数卡。
 
@@ -335,11 +338,12 @@ START
 按顺序阅读：
 
 1. `builder.py` 中 `approver` 和 `executor`；
-2. `apps/backend/app/ai_chat/protocol.py`；
-3. `apps/backend/app/ai_chat/graph/driver.py`；
-4. `apps/backend/app/ai_chat/services/run_lifecycle.py`；
-5. `AiChatService.resolve_interaction()`；
-6. `test_real_graph_interrupt_approve_and_deferred_tool_result()`。
+2. `apps/backend/app/workflow_runtime/protocol.py`；
+3. `apps/backend/app/workflow_runtime/graph/driver.py`；
+4. `apps/backend/app/workflow_runtime/interactions.py`；
+5. `apps/backend/app/ai_chat/persistence/interaction_store.py`；
+6. Router 直接调用 `InteractionCoordinator.resolve()`；
+7. `test_real_graph_interrupt_approve_and_deferred_tool_result()`。
 
 核心问题：`interrupt(InteractionRequest)` 后为什么普通 Python 调用栈不需要一直存在？为什么 Resolution 必须先持久化，再用只含身份的 `GraphResumeCommand` 恢复并重读可信状态？
 
@@ -355,7 +359,7 @@ START
 - 重复审批：`client_resolution_id`；
 - 同会话并发运行：current run 唯一约束；
 - 用户先断流：`CancelledError` 与 run/message 状态；
-- Interaction 已落库但 checkpoint 尚未暂停：`GraphDriver.recover()` 与 Run CAS 对账；
+- Interaction 已落库但 checkpoint 尚未暂停：`GraphExecutor.recover()` 与 Run CAS 对账；
 - Tool 已应用但模型续答失败：pending Tool Result；
 - 生成期间字段变化：revision guard。
 
@@ -388,7 +392,7 @@ START
 
 回答：一次 LLM Pipeline、Workflow 和 Agent 的边界分别是什么？哪些决策由代码决定，哪些由模型决定？
 
-最终练习：设计一个最小的新 Tool 或新 Adapter，只写设计和测试计划，确认边界后再编码。
+最终练习：设计一个最小的新 Tool 或新 Workflow，只写设计和测试计划，确认边界后再编码。
 
 产出：
 
@@ -405,8 +409,8 @@ START
 createExperienceConversation
 → POST /experience-ai-chat/conversations
 → experience.routers.ai_chat.create_conversation
-→ AiChatService.create_conversation
-→ ExperienceAdapter.validate_request
+→ ConversationService.create
+→ ExperienceWorkflow.validate_request
 → ConversationRepository.create
 → ExperienceFieldService.snapshot
 ```
@@ -416,16 +420,17 @@ createExperienceConversation
 ```text
 streamExperienceMessage
 → router.stream_message
-→ AiChatService.stream_message
+→ ConversationService.stream_message
 → 创建 user message / run / generating assistant message
-→ GraphRunner.stream
-→ ExperienceAdapter.parse_input
-→ ExperienceGraph.agent_stream
-→ AiChatRuntime.stream_model
+→ CheckpointedWorkflowExecutor.stream(thread_id=run_id)
+→ ExperienceWorkflow.init_state
+→ ExperienceWorkflow.build_graph
+→ ModelClient.stream
 → ContextAssembler.assemble
-→ AiChatModel.stream
+→ ModelClient.stream_messages
 → output.delta
-→ AiChatService 持久化完整 assistant message
+→ GraphOutcome.completed
+→ ConversationTurnCoordinator 持久化完整 assistant message
 → run.completed
 ```
 
@@ -435,7 +440,7 @@ streamExperienceMessage
 模型输出 content_change
 → LangChain AIMessageChunk 聚合参数
 → graph.validator
-→ ToolService.validate_call
+→ ToolLifecycleService.validate_call
 → LangChain Tool 参数校验
 → ContentChangeOperation.prepare
 → ExperienceAiMutationService.prepare_*
@@ -445,15 +450,17 @@ streamExperienceMessage
 → run=suspended
 → 前端展示 proposal
 → resolveExperienceInteraction
-→ AiChatService.resolve_interaction
-→ ToolService.record_decision 先通过 ToolCallStore 提交 approved
+→ InteractionCoordinator.resolve
+→ ConversationInteractionStore 定位 Workflow / Run checkpoint / Run
+→ ToolLifecycleService.record_decision 先通过 ToolCallStore 提交 approved
 → GraphResumeCommand(run_id + interaction_id)
-→ GraphDriver.resume
+→ GraphExecutor.resume
 → graph.executor
-→ ToolService.execute_call 通过 ToolCallStore 原子认领
+→ ToolLifecycleService.execute_call 通过 ToolCallStore 原子认领
 → LangChain Tool.ainvoke
 → ContentChangeOperation.execute
 → ExperienceAiMutationService.apply_*
+→ 业务 Graph 结束
 → run=completed，Tool Result 保持 pending
 ```
 
@@ -467,14 +474,14 @@ streamExperienceMessage
 4. **权衡**：复杂度、性能、一致性或扩展性付出了什么代价？
 5. **改进**：如果有更多时间或规模变化，会如何演进？
 
-例如回答“为什么使用 Adapter”：
+例如回答“为什么使用 Workflow”：
 
 ```text
 问题：通用会话机制不应该认识 Experience 字段语义。
-方案：以 BaseAdapter 作为通用运行时与业务 AI 接入层的稳定协议。
-代码：validate_request、parse_input、build_graph、get_tools。
-权衡：增加了一层抽象和注册机制，但换来业务隔离和可扩展性。
-改进：新增 ResumeOptimizationAdapter 验证协议是否真正通用。
+方案：Runtime 定义 Workflow 与 InteractionCoordinator；ConversationWorkflow 只增加绑定校验，每个 Run 直接执行领域 Workflow。
+代码：Workflow.init_state/build_graph/get_tools/resolve_interaction；ConversationWorkflow.validate_request。
+权衡：每个 Run 有独立 checkpoint；Conversation 历史通过数据库与 Memory 组装，不依赖 Graph 循环。
+改进：新增 ResumeOptimizationWorkflow 验证协议是否真正通用。
 ```
 
 ## 7. 学习进度记录

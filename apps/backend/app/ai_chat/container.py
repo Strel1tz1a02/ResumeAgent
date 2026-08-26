@@ -1,25 +1,34 @@
-"""可复用 AI 对话运行时的应用级组装入口。"""
+"""Conversation 服务及其横向 Workflow 能力的应用级组装入口。"""
 
 from pathlib import Path
+from typing import Any
 
 from app import database as database_module
-from app.ai_chat.adapters import AdapterRegistry, BaseAdapter
 from app.ai_chat.checkpoint import CheckpointLifecycle
-from app.ai_chat.context import ContextAssembler
-from app.ai_chat.graph.runner import GraphRunner
-from app.ai_chat.graph.runtime import AiChatRuntime
 from app.ai_chat.memory import MemoryService
+from app.ai_chat.persistence import (
+    ConversationInteractionStore,
+    SqlAlchemyToolCallStore,
+)
 from app.ai_chat.repositories import RepositoryFactory
-from app.ai_chat.services import AiChatService, ToolService
-from app.ai_chat.streaming import AiChatModel
-from app.ai_chat.tools.store import ToolCallStore
+from app.ai_chat.services import ConversationService
+from app.ai_chat.workflow import ConversationWorkflow
 from app.config import settings
 from app.llm import get_configured_max_tokens
+from app.workflow_runtime import (
+    CheckpointedWorkflowExecutor,
+    ContextAssembler,
+    InteractionCoordinator,
+    ModelClient,
+    WorkflowCatalog,
+)
+from app.workflow_runtime.tools import ToolLifecycleService
 
-_registry = AdapterRegistry()
+_catalog = WorkflowCatalog[ConversationWorkflow[Any]]()
 _checkpoints: CheckpointLifecycle | None = None
 _repositories = RepositoryFactory()
-_service: AiChatService | None = None
+_conversations: ConversationService | None = None
+_interactions: InteractionCoordinator | None = None
 
 
 def _checkpoint_path() -> Path:
@@ -31,15 +40,15 @@ def _checkpoint_path() -> Path:
     return settings.ai_chat_checkpoint_path
 
 
-def register_adapter(adapter: BaseAdapter) -> None:
-    """注册一个长期存活且无状态的业务适配器。"""
-    _registry.register(adapter)
+def register_workflow(workflow: ConversationWorkflow[Any]) -> None:
+    """注册一个长期存活且无状态的对话 Workflow。"""
+    _catalog.register(workflow)
 
 
 async def start_ai_chat() -> None:
     """初始化检查点持久化，并完成一次运行时组装。"""
-    global _checkpoints, _service
-    if _service is not None:
+    global _checkpoints, _conversations, _interactions
+    if _conversations is not None:
         return
     path = _checkpoint_path()
     if _checkpoints is None or _checkpoints.path != path:
@@ -47,29 +56,56 @@ async def start_ai_chat() -> None:
             await _checkpoints.close()
         _checkpoints = CheckpointLifecycle(path)
     checkpoint = await _checkpoints.start()
-    tools = ToolService(ToolCallStore(database_module.db.session, _repositories))
+    tools = ToolLifecycleService(SqlAlchemyToolCallStore(database_module.db.session))
     memory = MemoryService()
-    runtime = AiChatRuntime(
-        AiChatModel(),
-        tools,
-        ContextAssembler(memory),
+    model = ModelClient(
+        context=ContextAssembler(memory),
         max_tokens=get_configured_max_tokens(),
     )
-    runner = GraphRunner(_registry, checkpoint, runtime)
-    _service = AiChatService(_registry, runner, _repositories)
+    workflows = CheckpointedWorkflowExecutor(
+        _catalog.get,
+        checkpoint,
+        model,
+        tools,
+        thread_namespace="ai-chat",
+    )
+    _conversations = ConversationService(
+        resolve_workflow=_catalog.get,
+        repositories=_repositories,
+        session_factory=database_module.db.session,
+        workflows=workflows,
+        tools=tools,
+    )
+    _interactions = InteractionCoordinator(
+        resolve_workflow=_catalog.get,
+        workflows=workflows,
+        tools=tools,
+        store=ConversationInteractionStore(
+            session_factory=database_module.db.session,
+            repositories=_repositories,
+        ),
+    )
 
 
-def get_ai_chat_service() -> AiChatService:
-    """向业务路由或服务返回已启动的内部服务。"""
-    if _service is None:
+def get_conversation_service() -> ConversationService:
+    """返回完整的 Conversation 应用服务。"""
+    if _conversations is None:
         raise RuntimeError("AI Chat has not been started")
-    return _service
+    return _conversations
+
+
+def get_interaction_coordinator() -> InteractionCoordinator:
+    """返回由当前应用存储支持的通用 Interaction 能力。"""
+    if _interactions is None:
+        raise RuntimeError("AI Chat has not been started")
+    return _interactions
 
 
 async def close_ai_chat() -> None:
-    """关闭检查点资源，但保留适配器注册信息。"""
-    global _checkpoints, _service
-    _service = None
+    """关闭检查点资源，但保留 Workflow 注册信息。"""
+    global _checkpoints, _conversations, _interactions
+    _conversations = None
+    _interactions = None
     if _checkpoints is not None:
         await _checkpoints.close()
     _checkpoints = None
@@ -77,8 +113,9 @@ async def close_ai_chat() -> None:
 
 async def reset_ai_chat() -> None:
     """清除全部检查点状态并重新启动运行时。"""
-    global _checkpoints, _service
-    _service = None
+    global _checkpoints, _conversations, _interactions
+    _conversations = None
+    _interactions = None
     desired_path = _checkpoint_path()
     if _checkpoints is not None and _checkpoints.path != desired_path:
         await _checkpoints.close()

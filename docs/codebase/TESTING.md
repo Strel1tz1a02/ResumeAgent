@@ -76,7 +76,7 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 
 | 验证 | 结果 | 备注 |
 |------|------|------|
-| 后端 Graph/Run/Interaction/Event/Context/Tool/Adapter 定向集 | 97 passed，16.23s | Python 3.12.13；覆盖 7 个单元测试文件 |
+| 后端 Graph/Run/Interaction/Event/Context/Tool/Workflow 定向集 | 97 passed，16.23s | Python 3.12.13；覆盖 7 个单元测试文件 |
 | 前端 Runtime SSE 与 Experience/JD/Resume API 定向集 | 3 files、14 tests passed，20.25s | Vitest 仍报告 CJS/ESM config warning |
 
 不能由绿测推出“完整崩溃恢复已完成”：stale running、JD 聚合结果补发、恢复阶段 output.delta 持久化和事件 replay 没有对应测试。

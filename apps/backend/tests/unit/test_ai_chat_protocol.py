@@ -4,15 +4,15 @@ import logging
 
 import pytest
 
-from app.ai_chat.errors import InteractionStateError
-from app.ai_chat.protocol import (
+from app.ai_chat.streaming.sse import stream_runtime_events
+from app.workflow_runtime.errors import InteractionStateError
+from app.workflow_runtime.events import RuntimeEvent, tool_result_event
+from app.workflow_runtime.protocol import (
     GraphOutcome,
     GraphResumeCommand,
     InteractionRequest,
     ResolveInteractionCommand,
 )
-from app.ai_chat.streaming.events import RuntimeEvent, tool_result_event
-from app.ai_chat.streaming.sse import stream_runtime_events
 
 
 def test_runtime_event_exposes_one_frontend_envelope() -> None:
@@ -126,7 +126,6 @@ def test_runtime_protocol_rejects_values_that_only_match_type_hints(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         factory()
-
 
 async def test_sse_maps_stable_runtime_errors_without_domain_overrides() -> None:
     async def events():  # type: ignore[no-untyped-def]

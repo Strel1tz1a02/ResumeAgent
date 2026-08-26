@@ -8,7 +8,7 @@ from typing import Any, TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from app.ai_chat.streaming.events import RuntimeEvent
+from app.workflow_runtime.events import RuntimeEvent
 from app.resume_generation.model import ResumeGenerationModel
 from app.resume_generation.observability import log_generation_trace
 from app.resume_generation.planner import assemble_plan, materialize_resume

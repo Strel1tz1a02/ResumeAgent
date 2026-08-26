@@ -15,6 +15,7 @@ def write_quality_report(
     thresholds: dict[str, Any],
     cases: list[dict[str, Any]],
     summary: dict[str, Any],
+    report_version: str = "1",
 ) -> Path:
     """在断言前落盘，使失败的真实输出仍可复盘。"""
     timestamp = datetime.now(UTC)
@@ -28,7 +29,7 @@ def write_quality_report(
         "thresholds": thresholds,
         "cases": cases,
         "metadata": {
-            "report_version": "1",
+            "report_version": report_version,
             "generated_at": timestamp.isoformat(),
         },
     }

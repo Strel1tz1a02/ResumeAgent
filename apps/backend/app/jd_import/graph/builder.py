@@ -11,15 +11,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from app.ai_chat.context import ModelContext
-from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.protocol import GraphResumeCommand, InteractionRequest
-from app.ai_chat.streaming.events import RuntimeEvent
-from app.ai_chat.streaming.model import complete_tool_calls
-from app.ai_chat.tools.types import ToolContext
 from app.jd_import.agent.evidence import assess_candidates
-from app.jd_import.agent.input_parser import parse_mixed_input
 from app.jd_import.agent.model import (
     ExtractionRequest,
     JDImportModel,
@@ -40,6 +32,12 @@ from app.jd_import.agent.types import (
     QuestionBatchAnswer,
 )
 from app.jd_import.sources import PageSourceProvider, UrlPolicy
+from app.workflow_runtime.context import ModelContext
+from app.workflow_runtime.errors import ToolProtocolError
+from app.workflow_runtime.events import RuntimeEvent
+from app.workflow_runtime.model import ModelClient, complete_tool_calls
+from app.workflow_runtime.protocol import GraphResumeCommand, InteractionRequest
+from app.workflow_runtime.tools import ToolContext, ToolLifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +53,13 @@ def _emit(event: str, data: dict[str, Any]) -> None:
     get_stream_writer()(RuntimeEvent(event, data))
 
 
-def _tool_context(state: JDImportState, adapter_context: dict[str, Any]) -> ToolContext:
+def _tool_context(state: JDImportState, workflow_context: dict[str, Any]) -> ToolContext:
     return ToolContext(
-        conversation_id=state["conversation_id"],
+        thread_id=state["conversation_id"],
         run_id=state["run_id"],
         subject={"type": "jd_import", "id": "new"},
         scope={},
-        adapter_context=adapter_context,
+        workflow_context=workflow_context,
     )
 
 
@@ -85,20 +83,17 @@ def _has_unasked_questions(state: JDImportState) -> bool:
 
 
 def build_jd_import_graph(
-    runtime: AiChatRuntime,
+    model: ModelClient,
+    tools: ToolLifecycle,
     deps: JDImportGraphDependencies,
 ) -> StateGraph:
-    question_tool = runtime.tools.tools.get("ask_jd_questions")
+    question_tool = tools.tools.get("ask_jd_questions")
     if question_tool is None:
         raise ToolProtocolError("JD import runtime has no question Tool")
-    planning_runtime = runtime.bind_tools({question_tool.name: question_tool})
-
-    async def parse_input(state: JDImportState) -> dict[str, Any]:
-        parsed = parse_mixed_input(state["input"]["raw_input"])
-        return {
-            "input": {"raw_input": parsed.raw_input, "detected_urls": parsed.urls},
-            "sources": [item.model_dump(mode="json") for item in parsed.sources],
-        }
+    planning_tools = tools.bind_tools(
+        {question_tool.name: question_tool},
+        tools.approval_policy,
+    )
 
     async def resolve_urls(state: JDImportState) -> dict[str, Any]:
         sources = [ImportSource.model_validate(item) for item in state["sources"]]
@@ -214,9 +209,10 @@ def build_jd_import_graph(
             "pending_tool_results": [],
         }
         response = AIMessageChunk(content="")
-        async for chunk in planning_runtime.stream_model(
+        async for chunk in model.stream(
             run_id=state["run_id"],
             context=context,
+            tools=planning_tools,
             tools_enabled=True,
         ):
             response += chunk
@@ -227,7 +223,7 @@ def build_jd_import_graph(
             raise ToolProtocolError("Question planning accepts at most one Tool Call")
         round_value = state["questions"]["round"] + 1
         _call_index, model_call = calls[0]
-        call = await planning_runtime.tools.validate_model_call_as(
+        call = await planning_tools.validate_model_call_as(
             _tool_context(
                 state,
                 {
@@ -240,7 +236,7 @@ def build_jd_import_graph(
             identity=f"jd-import:questions:{round_value}",
             expected_name="ask_jd_questions",
         )
-        waiting = await planning_runtime.tools.request_input(call["tool_call_id"])
+        waiting = await planning_tools.request_input(call["tool_call_id"])
         batch = QuestionBatch.model_validate(waiting["interaction_payload"])
         questions = dict(state["questions"])
         questions["round"] = batch.round
@@ -257,7 +253,7 @@ def build_jd_import_graph(
         tool_call_id = state.get("question_tool_call_id")
         if not isinstance(tool_call_id, int):
             raise ToolProtocolError("Question node has no Tool Call identity")
-        call = await runtime.tools.get_call(tool_call_id)
+        call = await tools.get_call(tool_call_id)
         if call["status"] == "resolved":
             return {}
         if call["status"] != "awaiting_input":
@@ -280,13 +276,13 @@ def build_jd_import_graph(
         tool_call_id = state.get("question_tool_call_id")
         if not isinstance(tool_call_id, int):
             raise ToolProtocolError("Answer merge has no Tool Call identity")
-        call = await runtime.tools.get_call(tool_call_id)
+        call = await tools.get_call(tool_call_id)
         if call["status"] != "resolved" or call["result"] is None:
             raise ToolProtocolError("Question Tool Call has no durable answer")
         batch = QuestionBatch.model_validate(call["interaction_payload"])
         answer = QuestionBatchAnswer.model_validate(call["result"])
         additions = validate_batch_answer(batch, answer)
-        await runtime.tools.consume_result(tool_call_id)
+        await tools.consume_result(tool_call_id)
         questions = dict(state["questions"])
         questions["answers"] = [*questions["answers"], answer.model_dump(mode="json")]
         return {
@@ -314,13 +310,13 @@ def build_jd_import_graph(
         for candidate in candidates:
             try:
                 context = _tool_context(state, {})
-                call = await runtime.tools.validate_system_call(
+                call = await tools.validate_system_call(
                     context,
                     identity=f"jd-import:persist:{candidate.jd_key}",
                     name="persist_jd",
                     arguments={"candidate": candidate.model_dump(mode="json")},
                 )
-                result = await runtime.tools.execute_call(context, call["tool_call_id"])
+                result = await tools.execute_call(context, call["tool_call_id"])
                 information_id = result.payload.get("information_id")
                 if not isinstance(information_id, int):
                     raise ToolProtocolError("persist_jd returned no information_id")
@@ -336,7 +332,6 @@ def build_jd_import_graph(
 
     graph = StateGraph(JDImportState)
     for name, node in (
-        ("parse_input", parse_input),
         ("resolve_urls", resolve_urls),
         ("source_failure", source_failure),
         ("extract", extract),
@@ -347,8 +342,7 @@ def build_jd_import_graph(
         ("persist", persist),
     ):
         graph.add_node(name, node)
-    graph.add_edge(START, "parse_input")
-    graph.add_edge("parse_input", "resolve_urls")
+    graph.add_edge(START, "resolve_urls")
     graph.add_conditional_edges("resolve_urls", route_sources)
     graph.add_edge("source_failure", END)
     graph.add_edge("extract", "assess")

@@ -6,7 +6,7 @@ import json
 import logging
 from uuid import uuid4
 
-from app.ai_chat.context import ContextAssembler
+from app.workflow_runtime.context import ContextAssembler
 from app.config_cache import get_content_language
 from app.experience.prompts.import_text import SYSTEM_PROMPT, import_text_instruction
 from app.experience.schemas.experiences import ExperienceGlobalSave

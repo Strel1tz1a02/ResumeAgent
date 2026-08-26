@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import asdict
 from statistics import mean
 from typing import Any
 
 import pytest
+import tiktoken
 from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 from qdrant_client import QdrantClient, models
 
@@ -38,6 +40,7 @@ _SEARCH_INTENTS = {
     "result_evidence",
     "transferable",
 }
+_CONTEXT_TOKENIZER = "o200k_base"
 
 
 def test_retrieval_scorer_rewards_early_relevant_result() -> None:
@@ -93,6 +96,70 @@ def test_retrieval_scorer_rejects_invalid_input(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         score_retrieval([101], relevant_ids, k=k)
+
+
+def _score_context_efficiency(
+    *,
+    full_context_tokens: int,
+    rag_context_tokens: int,
+    corpus_evidence_count: int,
+    retrieved_evidence_count: int,
+    relevant_evidence_count: int,
+    relevant_hit_count: int,
+) -> dict[str, float | int]:
+    """比较全量 Evidence 上下文与 RAG Top-K 上下文的体积和噪声。"""
+    if not 0 < rag_context_tokens <= full_context_tokens:
+        raise ValueError("RAG context tokens must be within the full context")
+    if not 0 < retrieved_evidence_count <= corpus_evidence_count:
+        raise ValueError("retrieved evidence count must be within the corpus")
+    if not 0 < relevant_evidence_count <= corpus_evidence_count:
+        raise ValueError("relevant evidence count must be within the corpus")
+    if not 0 <= relevant_hit_count <= min(
+        retrieved_evidence_count, relevant_evidence_count
+    ):
+        raise ValueError("relevant hit count is out of range")
+
+    full_irrelevant_count = corpus_evidence_count - relevant_evidence_count
+    rag_irrelevant_count = retrieved_evidence_count - relevant_hit_count
+    full_signal_density = relevant_evidence_count / corpus_evidence_count
+    rag_signal_density = relevant_hit_count / retrieved_evidence_count
+    return {
+        "full_context_tokens": full_context_tokens,
+        "rag_context_tokens": rag_context_tokens,
+        "context_token_reduction": 1 - rag_context_tokens / full_context_tokens,
+        "evidence_count_reduction": 1
+        - retrieved_evidence_count / corpus_evidence_count,
+        "irrelevant_evidence_reduction": (
+            1.0
+            if full_irrelevant_count == 0
+            else 1 - rag_irrelevant_count / full_irrelevant_count
+        ),
+        "signal_density_lift": (
+            0.0
+            if full_signal_density == 0
+            else rag_signal_density / full_signal_density
+        ),
+    }
+
+
+def test_context_efficiency_scorer_quantifies_rag_value() -> None:
+    score = _score_context_efficiency(
+        full_context_tokens=1_000,
+        rag_context_tokens=250,
+        corpus_evidence_count=20,
+        retrieved_evidence_count=5,
+        relevant_evidence_count=2,
+        relevant_hit_count=2,
+    )
+
+    assert score == {
+        "full_context_tokens": 1_000,
+        "rag_context_tokens": 250,
+        "context_token_reduction": 0.75,
+        "evidence_count_reduction": 0.75,
+        "irrelevant_evidence_reduction": pytest.approx(5 / 6),
+        "signal_density_lift": 4.0,
+    }
 
 
 def test_retrieval_golden_cases_have_auditable_hard_negatives() -> None:
@@ -182,6 +249,37 @@ def _slice_metrics(
     }
 
 
+def _aggregate_context_efficiency(
+    case_reports: list[dict[str, Any]], *, k: int
+) -> dict[str, Any]:
+    """聚合 RAG 相对全量 Evidence 上下文的 Token 与噪声收益。"""
+    metrics = [report["context_efficiency"] for report in case_reports]
+    return {
+        "baseline": "all_evidence_documents_with_parent_context",
+        "rag_cutoff": k,
+        "tokenizer": _CONTEXT_TOKENIZER,
+        "full_context_tokens": metrics[0]["full_context_tokens"],
+        "mean_rag_context_tokens": mean(
+            item["rag_context_tokens"] for item in metrics
+        ),
+        "mean_context_token_reduction": mean(
+            item["context_token_reduction"] for item in metrics
+        ),
+        "worst_case_context_token_reduction": min(
+            item["context_token_reduction"] for item in metrics
+        ),
+        "mean_evidence_count_reduction": mean(
+            item["evidence_count_reduction"] for item in metrics
+        ),
+        "mean_irrelevant_evidence_reduction": mean(
+            item["irrelevant_evidence_reduction"] for item in metrics
+        ),
+        "mean_signal_density_lift": mean(
+            item["signal_density_lift"] for item in metrics
+        ),
+    }
+
+
 @pytest.mark.eval
 async def test_retrieval_quality_meets_golden_thresholds() -> None:
     """使用生产 dense+sparse 模型、索引器和 Qdrant RRF 评估检索质量。"""
@@ -197,6 +295,9 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
         f"minimum_map_at_{recall_k}": 0.85,
         f"minimum_worst_case_recall_at_{recall_k}": 0.50,
         f"minimum_multi_relevant_macro_recall_at_{recall_k}": 0.80,
+        f"minimum_mean_context_token_reduction_at_{recall_k}": 0.75,
+        f"minimum_worst_case_context_token_reduction_at_{recall_k}": 0.75,
+        f"minimum_mean_irrelevant_evidence_reduction_at_{recall_k}": 0.80,
     }
     model_metadata = {
         "dense": settings.qdrant_dense_model,
@@ -245,6 +346,17 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
         for experience in experiences:
             await indexer.sync(experience.experience_id, experience)
         documents = build_documents(experiences)
+        documents_by_id = {document.evidence_id: document for document in documents}
+        tokenizer = tiktoken.get_encoding(_CONTEXT_TOKENIZER)
+        full_context_tokens = len(
+            tokenizer.encode(
+                json.dumps(
+                    [document.model_dump(mode="json") for document in documents],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        )
 
         for case in RETRIEVAL_CASES:
             task = SearchTask(
@@ -257,6 +369,27 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
             found = await retriever.retrieve([task], documents)
             ranked_ids = [item.document.evidence_id for item in found]
             relevant_ids = set(case["relevant_evidence_ids"])
+            rag_ids = ranked_ids[:recall_k]
+            rag_context_tokens = len(
+                tokenizer.encode(
+                    json.dumps(
+                        [
+                            documents_by_id[evidence_id].model_dump(mode="json")
+                            for evidence_id in rag_ids
+                        ],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            )
+            context_efficiency = _score_context_efficiency(
+                full_context_tokens=full_context_tokens,
+                rag_context_tokens=rag_context_tokens,
+                corpus_evidence_count=len(documents),
+                retrieved_evidence_count=len(rag_ids),
+                relevant_evidence_count=len(relevant_ids),
+                relevant_hit_count=len(set(rag_ids) & relevant_ids),
+            )
             scores = {
                 str(k): asdict(score_retrieval(ranked_ids, relevant_ids, k=k))
                 for k in RETRIEVAL_CUTOFFS
@@ -286,6 +419,7 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
                     "missing_relevant_at_recall_k": sorted(
                         relevant_ids - set(ranked_ids[:recall_k])
                     ),
+                    "context_efficiency": context_efficiency,
                     "metrics_by_k": scores,
                 }
             )
@@ -314,6 +448,7 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
         report for report in case_reports if "multi_relevant" in report["tags"]
     ]
     multi_relevant_metrics = _aggregate_at_k(multi_relevant_reports, recall_k)
+    context_efficiency = _aggregate_context_efficiency(case_reports, k=recall_k)
     checks = {
         f"hit_rate_at_{ranking_k}": ranking_metrics["hit_rate"]
         >= thresholds[f"minimum_hit_rate_at_{ranking_k}"],
@@ -333,6 +468,20 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
             "macro_recall"
         ]
         >= thresholds[f"minimum_multi_relevant_macro_recall_at_{recall_k}"],
+        f"mean_context_token_reduction_at_{recall_k}": context_efficiency[
+            "mean_context_token_reduction"
+        ]
+        >= thresholds[f"minimum_mean_context_token_reduction_at_{recall_k}"],
+        f"worst_case_context_token_reduction_at_{recall_k}": context_efficiency[
+            "worst_case_context_token_reduction"
+        ]
+        >= thresholds[f"minimum_worst_case_context_token_reduction_at_{recall_k}"],
+        f"mean_irrelevant_evidence_reduction_at_{recall_k}": context_efficiency[
+            "mean_irrelevant_evidence_reduction"
+        ]
+        >= thresholds[
+            f"minimum_mean_irrelevant_evidence_reduction_at_{recall_k}"
+        ],
     }
     summary = {
         "passed": all(checks.values()),
@@ -350,6 +499,7 @@ async def test_retrieval_quality_meets_golden_thresholds() -> None:
         "checks": checks,
         "metrics_by_k": metrics_by_k,
         "multi_relevant_metrics_at_recall_k": multi_relevant_metrics,
+        "context_efficiency_at_recall_k": context_efficiency,
         "intent_slices_at_recall_k": _slice_metrics(
             case_reports, field="intent", k=recall_k
         ),

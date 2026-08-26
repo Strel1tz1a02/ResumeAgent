@@ -5,23 +5,25 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.errors import ToolProtocolError
-from app.ai_chat.tools.operation import ToolOperation
-from app.ai_chat.tools.types import (
-    ToolContext,
-    ToolResult,
-)
 from app.ai_chat.types import JsonObject
-from app.experience.adapters.tool_context import (
+from app.experience.services.experience_ai_mutation_service import (
+    ExperienceAiMutationService,
+    PreparedExperienceChange,
+)
+from app.experience.tool_context import (
     evidence_generation_revision,
     experience_id,
     generation_revision,
     scope_field,
 )
-from app.experience.services.experience_ai_mutation_service import (
-    ExperienceAiMutationService,
-    PreparedExperienceChange,
+from app.workflow_runtime.errors import ToolProtocolError
+from app.workflow_runtime.tools import (
+    ToolContext,
+    ToolOperation,
+    ToolResult,
+    ToolRisk,
 )
 
 
@@ -81,6 +83,7 @@ class ContentChangeOperation(ToolOperation):
         "事实不明确时继续询问；每轮最多调用一次；不要在正文中重复建议内容。"
     )
     args_schema = ContentChangeArguments
+    risk = ToolRisk.MEDIUM
 
     async def prepare(
         self,
@@ -94,9 +97,10 @@ class ContentChangeOperation(ToolOperation):
             raise ToolProtocolError(
                 "Invalid arguments for tool content_change"
             ) from exc
-        session = context.session
-        if session is None:
-            raise RuntimeError("tool validation requires a shared transaction")
+        session = context.resources.require(
+            AsyncSession,
+            "tool validation requires a shared transaction",
+        )
         conversation_field = scope_field(context)
         start_revision = generation_revision(context)
         scope = values.scope
@@ -149,9 +153,10 @@ class ContentChangeOperation(ToolOperation):
         field = str(scope["field"])
         evidence_id = scope.get("evidence_id")
         suggested = prepared_data.get("suggested_content")
-        session = context.session
-        if session is None:
-            raise RuntimeError("tool execution requires a shared transaction")
+        session = context.resources.require(
+            AsyncSession,
+            "tool execution requires a shared transaction",
+        )
         service = ExperienceAiMutationService(session)
         if field == "evidence" and evidence_id is None:
             payload = await service.append_evidence(

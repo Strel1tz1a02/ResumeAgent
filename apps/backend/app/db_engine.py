@@ -68,6 +68,9 @@ def init_models_sync(engine: Engine) -> None:
     from app.scripts.migrate_ai_chat_conversation_scope import (
         migrate as migrate_ai_chat_conversation_scope,
     )
+    from app.scripts.migrate_ai_chat_conversation_workflow import (
+        migrate as migrate_ai_chat_conversation_workflow,
+    )
     from app.scripts.migrate_ai_chat_memory_background import (
         migrate as migrate_ai_chat_memory_background,
     )
@@ -124,6 +127,7 @@ def init_models_sync(engine: Engine) -> None:
     migrate_ai_chat_interaction_payload(engine)
     migrate_ai_chat_conversation_scope(engine)
     migrate_experience_chat_scope_field(engine)
+    migrate_ai_chat_conversation_workflow(engine)
     migrate_ai_chat_memory_background(engine)
     migrate_remove_ai_chat_run_result(engine)
     migrate_jd_import_origin(engine)

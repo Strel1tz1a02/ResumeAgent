@@ -8,7 +8,7 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.ai_chat.context import ContextAssembler
+from app.workflow_runtime.context import ContextAssembler
 from app.jd_import.agent.prompts import (
     EXTRACTION_PROMPT,
     SYSTEM_PROMPT,

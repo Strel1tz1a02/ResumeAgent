@@ -10,7 +10,7 @@ from typing import Any, Protocol, TypedDict, TypeVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from app.ai_chat.context import ContextAssembler
+from app.workflow_runtime.context import ContextAssembler
 from app.llm import complete_json
 from app.resume_generation.retriever import tokenize
 from app.resume_generation.schemas import (

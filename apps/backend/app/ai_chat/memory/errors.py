@@ -1,10 +1,8 @@
-"""Memory 模块内部错误；不扩展外部聊天错误协议。"""
+"""Conversation Memory 自身的压缩错误。"""
 
+from app.workflow_runtime.errors import ContextFullError
 
-class MemoryContextFullError(RuntimeError):
-    """固定上下文、Memory 或单个 Run 超出输入预算。"""
-
-    code = "context_full"
+MemoryContextFullError = ContextFullError
 
 
 class MemoryCompactionError(RuntimeError):

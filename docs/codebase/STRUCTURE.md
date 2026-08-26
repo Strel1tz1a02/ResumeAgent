@@ -24,61 +24,82 @@
 - 前端主入口：apps/frontend/app/；Next.js 脚本位于 apps/frontend/package.json。
 - 后台进程：apps/backend/app/ai_chat/memory/worker.py 与 apps/backend/app/resume_generation/index_worker.py；Compose 以 ARQ worker 启动。
 - 数据库初始化/迁移入口：apps/backend/app/db_engine.py；启动时执行幂等 SQL 迁移，没有 Alembic 目录。
-- Agent composition root：apps/backend/app/main.py 注册 ExperienceAdapter 与 JDImportAdapter；Resume Generation 仍由独立 router/service 入口管理。
+- Agent composition root：apps/backend/app/main.py 注册 ExperienceWorkflow 与 JDImportWorkflow；Resume Generation 仍由独立 router/service 入口管理。
 
 ## 3) 模块边界
 
 | 边界 | 应拥有 | 不应拥有 |
 |------|--------|----------|
-| app/ai_chat/protocol.py、graph/driver.py、run_state.py、streaming/、context/ | 通用命令、事件、Graph 执行端口、Run 状态规则、上下文组装 | Experience/JD/Resume 的节点、字段与业务校验 |
-| app/ai_chat/services/ai_chat_service.py | 对话型 Runtime 编排、持久化后发事件、恢复与幂等协调 | 直接导入业务 graph 或识别业务 checkpoint key |
-| app/ai_chat/adapters/ | 业务 Graph 插件契约与注册 | 具体业务拓扑 |
+| app/workflow_runtime/ | 可按需组合的 Graph、Run、InteractionCoordinator、中断恢复、事件、模型上下文、Tool 生命周期/持久化端口与内存 Store | Conversation 持久化、HTTP/SSE、具体业务语义 |
+| app/ai_chat/services/conversation_service.py | Conversation 入口：创建、用户/模型轮次、关闭与删除 | Interaction 恢复或被一次性 Workflow 依赖 |
+| app/ai_chat/services/conversation_execution.py | ConversationService 私有的新轮次协调器：Run、消息与幂等编排 | Interaction resolve/recover/resume 或对 Router 暴露第二套服务入口 |
+| app/ai_chat/workflow.py + app/workflow_runtime/graph/catalog.py | 对话 Workflow 契约与唯一 Workflow 目录 | 具体业务拓扑 |
 | app/experience/ | 经历修订、证据、审批 Graph 与领域工具 | Runtime 生命周期写入规则 |
 | app/jd_import/ | JD 来源、抽取、澄清问题、落库 Graph | Runtime 事件协议 |
 | app/resume_generation/ | 简历计划、检索、生成、产物状态 | 将 previewed/confirmed 混入通用 Run 状态 |
-| app/ai_chat/repositories/、各领域 repository | 持久化与 CAS | HTTP/SSE 序列化 |
+| app/ai_chat/persistence/ | Conversation 对 ToolCallStore、InteractionStore 的 SQLAlchemy 实现 | Tool/Interaction 生命周期算法或业务 Graph |
+| app/ai_chat/repositories/、各领域 repository | Conversation/领域持久化与 CAS | HTTP/SSE 序列化 |
 | apps/frontend/lib/api/ | transport、统一 Runtime SSE envelope 解析 | 页面展示状态 |
 | apps/frontend/components/ | 领域事件投影与 UI 交互 | 重复实现 SSE envelope parser |
 
-边界测试 apps/backend/tests/unit/test_agent_runtime_boundaries.py 禁止 Runtime 反向导入 Experience/JD/Resume，也禁止业务事件名和 checkpoint 私有 key 回流到 Runtime。
+边界测试 apps/backend/tests/unit/test_agent_runtime_boundaries.py 禁止 workflow_runtime 反向导入 Conversation 或具体业务，也禁止业务事件名和 checkpoint 私有 key 回流到对话编排。
 
 ## 4) Agent Runtime 深层地图
 
 ~~~text
 HTTP router
-  -> AiChatService
-     -> AdapterRegistry -> business Adapter -> business Graph
-     -> GraphRunner -> GraphDriver -> RuntimeEvent | GraphOutcome
-     -> RunLifecycleService / RunStateMachine
+  ├-> ConversationService
+     -> WorkflowCatalog.get -> ConversationWorkflow -> Workflow
+     -> CheckpointedWorkflowExecutor.stream(thread_id=run_id) -> GraphExecutor
+     -> Workflow.init_state -> Business Graph
+     -> ToolLifecycleService -> ToolCallStore port -> SQLAlchemy implementation
+     -> ConversationTurnCoordinator / ConversationRunWriter / RunStateMachine
      -> RunRepository + ToolCallStore + LangGraph checkpoint
+  └-> InteractionCoordinator
+     -> Workflow.resolve_interaction -> ToolLifecycle
+     -> InteractionStore port -> ConversationInteractionStore
+     -> GraphExecutor recover/resume -> RunStateMachine
   -> runtime_sse_response
   -> frontend parseRuntimeSse
+
+one-shot workflow
+  -> 按需组合 GraphExecutor / RunStateMachine / ContextAssembler / RuntimeEvent
+  -> ToolLifecycleService + InMemoryToolCallStore（或自定义 Store）
+  -> 不依赖 ConversationService
 ~~~
 
-- 首次输入：app/ai_chat/types/adapter_input.py。
-- 外部解决等待：app/ai_chat/protocol.py 的 ResolveInteractionCommand。
+- 每轮输入：app/ai_chat/types/conversation_input.py；新输入创建新 Run 与独立 checkpoint。
+- 外部解决等待：app/workflow_runtime/protocol.py 的 ResolveInteractionCommand。
 - checkpoint 唤醒：同文件的 GraphResumeCommand，只含 run_id 与 interaction_id。
-- 图执行：app/ai_chat/graph/driver.py 与 runner.py。
-- 对话生命周期原子收口：app/ai_chat/services/run_lifecycle.py。
-- 统一模型上下文：app/ai_chat/context/assembler.py。
-- 统一事件与 SSE：app/ai_chat/streaming/events.py、sse.py。
+- 图执行：app/workflow_runtime/graph/driver.py 与 runner.py。
+- Workflow 状态：业务实现 `init_state()`，每个新 Run 初始化一次；Interaction resume 只恢复同一 Run checkpoint。
+- Conversation 多轮：ConversationService、Run/Message 持久化和 MemoryService 共同负责，不存在 ConversationGraph。
+- Tool 风险：由具体 `ToolOperation.risk` 声明，审批策略只负责路由规则与展示载荷。
+- Tool 保存：`workflow_runtime/tools/persistence.py` 定义端口；Runtime 提供内存实现，Conversation 在 `ai_chat/persistence/` 注入 SQLAlchemy 实现。
+- Conversation 生命周期：app/ai_chat/services/conversation_service.py。
+- Interaction 固化与恢复：app/workflow_runtime/interactions.py；Conversation 只实现 app/ai_chat/persistence/interaction_store.py。
+- Conversation 新 Run 原子收口：app/ai_chat/services/conversation_run_writer.py。
+- 统一模型上下文：app/workflow_runtime/context.py。
+- 通用事件：app/workflow_runtime/events.py；Conversation SSE：app/ai_chat/streaming/sse.py。
 
 ## 5) 命名与组织规则
 
 - Python 文件、函数、变量使用 snake_case；类/协议使用 PascalCase；测试使用 test_*.py。
 - TypeScript 组件文件多用 kebab-case，组件/类型用 PascalCase；测试使用 *.test.ts 或 *.test.tsx。
-- 后端按领域 + 层混合组织：experience/adapters、graph、repositories、routers、services。
+- 后端按领域 + 层混合组织：experience/workflow.py、graph、repositories、routers、services。
 - 前端按 App Router 页面 + components/lib API 分层。
 - TypeScript 使用 @/* -> 项目根的路径别名，见 apps/frontend/tsconfig.json。
-- Python 使用 app.* 绝对导入；通用 Runtime 目前仍物理位于 app.ai_chat 下，这是命名/包边界债务。
+- Python 使用 app.* 绝对导入；业务直接导入所需的 app.workflow_runtime 能力，不注入 Runtime 聚合对象。
 
 ## 6) Evidence
 
 - docs/codebase/.codebase-scan.txt
 - apps/backend/app/main.py
-- apps/backend/app/ai_chat/adapters/base.py
-- apps/backend/app/ai_chat/graph/runner.py
-- apps/backend/app/ai_chat/graph/driver.py
+- apps/backend/app/ai_chat/workflow.py
+- apps/backend/app/workflow_runtime/graph/catalog.py
+- apps/backend/app/workflow_runtime/graph/runner.py
+- apps/backend/app/workflow_runtime/graph/driver.py
+- apps/backend/app/ai_chat/services/conversation_execution.py
 - apps/backend/tests/unit/test_agent_runtime_boundaries.py
 - apps/frontend/tsconfig.json
 - docker-compose.yml

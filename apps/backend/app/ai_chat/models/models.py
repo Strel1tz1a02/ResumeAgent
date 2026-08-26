@@ -31,7 +31,7 @@ class AiChatConversation(Base):
     __tablename__ = "ai_chat_conversations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    adapter: Mapped[str] = mapped_column(String(160), index=True)
+    workflow_name: Mapped[str] = mapped_column(String(160), index=True)
     subject: Mapped[dict[str, Any]] = mapped_column(JSON)
     scope: Mapped[dict[str, Any]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
@@ -123,13 +123,15 @@ class AiChatMessage(Base):
 
 
 class AiChatToolCall(Base):
-    """持久化工具调用，以及可选的交互载荷、决定和工具结果。"""
+    """SQLAlchemy 后端持久化的通用 Workflow 工具调用。"""
 
     __tablename__ = "ai_chat_tool_calls"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    conversation_id: Mapped[int] = mapped_column(
-        ForeignKey("ai_chat_conversations.id", ondelete="CASCADE"), index=True
+    thread_id: Mapped[int] = mapped_column(
+        "conversation_id",
+        ForeignKey("ai_chat_conversations.id", ondelete="CASCADE"),
+        index=True,
     )
     run_id: Mapped[int] = mapped_column(
         ForeignKey("ai_chat_runs.id", ondelete="CASCADE"), index=True

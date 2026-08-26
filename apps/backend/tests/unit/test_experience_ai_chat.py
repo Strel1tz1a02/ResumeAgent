@@ -11,38 +11,21 @@ from typing import get_type_hints
 
 import pytest
 from langchain_core.messages import AIMessageChunk
-from app.ai_chat.adapters import AdapterRegistry
+from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.ai_chat.checkpoint import CheckpointLifecycle
-from app.ai_chat.context import ContextAssembler
-from app.ai_chat.errors import (
-    IdempotencyConflictError,
-    InteractionStateError,
-    RunInProgressError,
-    ToolProtocolError,
-)
-from app.ai_chat.graph import GraphRecovery, LangGraphDriver
-from app.ai_chat.graph.runner import GraphRunner
-from app.ai_chat.graph.runtime import AiChatRuntime
-from app.ai_chat.protocol import (
-    GraphOutcome,
-    InteractionRequest,
-    ResolveInteractionCommand,
+from app.ai_chat.persistence import (
+    ConversationInteractionStore,
+    SqlAlchemyToolCallStore,
+    ToolCallRepository,
 )
 from app.ai_chat.repositories import RepositoryFactory
 from app.ai_chat.repositories.run_repository import RunRepository
-from app.ai_chat.services import AiChatService, ToolService
-from app.ai_chat.tools.store import ToolCallStore
-from app.ai_chat.streaming.compatibility import DsmlToolCallFallback
-from app.ai_chat.streaming.events import RuntimeEvent, tool_result_event
-from app.ai_chat.tools.approval import ToolApprovalPolicy, ToolRisk
-from app.ai_chat.tools.operation import RegisteredTool
-from app.ai_chat.tools.types import (
-    ToolContext,
-    ToolResult,
-)
+from app.ai_chat.services import ConversationService
 from app.ai_chat.types import ScopeRef, SubjectRef
 from app.database import Database
-from app.experience import ExperienceAdapter
+from app.experience import ExperienceWorkflow
 from app.experience.graph import ExperienceState, build_experience_graph
 from app.experience.graph.builder import _durable_call
 from app.experience.prompts.ai_chat import system_prompt
@@ -84,8 +67,36 @@ from app.scripts.migrate_unified_experience_revision_units import (
 from app.scripts.migrate_unified_experience_revision_units import (
     migrate as migrate_unified_revision_units,
 )
-from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.workflow_runtime import InteractionCoordinator, WorkflowCatalog
+from app.workflow_runtime.compatibility import DsmlToolCallFallback
+from app.workflow_runtime.context import ContextAssembler
+from app.workflow_runtime.errors import (
+    IdempotencyConflictError,
+    InteractionStateError,
+    RunInProgressError,
+    ToolProtocolError,
+)
+from app.workflow_runtime.events import RuntimeEvent, tool_result_event
+from app.workflow_runtime.graph import (
+    CheckpointedWorkflowExecutor,
+    GraphRecovery,
+    LangGraphExecutor,
+)
+from app.workflow_runtime.model import ModelClient
+from app.workflow_runtime.protocol import (
+    GraphOutcome,
+    InteractionRequest,
+    ResolveInteractionCommand,
+)
+from app.workflow_runtime.tools import (
+    RegisteredTool,
+    ToolApprovalPolicy,
+    ToolContext,
+    ToolLifecycleService,
+    ToolResources,
+    ToolResult,
+    ToolRisk,
+)
 
 
 class _UnusedModel:
@@ -104,7 +115,30 @@ def _context() -> ContextAssembler:
 
 
 def _tool_service(session_factory, repositories):  # type: ignore[no-untyped-def]
-    return ToolService(ToolCallStore(session_factory, repositories))
+    return ToolLifecycleService(SqlAlchemyToolCallStore(session_factory))
+
+
+def _conversation_service(
+    catalog, runner, repositories, session_factory, tools
+):  # type: ignore[no-untyped-def]
+    return ConversationService(
+        catalog.get,
+        repositories,
+        session_factory,
+        runner,
+        tools,
+    )
+
+
+def _interaction_coordinator(
+    catalog, runner, repositories, session_factory, tools
+):  # type: ignore[no-untyped-def]
+    return InteractionCoordinator(
+        catalog.get,
+        runner,
+        tools,
+        ConversationInteractionStore(session_factory, repositories),
+    )
 
 
 def _model_context():  # type: ignore[no-untyped-def]
@@ -156,6 +190,8 @@ class _ConversationModel:
 class _LowRiskContentChangeOperation(ContentChangeOperation):
     """只用于验证 guard 的直接执行分支。"""
 
+    risk = ToolRisk.LOW
+
 class _FailingContentChangeOperation(ContentChangeOperation):
     """记录真实 Handler 入口，并按配置制造 executor 瞬时失败。"""
 
@@ -201,11 +237,13 @@ class _GraphHarness:
     """真实数据库、检查点器与图的测试装配。"""
 
     experience_id: int
-    adapter: ExperienceAdapter
+    workflow: ExperienceWorkflow
     repositories: RepositoryFactory
     checkpoints: CheckpointLifecycle
-    runner: GraphRunner
-    service: AiChatService
+    runner: CheckpointedWorkflowExecutor
+    tools: ToolLifecycleService
+    conversations: ConversationService
+    interactions: InteractionCoordinator
     conversation_id: int
 
 
@@ -219,33 +257,54 @@ async def _start_graph_harness(
         created = await ExperienceService(session).create(
             ExperienceCreate(title="恢复验证", background="旧背景")
         )
-    adapter = ExperienceAdapter()
+    workflow = ExperienceWorkflow()
     if handler is not None:
-        adapter._tools = {handler.name: RegisteredTool(handler)}
-    registry = AdapterRegistry()
-    registry.register(adapter)
+        workflow._tools = {handler.name: RegisteredTool(handler)}
+    catalog = WorkflowCatalog()
+    catalog.register(workflow)
     repositories = RepositoryFactory()
     checkpoints = CheckpointLifecycle(checkpoint_path)
     saver = await checkpoints.start()
-    runtime = AiChatRuntime(
-        _ConversationModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, repositories),
-        _context(),
+    tools = _tool_service(isolated_db.session, repositories)
+    model = ModelClient(
+        context=_context(),
+        model=_ConversationModel(),  # type: ignore[arg-type]
     )
-    runner = GraphRunner(registry, saver, runtime)
-    service = AiChatService(registry, runner, repositories)
-    conversation_id = await service.create_conversation(
-        "ExperienceAdapter",
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        saver,
+        model,
+        tools,
+        thread_namespace="ai-chat",
+    )
+    conversations = _conversation_service(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
+    interactions = _interaction_coordinator(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
+    conversation_id = await conversations.create(
+        "ExperienceWorkflow",
         {"type": "experience", "id": str(created.experience_id)},
         {"field": "background"},
     )
     return _GraphHarness(
         experience_id=created.experience_id,
-        adapter=adapter,
+        workflow=workflow,
         repositories=repositories,
         checkpoints=checkpoints,
         runner=runner,
-        service=service,
+        tools=tools,
+        conversations=conversations,
+        interactions=interactions,
         conversation_id=conversation_id,
     )
 
@@ -253,7 +312,7 @@ async def _start_graph_harness(
 async def _request_proposal(harness: _GraphHarness, message_id: str) -> int:
     events = [
         event
-        async for event in harness.service.stream_message(
+        async for event in harness.conversations.stream_message(
             harness.conversation_id,
             "请改写背景",
             message_id,
@@ -268,7 +327,7 @@ async def _interaction_run_id(harness: _GraphHarness, interaction_id: int) -> in
     from app import database as database_module
 
     async with database_module.db.session() as session:
-        row = await harness.repositories.create(session).tool_calls.get(interaction_id)
+        row = await ToolCallRepository(session).get(interaction_id)
     assert row is not None
     return row.run_id
 
@@ -280,7 +339,7 @@ async def _resolve_approval(
     resolution_id: str,
 ):  # type: ignore[no-untyped-def]
     run_id = await _interaction_run_id(harness, interaction_id)
-    async for event in harness.service.resolve_interaction(
+    async for event in harness.interactions.resolve(
         ResolveInteractionCommand(
             run_id=run_id,
             interaction_id=interaction_id,
@@ -363,12 +422,12 @@ async def test_content_change_routes_field_proposal_and_apply(
         )
     state = next(item for item in created.field_states if item.key == "background")
     context = ToolContext(
-        conversation_id=1,
+        thread_id=1,
         run_id=1,
         tool_call_id=1,
         subject={"type": "experience", "id": str(created.experience_id)},
         scope={"field": "background"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {
                 "scope": "field",
                 "revision": state.revision,
@@ -382,14 +441,14 @@ async def test_content_change_routes_field_proposal_and_apply(
     )
     async with isolated_db.session() as session:
         prepared_data = await handler.prepare(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             arguments.model_dump(mode="json"),
         )
     assert isinstance(prepared_data, dict)
     assert prepared_data["current_content"] == "旧背景"
     async with isolated_db.session() as session:
         result = await handler.execute(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             prepared_data,
         )
         await session.commit()
@@ -419,11 +478,11 @@ async def test_change_validation_is_owned_by_service(isolated_db) -> None:
 async def test_handler_validation_rejects_invalid_model_arguments() -> None:
     """模型参数由目标 Handler 自己解析，未知字段不能进入 Graph guard。"""
     context = ToolContext(
-        conversation_id=1,
+        thread_id=1,
         run_id=1,
         subject={"type": "experience", "id": "1"},
         scope={"field": "background"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {"scope": "field", "revision": 0},
         },
     )
@@ -439,18 +498,18 @@ async def test_handler_validation_rejects_invalid_model_arguments() -> None:
 
 
 async def test_handler_validation_requires_shared_session(isolated_db) -> None:
-    """合法模型参数也不能绕过 ToolService 注入的共享事务。"""
+    """合法模型参数也不能绕过 ToolLifecycle 注入的共享事务。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
             ExperienceCreate(title="共享事务", background="旧背景")
         )
     state = next(item for item in created.field_states if item.key == "background")
     context = ToolContext(
-        conversation_id=1,
+        thread_id=1,
         run_id=1,
         subject={"type": "experience", "id": str(created.experience_id)},
         scope={"field": "background"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {"scope": "field", "revision": state.revision}
         },
     )
@@ -493,18 +552,18 @@ async def test_content_change_routes_by_requested_scope(
         prepare_field_change,
     )
     context = ToolContext(
-        conversation_id=1,
+        thread_id=1,
         run_id=1,
         tool_call_id=1,
         subject={"type": "experience", "id": "1"},
         scope={"field": "background"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {"scope": "field", "revision": 0},
         },
     )
     async with isolated_db.session() as session:
         result = await ContentChangeOperation().prepare(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             ContentChangeArguments(
                 scope={"field": "evidence", "evidence_id": None},
                 suggested_content={
@@ -529,12 +588,12 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
         item for item in created.field_states if item.key == "evidence_new"
     )
     context = ToolContext(
-        conversation_id=2,
+        thread_id=2,
         run_id=2,
         tool_call_id=2,
         subject={"type": "experience", "id": str(created.experience_id)},
         scope={"field": "evidence"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {
                 "scope": "evidence",
                 "collection_revision": collection.revision,
@@ -553,13 +612,13 @@ async def test_content_change_routes_evidence_append(isolated_db) -> None:
     handler = ContentChangeOperation()
     async with isolated_db.session() as session:
         prepared_data = await handler.prepare(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             arguments.model_dump(mode="json"),
         )
     assert isinstance(prepared_data, dict)
     async with isolated_db.session() as session:
         result = await handler.execute(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             prepared_data,
         )
         await session.commit()
@@ -602,12 +661,12 @@ async def test_content_change_overwrites_one_complete_evidence_item(
         if state.key == "action" and state.ref_id == first.id
     )
     context = ToolContext(
-        conversation_id=3,
+        thread_id=3,
         run_id=3,
         tool_call_id=3,
         subject={"type": "experience", "id": str(created.experience_id)},
         scope={"field": "evidence"},
-        adapter_context={
+        workflow_context={
             "revision_snapshot": {
                 "scope": "evidence",
                 "collection_revision": 2,
@@ -626,13 +685,13 @@ async def test_content_change_overwrites_one_complete_evidence_item(
     handler = ContentChangeOperation()
     async with isolated_db.session() as session:
         prepared_data = await handler.prepare(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             arguments.model_dump(mode="json"),
         )
     assert isinstance(prepared_data, dict)
     async with isolated_db.session() as session:
         result = await handler.execute(
-            replace(context, session=session),
+            replace(context, resources=ToolResources((session,))),
             prepared_data,
         )
         await session.commit()
@@ -651,8 +710,8 @@ async def test_content_change_overwrites_one_complete_evidence_item(
     assert unchanged_second.model_dump() == second.model_dump()
 
 
-async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> None:
-    """EvidenceAdapter 为共享会话一次加载全部 Item 和各自 revision。"""
+async def test_workflow_builds_one_evidence_collection_context(isolated_db) -> None:
+    """ExperienceWorkflow 为共享会话一次加载全部 Item 和各自 revision。"""
     async with isolated_db.session() as session:
         created = await ExperienceService(session).create(
             ExperienceCreate(title="Agent")
@@ -673,12 +732,12 @@ async def test_adapter_builds_one_evidence_collection_context(isolated_db) -> No
         for state in detail.field_states
         if state.key == "action" and state.ref_id == evidence.id
     )
-    adapter = ExperienceAdapter()
-    binding = await adapter.validate_request(
+    workflow = ExperienceWorkflow()
+    binding = await workflow.validate_request(
         SubjectRef(type="experience", id=str(created.experience_id)),
         ScopeRef.model_validate({"field": "evidence"}),
     )
-    state = await adapter.parse_input(
+    state = await workflow.init_state(
         {
             "conversation_id": 10,
             "run_id": 10,
@@ -705,14 +764,16 @@ async def test_graph_separates_validator_guard_approval_and_executor(
     isolated_db,
 ) -> None:
     """经历 Graph 将校验、风险分流、人工暂停和执行分开。"""
-    adapter = ExperienceAdapter()
-    runtime = AiChatRuntime(
-        _UnusedModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, RepositoryFactory()),
-        _context(),
-    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    graph = adapter.build_graph(runtime)
-    assert tuple(adapter.get_tools()) == ("content_change",)
+    workflow = ExperienceWorkflow()
+    tools = _tool_service(isolated_db.session, RepositoryFactory()).bind_tools(
+        workflow.get_tools(), workflow.get_tool_approval_policy()
+    )
+    model = ModelClient(
+        context=_context(),
+        model=_UnusedModel(),  # type: ignore[arg-type]
+    )
+    graph = workflow.build_graph(model, tools)
+    assert tuple(workflow.get_tools()) == ("content_change",)
     assert set(graph.nodes) == {
         "llm",
         "validator",
@@ -737,16 +798,16 @@ def test_experience_graph_delegates_tool_state_to_tool_service() -> None:
         assert forbidden not in source
 
 
-def test_approval_service_owns_risk_routing() -> None:
-    """工具不声明风险，由审批服务接收完整调用并决定路由。"""
-    call = {"name": "content_change"}  # type: ignore[typeddict-item]
+def test_tool_defines_risk_and_policy_only_routes_it() -> None:
+    """风险属于工具定义；审批策略只把风险映射为执行路径。"""
+    policy = ToolApprovalPolicy()
     for risk, expected in (
         (ToolRisk.LOW, "execute"),
         (ToolRisk.MEDIUM, "approval"),
         (ToolRisk.HIGH, "approval"),
     ):
-        service = ToolApprovalPolicy({"content_change": risk})
-        assert service.route(call) == expected  # type: ignore[arg-type]
+        assert policy.route(risk) == expected
+    assert RegisteredTool(ContentChangeOperation()).risk is ToolRisk.MEDIUM
 
 
 async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
@@ -756,7 +817,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
     async with isolated_db.session() as session:
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="ExperienceAdapter",
+            workflow_name="ExperienceWorkflow",
             subject={"type": "experience", "id": "1"},
             scope={"field": "background"},
             language="zh",
@@ -766,15 +827,16 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
             kind="user_turn",
             tools_enabled=True,
         )
-        row = await repositories.tool_calls.create(
-            conversation_id=conversation.id,
+        tool_calls = ToolCallRepository(session)
+        row = await tool_calls.create(
+            thread_id=conversation.id,
             run_id=run.id,
             tool_call_index=0,
             provider_tool_call_id="security-drift",
             tool_name="content_change",
             arguments={},
         )
-        assert await repositories.tool_calls.save_validation(
+        assert await tool_calls.save_validation(
             row,
             interaction_payload={"suggested_content": "新背景"},
             guard_payload={"trusted": True},
@@ -790,17 +852,15 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
                 _LowRiskContentChangeOperation()
             )
         },
-        ToolApprovalPolicy({"content_change": ToolRisk.LOW}),
+        ToolApprovalPolicy(),
     )
     checkpoint_call = await low_service.get_call(row.id)
     checkpoint_call["should_execute"] = True
-    medium_runtime = AiChatRuntime(
-        _UnusedModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, RepositoryFactory()),
-        _context(),
+    medium_tools = _tool_service(
+        isolated_db.session, RepositoryFactory()
     ).bind_tools(
         {"content_change": RegisteredTool(ContentChangeOperation())},
-        ToolApprovalPolicy({"content_change": ToolRisk.MEDIUM}),
+        ToolApprovalPolicy(),
     )
     state = ExperienceState(
         conversation_id=conversation.id,
@@ -815,7 +875,7 @@ async def test_recovery_does_not_reuse_low_risk_route_after_security_increase(
         tool_call=checkpoint_call,
     )
 
-    restored = await _durable_call(state, medium_runtime)
+    restored = await _durable_call(state, medium_tools)
 
     assert restored["should_execute"] is None
 
@@ -828,7 +888,7 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
         )
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="ExperienceAdapter",
+            workflow_name="ExperienceWorkflow",
             subject={"type": "experience", "id": str(created.experience_id)},
             scope={"field": "background"},
             language="zh",
@@ -843,15 +903,15 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
         item.revision for item in created.field_states if item.key == "background"
     )
     handler = _LowRiskContentChangeOperation()
-    runtime = AiChatRuntime(
-        _ConversationModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, RepositoryFactory()),
-        _context(),
-    ).bind_tools(
-        {handler.name: RegisteredTool(handler)},
-        ToolApprovalPolicy({handler.name: ToolRisk.LOW}),
+    model = ModelClient(
+        context=_context(),
+        model=_ConversationModel(),  # type: ignore[arg-type]
     )
-    graph = build_experience_graph(runtime).compile()
+    tools = _tool_service(isolated_db.session, RepositoryFactory()).bind_tools(
+        {handler.name: RegisteredTool(handler)},
+        ToolApprovalPolicy(),
+    )
+    graph = build_experience_graph(model, tools).compile()
     parts = [
         part
         async for part in graph.astream(
@@ -876,7 +936,7 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
     events = [
         item
         for part in parts
-        if isinstance((item := LangGraphDriver.normalize(part)), RuntimeEvent)
+        if isinstance((item := LangGraphExecutor.normalize(part)), RuntimeEvent)
     ]
     assert not any(event.type == "interaction.requested" for event in events)
     assert any(
@@ -886,11 +946,7 @@ async def test_low_security_tool_executes_without_approval(isolated_db) -> None:
     )
     async with isolated_db.session() as session:
         detail = await ExperienceService(session).get(created.experience_id)
-        row = (
-            await RepositoryFactory()
-            .create(session)
-            .tool_calls.get_by_run_index(run.id, 0)
-        )
+        row = await ToolCallRepository(session).get_by_run_index(run.id, 0)
     assert detail.background == "新背景"
     assert row is not None
     assert row.status == "resolved"
@@ -906,7 +962,7 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
         )
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="ExperienceAdapter",
+            workflow_name="ExperienceWorkflow",
             subject={"type": "experience", "id": str(created.experience_id)},
             scope={"field": "background"},
             language="zh",
@@ -920,13 +976,15 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
     revision = next(
         item.revision for item in created.field_states if item.key == "background"
     )
-    adapter = ExperienceAdapter()
-    runtime = AiChatRuntime(
-        _ConversationModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, RepositoryFactory()),
-        _context(),
-    ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-    graph = build_experience_graph(runtime).compile()
+    workflow = ExperienceWorkflow()
+    model = ModelClient(
+        context=_context(),
+        model=_ConversationModel(),  # type: ignore[arg-type]
+    )
+    tools = _tool_service(isolated_db.session, RepositoryFactory()).bind_tools(
+        workflow.get_tools(), workflow.get_tool_approval_policy()
+    )
+    graph = build_experience_graph(model, tools).compile()
     state = ExperienceState(
         conversation_id=conversation.id,
         run_id=run.id,
@@ -947,7 +1005,7 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
         )
     ]
     assert any(
-        isinstance((item := LangGraphDriver.normalize(part)), RuntimeEvent)
+        isinstance((item := LangGraphExecutor.normalize(part)), RuntimeEvent)
         and item.type == "result.available"
         and item.payload.get("outcome") == "no_change"
         and isinstance(item.payload.get("tool_call_id"), int)
@@ -956,7 +1014,7 @@ async def test_graph_emits_validation_terminal_result(isolated_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generic_service_forwards_graph_result_without_assistant_continuation(
+async def test_conversation_forwards_graph_result_without_assistant_continuation(
     isolated_db,
 ) -> None:
     """审批恢复只转发业务结果，不创建虚假的助手续答。"""
@@ -964,18 +1022,28 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
         created = await ExperienceService(session).create(
             ExperienceCreate(title="工具续答验证")
         )
-    adapter = ExperienceAdapter()
-    registry = AdapterRegistry()
-    registry.register(adapter)
+    workflow = ExperienceWorkflow()
+    catalog = WorkflowCatalog()
+    catalog.register(workflow)
     repositories = RepositoryFactory()
     runner = _ResultOnlyResumeRunner()
-    service = AiChatService(
-        registry,
+    tools = _tool_service(isolated_db.session, repositories)
+    conversations = _conversation_service(
+        catalog,
         runner,  # type: ignore[arg-type]
         repositories,
+        isolated_db.session,
+        tools,
     )
-    conversation_id = await service.create_conversation(
-        "ExperienceAdapter",
+    interactions = _interaction_coordinator(
+        catalog,
+        runner,  # type: ignore[arg-type]
+        repositories,
+        isolated_db.session,
+        tools,
+    )
+    conversation_id = await conversations.create(
+        "ExperienceWorkflow",
         {"type": "experience", "id": str(created.experience_id)},
         {"field": "background"},
     )
@@ -991,8 +1059,9 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
             from_statuses={"running"},
             to_status="suspended",
         )
-        call = await repos.tool_calls.create(
-            conversation_id=conversation_id,
+        tool_calls = ToolCallRepository(session)
+        call = await tool_calls.create(
+            thread_id=conversation_id,
             run_id=run.id,
             tool_call_index=0,
             provider_tool_call_id="future-tool-call",
@@ -1002,19 +1071,19 @@ async def test_generic_service_forwards_graph_result_without_assistant_continuat
                 "suggested_content": "不会被应用",
             },
         )
-        assert await repos.tool_calls.save_validation(
+        assert await tool_calls.save_validation(
             call,
             interaction_payload={"suggested_content": "不会被应用"},
             guard_payload={},
         )
-        assert await repos.tool_calls.claim_approval_request(call.id)
+        assert await tool_calls.claim_approval_request(call.id)
         await session.commit()
         proposal_id = call.id
         runner.proposal_id = proposal_id
 
     events = [
         event
-        async for event in service.resolve_interaction(
+        async for event in interactions.resolve(
             ResolveInteractionCommand(
                 run_id=run.id,
                 interaction_id=proposal_id,
@@ -1053,7 +1122,7 @@ def test_experience_state_and_tool_description_have_separate_roles() -> None:
     )
     handler = ContentChangeOperation()
     assert state["revision_snapshot"]["revision"] == 0
-    assert ExperienceAdapter().get_tool_approval_policy().risk(handler.name) is ToolRisk.MEDIUM
+    assert ExperienceWorkflow().get_tools()[handler.name].risk is ToolRisk.MEDIUM
     assert "suggested_content" in handler.description
     assert "content_change" not in system_prompt("zh", "background")
 
@@ -1120,7 +1189,7 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         )
         repositories = RepositoryFactory().create(session)
         conversation = await repositories.conversations.create(
-            adapter="ExperienceAdapter",
+            workflow_name="ExperienceWorkflow",
             subject={"type": "experience", "id": str(created.experience_id)},
             scope={"field": "background"},
             language="zh",
@@ -1148,13 +1217,15 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
     )
 
     async def requested_id(provider_id: str) -> int:
-        adapter = ExperienceAdapter()
-        runtime = AiChatRuntime(
-            _ConversationModel(provider_id),  # type: ignore[arg-type]
-            _tool_service(isolated_db.session, RepositoryFactory()),
-            _context(),
-        ).bind_tools(adapter.get_tools(), adapter.get_tool_approval_policy())
-        graph = build_experience_graph(runtime).compile()
+        workflow = ExperienceWorkflow()
+        model = ModelClient(
+            context=_context(),
+            model=_ConversationModel(provider_id),  # type: ignore[arg-type]
+        )
+        tools = _tool_service(isolated_db.session, RepositoryFactory()).bind_tools(
+            workflow.get_tools(), workflow.get_tool_approval_policy()
+        )
+        graph = build_experience_graph(model, tools).compile()
         parts = [
             part
             async for part in graph.astream(
@@ -1166,7 +1237,7 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
         outcome = next(
             item
             for part in parts
-            if isinstance((item := LangGraphDriver.normalize(part)), GraphOutcome)
+            if isinstance((item := LangGraphExecutor.normalize(part)), GraphOutcome)
         )
         assert outcome.interaction is not None
         return outcome.interaction.interaction_id
@@ -1175,11 +1246,7 @@ async def test_validator_reuses_run_index_when_provider_id_changes(
     replay_id = await requested_id("retry-generated-id")
     assert replay_id == first_id
     async with isolated_db.session() as session:
-        row = (
-            await RepositoryFactory()
-            .create(session)
-            .tool_calls.get_by_run_index(run.id, 0)
-        )
+        row = await ToolCallRepository(session).get_by_run_index(run.id, 0)
     assert row is not None
     assert row.id == first_id
     assert row.provider_tool_call_id == "first-provider-id"
@@ -1285,6 +1352,7 @@ def test_migration_moves_ordered_evidence_ids_and_drops_legacy_columns(
             "2026_08_16_ai_chat_tool_call_origin",
             "2026_08_17_ai_chat_interaction_payload",
             "2026_08_17_resume_generation_run_lifecycle",
+            "2026_08_25_ai_chat_conversation_workflow",
         }
     assert evidence_field_keys == {"background", "action", "result"}
     assert evidence_links == [(1, 2, 0), (1, 1, 1)]
@@ -1469,26 +1537,47 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         created = await ExperienceService(session).create(
             ExperienceCreate(title="Agent", background="旧背景")
         )
-    adapter = ExperienceAdapter()
-    registry = AdapterRegistry()
-    registry.register(adapter)
+    workflow = ExperienceWorkflow()
+    catalog = WorkflowCatalog()
+    catalog.register(workflow)
     repositories = RepositoryFactory()
     checkpoints = CheckpointLifecycle(tmp_path / "checkpoints.db")
     saver = await checkpoints.start()
-    runtime = AiChatRuntime(
-        _ConversationModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, repositories),
-        _context(),
+    tools = _tool_service(isolated_db.session, repositories)
+    model = ModelClient(
+        context=_context(),
+        model=_ConversationModel(),  # type: ignore[arg-type]
     )
-    runner = GraphRunner(registry, saver, runtime)
-    service = AiChatService(registry, runner, repositories)
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        saver,
+        model,
+        tools,
+        thread_namespace="ai-chat",
+    )
+    conversations = _conversation_service(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
+    interactions = _interaction_coordinator(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
     try:
-        conversation_id = await service.create_conversation(
-            "ExperienceAdapter",
+        conversation_id = await conversations.create(
+            "ExperienceWorkflow",
             {"type": "experience", "id": str(created.experience_id)},
             {"field": "background"},
         )
-        stream = service.stream_message(conversation_id, "请改写背景", "message-1")
+        stream = conversations.stream_message(
+            conversation_id, "请改写背景", "message-1"
+        )
         events = []
         async for event in stream:
             events.append(event)
@@ -1507,7 +1596,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         assert current_run.status == "suspended"
         continued = [
             event
-            async for event in service.resolve_interaction(
+            async for event in interactions.resolve(
                 ResolveInteractionCommand(
                     run_id=current_run.id,
                     interaction_id=proposal_id,
@@ -1532,9 +1621,9 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             for event in continued
         )
         assert not any(event.type == "output.delta" for event in continued)
-        graph = runner._compiled(adapter)
+        graph = runner._compiled(workflow.workflow_name(), workflow)
         snapshot = await graph.aget_state(
-            {"configurable": {"thread_id": f"ai-chat:{conversation_id}"}}
+            {"configurable": {"thread_id": f"ai-chat:{current_run.id}"}}
         )
         checkpoint_call = snapshot.values["tool_call"]
         assert "decision" not in checkpoint_call
@@ -1552,7 +1641,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             original = await repositories.runs.get(current_run.id)
             assert original is not None
             assert original.status == "completed"
-            resolved_call = await repositories.tool_calls.get(proposal_id)
+            resolved_call = await ToolCallRepository(session).get(proposal_id)
             assert resolved_call is not None
             assert resolved_call.delivery_status == "pending"
             assert not await repositories.runs.transition(
@@ -1563,7 +1652,7 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
             await session.rollback()
         replayed_resolution = [
             event
-            async for event in service.resolve_interaction(
+            async for event in interactions.resolve(
                 ResolveInteractionCommand(
                     run_id=current_run.id,
                     interaction_id=proposal_id,
@@ -1576,15 +1665,13 @@ async def test_real_graph_interrupt_approve_and_deferred_tool_result(
         assert [event.type for event in replayed_resolution] == ["command.replayed"]
         follow_up = [
             event
-            async for event in service.stream_message(
+            async for event in conversations.stream_message(
                 conversation_id, "继续", "message-2"
             )
         ]
         assert any(event.type == "run.completed" for event in follow_up)
         async with isolated_db.session() as session:
-            delivered_call = (
-                await RepositoryFactory().create(session).tool_calls.get(proposal_id)
-            )
+            delivered_call = await ToolCallRepository(session).get(proposal_id)
             assert delivered_call is not None
             assert delivered_call.delivery_status == "consumed"
     finally:
@@ -1597,28 +1684,47 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
         created = await ExperienceService(session).create(
             ExperienceCreate(title="拒绝验证", background="旧背景")
         )
-    adapter = ExperienceAdapter()
-    registry = AdapterRegistry()
-    registry.register(adapter)
+    workflow = ExperienceWorkflow()
+    catalog = WorkflowCatalog()
+    catalog.register(workflow)
     repositories = RepositoryFactory()
     checkpoints = CheckpointLifecycle(tmp_path / "reject-checkpoints.db")
     saver = await checkpoints.start()
-    runtime = AiChatRuntime(
-        _ConversationModel(),  # type: ignore[arg-type]
-        _tool_service(isolated_db.session, repositories),
-        _context(),
+    tools = _tool_service(isolated_db.session, repositories)
+    model = ModelClient(
+        context=_context(),
+        model=_ConversationModel(),  # type: ignore[arg-type]
     )
-    runner = GraphRunner(registry, saver, runtime)
-    service = AiChatService(registry, runner, repositories)
+    runner = CheckpointedWorkflowExecutor(
+        catalog.get,
+        saver,
+        model,
+        tools,
+        thread_namespace="ai-chat",
+    )
+    conversations = _conversation_service(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
+    interactions = _interaction_coordinator(
+        catalog,
+        runner,
+        repositories,
+        isolated_db.session,
+        tools,
+    )
     try:
-        conversation_id = await service.create_conversation(
-            "ExperienceAdapter",
+        conversation_id = await conversations.create(
+            "ExperienceWorkflow",
             {"type": "experience", "id": str(created.experience_id)},
             {"field": "background"},
         )
         events = [
             event
-            async for event in service.stream_message(
+            async for event in conversations.stream_message(
                 conversation_id,
                 "请改写背景",
                 "reject-message",
@@ -1631,7 +1737,7 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
         assert isinstance(proposal.run_id, int)
         resolved = [
             event
-            async for event in service.resolve_interaction(
+            async for event in interactions.resolve(
                 ResolveInteractionCommand(
                     run_id=proposal.run_id,
                     interaction_id=proposal_id,
@@ -1653,7 +1759,7 @@ async def test_real_graph_reject_never_executes_handler(isolated_db, tmp_path) -
         }
         async with isolated_db.session() as session:
             detail = await ExperienceService(session).get(created.experience_id)
-            row = await RepositoryFactory().create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
         assert detail.background == "旧背景"
         background = next(
             state for state in detail.field_states if state.key == "background"
@@ -1691,7 +1797,7 @@ async def test_failed_executor_second_identical_approval_heals(
         assert [event.type for event in first] == ["interaction.resolved", "run.failed"]
         assert first[-1].payload == {"code": "interaction_finalize_failed"}
         async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
         assert row is not None
         assert (row.status, row.decision, row.client_resolution_id) == (
             "approved",
@@ -1720,7 +1826,7 @@ async def test_failed_executor_second_identical_approval_heals(
         }
         assert handler.execute_count == 2
         async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             detail = await ExperienceService(session).get(harness.experience_id)
         assert row is not None
         assert row.status == "resolved"
@@ -1766,7 +1872,7 @@ async def test_failed_executor_second_different_resolution_conflicts(
             ]
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             detail = await ExperienceService(session).get(harness.experience_id)
         assert row is not None
         assert (row.status, row.decision, row.client_resolution_id) == (
@@ -1806,21 +1912,21 @@ async def test_repeated_executor_failures_each_yield_one_run_failed(
             assert events[-1].payload == {"code": "interaction_finalize_failed"}
         assert handler.execute_count == 2
         async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
         assert row is not None
         assert row.status == "approved"
     finally:
         await harness.checkpoints.close()
 
 
-def test_runtime_never_interprets_domain_checkpoint_fields() -> None:
-    """恢复只依赖结构化 Interrupt；Runtime 不认识 approval 等领域 State key。"""
+def test_conversation_execution_never_interprets_domain_checkpoint_fields() -> None:
+    """恢复只依赖结构化 Interrupt；对话编排不认识领域 State key。"""
     source = (
         Path(__file__).parents[2]
         / "app"
         / "ai_chat"
         / "services"
-        / "ai_chat_service.py"
+        / "conversation_execution.py"
     ).read_text(encoding="utf-8")
     assert "_validate_approval_checkpoint" not in source
     assert 'values["approval"]' not in source
@@ -1849,8 +1955,11 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
             client_resolution_id="r1",
             payload={"decision": "approve"},
         )
-        resolution = await harness.adapter.resolve_interaction(
-            harness.service._tool_calls(harness.adapter.adapter_name()),
+        resolution = await harness.workflow.resolve_interaction(
+            harness.tools.bind_tools(
+                harness.workflow.get_tools(),
+                harness.workflow.get_tool_approval_policy(),
+            ),
             command,
         )
         async with isolated_db.session() as session:
@@ -1865,8 +1974,8 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
         undelivered = [
             item
             async for item in harness.runner.resume(
-                adapter_name=harness.adapter.adapter_name(),
-                conversation_id=harness.conversation_id,
+                workflow_name=harness.workflow.workflow_name(),
+                thread_id=run_id,
                 command=resolution.resume,
             )
         ]
@@ -1880,7 +1989,7 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             assert row.status == "resolved"
             if run_status == "failed":
@@ -1909,7 +2018,7 @@ async def test_resolved_checkpoint_replays_undelivered_business_event(
         assert replayed[1].payload["tool_call_id"] == proposal_id
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
-            row = await harness.repositories.create(session).tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await harness.repositories.create(session).runs.get(row.run_id)
         assert run is not None
@@ -1936,7 +2045,7 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
         with pytest.raises(IdempotencyConflictError):
             _ = [
                 event
-                async for event in harness.service.resolve_interaction(
+                async for event in harness.interactions.resolve(
                     ResolveInteractionCommand(
                         run_id=run_id + 1,
                         interaction_id=proposal_id,
@@ -1949,7 +2058,7 @@ async def test_suspended_checkpoint_identity_conflict_precedes_run_transition(
         assert handler.execute_count == 0
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "awaiting_approval"
@@ -2005,7 +2114,7 @@ async def test_cancelled_resolution_converges_claimed_run(
 
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "approved"
@@ -2083,7 +2192,7 @@ async def test_second_cancellation_cannot_interrupt_run_cleanup(
 
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "approved"
@@ -2149,7 +2258,7 @@ async def test_active_running_owner_blocks_second_resolution(
 
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert blocked, [event.type for event in second_events]
@@ -2270,7 +2379,7 @@ async def test_cancelled_uncommitted_claim_cannot_cancel_next_owner(
         assert handler.execute_count == 0
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         # Resolution 先于 Run claim 持久化；B 已拥有可重放的决定。
@@ -2340,7 +2449,7 @@ async def test_cancelled_committed_claim_converges_its_run(
         assert handler.execute_count == 0
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "awaiting_approval"
@@ -2420,7 +2529,7 @@ async def test_durable_claim_survives_session_close_failure(
 
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         if cancel_outer:
@@ -2471,7 +2580,7 @@ async def test_postclaim_interaction_state_error_yields_one_run_failed(
         assert handler.execute_count == 1
         async with isolated_db.session() as session:
             repositories = harness.repositories.create(session)
-            row = await repositories.tool_calls.get(proposal_id)
+            row = await ToolCallRepository(session).get(proposal_id)
             assert row is not None
             run = await repositories.runs.get(row.run_id)
         assert row.status == "approved"

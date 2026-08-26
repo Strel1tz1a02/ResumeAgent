@@ -80,8 +80,7 @@ START
   -> retrieve
   -> judge_evidence
   -> assemble_plan
-  -> critique_plan
-       |-- 模型判定需要继续检索且 round < max_search_rounds
+       |-- 规则发现 must/should 缺口且允许继续检索
        |      -> plan_search
        `-- 否则
               -> draft_resume
@@ -98,7 +97,7 @@ ResumeGenerationState
 ├─ search_tasks[] / retrieved_candidates[]
 ├─ judgments[] / coverage_matrix
 ├─ constraints / search_round
-├─ plan / critique
+├─ plan / gap_coverage_ids / should_search_more
 ├─ resume_data / provenance
 └─ validation / errors
 ```
@@ -124,8 +123,8 @@ Planner 为覆盖项生成带目标的 `SearchTask`，意图包括：
 - `result_evidence`：结果、指标和影响；
 - `transferable`：跨领域可迁移能力。
 
-每个任务必须声明 `coverage_item_ids`、query、过滤条件和 top_k。重规划只针对 Critic
-模型返回的语义证据空缺生成新查询，不重复整个已成功计划。
+每个任务必须声明 `coverage_item_ids`、query、过滤条件和 top_k。重规划只针对规则拼装
+结果中仍未覆盖的 must/should 项生成新查询，不重复 JD 分析。
 
 ## 6. Evidence Judge 与组合规划
 
@@ -157,28 +156,30 @@ Portfolio Planner 在版面约束内选择经历组合，目标为：
 - 每项 requirement 的覆盖状态；
 - 未覆盖 requirement；
 - 被淘汰候选及原因；
-- 规划轮次和审查警告。
+- 规划轮次和规则决策警告。
 
 低排名经历只有在提供独特 JD 覆盖、事实证据充分、又不足以占用完整经历版面时，
 其已证明的技术/能力才可提升到技能栏。技能文案不得把“接触/参与”升级为“熟练/
 精通”，且必须保存 Evidence ID。已被主体经历充分覆盖的重复技能不再提升。
 
-## 8. 审查、重规划与停止条件
+## 8. 规则重规划与停止条件
 
-Critic 模型结合 JD、当前计划、全部 Evidence Judgment、轮次、候选变化和版面预算，
-判断当前证据是否足够直接、具体、可靠，并据此定义 `gap_coverage_ids`。这里的“空缺”
-不是服务端根据 `covered=false` 推导，而是模型对证据质量和组合完整性的语义判断。
-动作集合为：
+Evidence Judge 是证据语义判断的唯一模型节点。它输出的 coverage、相关性、证据强度、
+独特性和无依据风险由 Portfolio Planner 确定性消费；Planner 根据最终入选证据计算
+`uncovered_requirements`，不再调用第二个 Critic 模型重新解释同一批证据。
+
+`assemble_plan` 同时执行确定性搜索策略：只把仍未覆盖的 must/should 项写入
+`gap_coverage_ids`，并根据轮次和候选变化决定是否继续检索。`ResumePlan` 为兼容已有
+API 继续保留动作字段；当前规则只产生：
 
 ```text
-search_more | replace_experience | add_evidence | move_to_skill |
-compress_section | drop_redundant_content | accept_with_gaps
+search_more | move_to_skill | drop_redundant_content | accept_with_gaps
 ```
 
-只有模型返回 `search_more` 才触发新一轮检索。服务端只提供事实并校验硬边界：模型
-不得引用未知 coverage ID、不得在没有 gap 时继续搜索、不得突破最大轮次，也不得在
-后续轮次候选完全不变时无限循环。固定 must/should/覆盖率规则只存在于
-`deterministic` 模式或 `auto` 模式的模型故障降级路径，不代表生产 LLM 的完整性判断。
+只有同时满足以下条件，规则才产生 `search_more` 并回到 `plan_search`：存在
+must/should 缺口、当前轮次小于 `max_search_rounds`，并且当前是第一轮或本轮召回了新的
+Evidence ID。否则流程进入简历生成，未覆盖项保持显式，不得通过虚构内容补齐。
+`min_coverage_ratio` 只产生可见警告，不单独触发补搜。
 
 ## 9. 简历生成与事实校验
 

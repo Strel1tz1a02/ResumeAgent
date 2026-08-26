@@ -44,6 +44,15 @@ class RunRepository:
         )
         return result.scalar_one_or_none()
 
+    async def ids_for_conversation(self, conversation_id: int) -> list[int]:
+        """返回一个 Conversation 的全部 Run ID，用于清理其 checkpoint。"""
+        result = await self._session.execute(
+            select(AiChatRun.id)
+            .where(AiChatRun.conversation_id == conversation_id)
+            .order_by(AiChatRun.id)
+        )
+        return list(result.scalars().all())
+
     async def transition(
         self,
         run_id: int,

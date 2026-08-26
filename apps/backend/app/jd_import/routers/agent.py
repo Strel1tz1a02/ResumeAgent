@@ -5,8 +5,10 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from app.ai_chat.container import get_ai_chat_service
-from app.ai_chat.protocol import ResolveInteractionCommand
+from app.ai_chat.container import (
+    get_conversation_service,
+    get_interaction_coordinator,
+)
 from app.ai_chat.streaming.sse import runtime_sse_response
 from app.jd_import.agent.input_parser import parse_mixed_input
 from app.jd_import.schemas import (
@@ -14,6 +16,7 @@ from app.jd_import.schemas import (
     JDImportAgentRequest,
     JDQuestionResolutionRequest,
 )
+from app.workflow_runtime import ResolveInteractionCommand
 
 router = APIRouter(prefix="/jd-imports", tags=["JD Import Agent"])
 logger = logging.getLogger(__name__)
@@ -28,8 +31,8 @@ def _sse(events) -> StreamingResponse:  # type: ignore[no-untyped-def]
 
 @router.post("/conversations", response_model=JDConversationResponse, status_code=201)
 async def create_conversation() -> JDConversationResponse:
-    conversation_id = await get_ai_chat_service().create_conversation(
-        "JDImportAdapter", {"type": "jd_import", "id": "new"}, {}
+    conversation_id = await get_conversation_service().create(
+        "JDImportWorkflow", {"type": "jd_import", "id": "new"}, {}
     )
     return JDConversationResponse(conversation_id=conversation_id)
 
@@ -41,7 +44,7 @@ async def import_jd(
 ) -> StreamingResponse:
     parse_mixed_input(request.content)
     return _sse(
-        get_ai_chat_service().stream_message(
+        get_conversation_service().stream_message(
             conversation_id,
             request.content,
             request.client_message_id,
@@ -55,15 +58,13 @@ async def resolve_questions(
     interaction_id: int,
     request: JDQuestionResolutionRequest,
 ) -> StreamingResponse:
-    events = get_ai_chat_service().resolve_interaction(
+    events = get_interaction_coordinator().resolve(
         ResolveInteractionCommand(
             run_id=run_id,
             interaction_id=interaction_id,
             kind="question_batch",
             client_resolution_id=request.client_resolution_id,
-            payload=request.model_dump(
-                mode="json", exclude={"client_resolution_id"}
-            ),
+            payload=request.model_dump(mode="json", exclude={"client_resolution_id"}),
         )
     )
     return _sse(events)

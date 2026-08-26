@@ -15,13 +15,13 @@ if sys.platform == "win32":
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.ai_chat import close_ai_chat, register_adapter, start_ai_chat
+from app.ai_chat import close_ai_chat, register_workflow, start_ai_chat
 from app.config import settings
 from app.database import db
-from app.experience import ExperienceAdapter
+from app.experience import ExperienceWorkflow
 from app.experience.routers import ai_chat_router as experience_ai_chat_router
 from app.experience.routers import experiences_router
-from app.jd_import import JDImportAdapter
+from app.jd_import import JDImportWorkflow
 from app.jd_import import router as jd_import_router
 from app.jd_import.agent.model import LangChainJDImportModel
 from app.jd_import.graph import JDImportGraphDependencies
@@ -40,14 +40,14 @@ from app.routers import (
 
 logger = logging.getLogger(__name__)
 
-_business_adapters_registered = False
+_business_workflows_registered = False
 
 
-def _register_business_adapters() -> None:
-    """在聊天运行库启动前注册唯一的生产业务 Adapter。"""
-    global _business_adapters_registered
-    if not _business_adapters_registered:
-        register_adapter(ExperienceAdapter())
+def _register_business_workflows() -> None:
+    """在 Conversation 服务启动前注册生产业务 Workflow。"""
+    global _business_workflows_registered
+    if not _business_workflows_registered:
+        register_workflow(ExperienceWorkflow())
         # The secured browser container is the authoritative DNS/IP boundary.
         # Avoid resolving hostnames again on the host, where Clash/Docker may
         # legitimately return a synthetic 198.18/15 address. Literal private
@@ -55,7 +55,7 @@ def _register_business_adapters() -> None:
         policy = UrlPolicy(
             resolve_hostnames=not settings.playwright_mcp_egress_secured
         )
-        register_adapter(JDImportAdapter(JDImportGraphDependencies(
+        register_workflow(JDImportWorkflow(JDImportGraphDependencies(
             model=LangChainJDImportModel(),
             page_sources=PlaywrightMCPSourceProvider(
                 settings.playwright_mcp_url,
@@ -66,7 +66,7 @@ def _register_business_adapters() -> None:
             ),
             url_policy=policy,
         )))
-        _business_adapters_registered = True
+        _business_workflows_registered = True
 
 
 def _configure_application_logging() -> None:
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
     from app.config import migrate_legacy_keys
 
     migrate_legacy_keys()
-    _register_business_adapters()
+    _register_business_workflows()
     await start_ai_chat()
     # PDF renderer uses lazy initialization - will initialize on first use
     # await init_pdf_renderer()

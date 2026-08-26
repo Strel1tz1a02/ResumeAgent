@@ -1,7 +1,5 @@
-"""JSON 对象类型。"""
+"""兼容入口；通用 JSON 类型由 workflow_runtime 持有。"""
 
-from typing import TypeAlias
+from app.workflow_runtime.types import JsonObject
 
-from app.ai_chat.types.json_value import JsonValue
-
-JsonObject: TypeAlias = dict[str, JsonValue]
+__all__ = ["JsonObject"]

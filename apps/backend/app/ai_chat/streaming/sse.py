@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 
 from fastapi.responses import StreamingResponse
 
-from app.ai_chat.streaming.events import RuntimeEvent
+from app.workflow_runtime.events import RuntimeEvent
 
 _SSE_PREAMBLE = ":" + (" " * 2048) + "\n\n"
 

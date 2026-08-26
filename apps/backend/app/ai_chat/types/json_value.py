@@ -1,7 +1,5 @@
-"""递归 JSON 值类型。"""
+"""兼容入口；通用 JSON 类型由 workflow_runtime 持有。"""
 
-from typing import TypeAlias
+from app.workflow_runtime.types import JsonValue
 
-from app.ai_chat.types.json_scalar import JsonScalar
-
-JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+__all__ = ["JsonValue"]

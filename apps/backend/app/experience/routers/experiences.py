@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat import get_ai_chat_service
+from app.ai_chat import get_conversation_service
 from app.experience.repositories.session import get_repository_session
 from app.experience.schemas.evidence_items import (
     EvidenceCreateRequest,
@@ -222,8 +222,8 @@ async def permanently_delete_experience(
     try:
         await ExperienceService(session).permanently_delete(experience_id)
         try:
-            await get_ai_chat_service().delete_subject(
-                "ExperienceAdapter", {"type": "experience", "id": str(experience_id)}
+            await get_conversation_service().delete_subject(
+                "ExperienceWorkflow", {"type": "experience", "id": str(experience_id)}
             )
         except Exception:
             logger.exception(

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 _NUMBER_RE = re.compile(
-    r"\d+(?:[.,]\d+)*(?:%|万|亿|k|m|ms|s|分钟|小时)?", re.IGNORECASE
+    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)*(?:分钟|小时|ms|%|万|亿|k|m|s)?",
+    re.IGNORECASE,
 )
 
 
@@ -347,6 +348,37 @@ def _resume_quality_text(resume: dict[str, Any]) -> str:
     return flatten_text(values)
 
 
+def _generation_source_quality_text(source_experiences: object) -> str:
+    """只提取可进入简历正文的来源事实，排除 ID、时间戳和完整度等元数据。"""
+    values: list[object] = []
+    if not isinstance(source_experiences, list):
+        return ""
+    for experience in source_experiences:
+        if not isinstance(experience, dict):
+            continue
+        values.extend(
+            experience.get(field, "")
+            for field in (
+                "title",
+                "organization",
+                "role",
+                "background",
+                "technologies",
+                "tags",
+            )
+        )
+        evidence_rows = experience.get("evidence")
+        if not isinstance(evidence_rows, list):
+            continue
+        for evidence in evidence_rows:
+            if not isinstance(evidence, dict):
+                continue
+            values.extend(
+                evidence.get(field, "") for field in ("background", "action", "result")
+            )
+    return flatten_text(values)
+
+
 @dataclass(frozen=True)
 class GenerationQuality:
     requirement_coverage: float
@@ -379,13 +411,10 @@ def score_generation(
         else (len(requirement_groups) - len(missing_groups)) / len(requirement_groups)
     )
 
-    source_numbers = {
-        match.group(0).casefold()
-        for match in _NUMBER_RE.finditer(flatten_text(source_experiences))
-    }
-    output_numbers = {
-        match.group(0).casefold() for match in _NUMBER_RE.finditer(resume_text)
-    }
+    source_numbers = set(
+        _number_tokens(_generation_source_quality_text(source_experiences))
+    )
+    output_numbers = set(_number_tokens(resume_text))
     invented_numbers = tuple(sorted(output_numbers - source_numbers))
     grounded_number_precision = (
         1.0
@@ -413,6 +442,554 @@ def score_generation(
         invented_numbers=invented_numbers,
         missing_requirement_groups=missing_groups,
         forbidden_hits=forbidden_hits,
+    )
+
+
+@dataclass(frozen=True)
+class GenerationReferenceQuality:
+    """候选简历相对人工标准答案的稳定、可解释指标。"""
+
+    experience_precision: float
+    experience_recall: float
+    experience_f1: float
+    evidence_precision: float
+    evidence_recall: float
+    evidence_f1: float
+    technical_skill_precision: float
+    technical_skill_recall: float
+    technical_skill_f1: float
+    summary_fact_recall: float
+    required_section_recall: float
+    core_fact_recall: float
+    provenance_grounded_number_precision: float
+    missing_technical_skills: tuple[str, ...]
+    unexpected_technical_skills: tuple[str, ...]
+    missing_summary_fact_groups: tuple[int, ...]
+    missing_required_sections: tuple[str, ...]
+    missing_core_fact_groups: tuple[int, ...]
+    ungrounded_numbers: tuple[str, ...]
+    unknown_evidence_ids: tuple[int, ...]
+    cross_experience_evidence: tuple[str, ...]
+    missing_bullet_provenance: tuple[str, ...]
+    missing_skill_provenance: tuple[str, ...]
+    ungrounded_skill_provenance: tuple[str, ...]
+    ghost_provenance: tuple[str, ...]
+
+
+def _selection_quality(actual: set[Any], expected: set[Any]) -> tuple[float, ...]:
+    """计算集合选择的 Precision、Recall 和 F1。"""
+    overlap = len(actual & expected)
+    precision = overlap / len(actual) if actual else (1.0 if not expected else 0.0)
+    recall = overlap / len(expected) if expected else (1.0 if not actual else 0.0)
+    f1 = (
+        0.0
+        if precision + recall == 0
+        else 2 * precision * recall / (precision + recall)
+    )
+    return precision, recall, f1
+
+
+def _integer_ids(value: object) -> set[int]:
+    """从 JSON-like ID 数组中提取整数，忽略损坏值。"""
+    if not isinstance(value, list):
+        return set()
+    return {
+        item for item in value if isinstance(item, int) and not isinstance(item, bool)
+    }
+
+
+def _resume_experience_selection(resume: dict[str, Any]) -> set[tuple[str, int]]:
+    """读取候选简历主体中实际选择的 section + Experience ID。"""
+    result: set[tuple[str, int]] = set()
+    for section in ("workExperience", "personalProjects"):
+        rows = resume.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_id = row.get("id")
+            if isinstance(item_id, int) and not isinstance(item_id, bool):
+                result.add((section, item_id))
+    return result
+
+
+def _technical_skills(resume: dict[str, Any]) -> dict[str, str]:
+    """返回规范化技能到原始展示值的映射。"""
+    additional = resume.get("additional")
+    rows = additional.get("technicalSkills") if isinstance(additional, dict) else []
+    if not isinstance(rows, list):
+        return {}
+    result: dict[str, str] = {}
+    for value in rows:
+        if not isinstance(value, str):
+            continue
+        normalized = normalize_text(value)
+        if normalized:
+            result.setdefault(normalized, value.strip())
+    return result
+
+
+def _present_required_sections(resume: dict[str, Any]) -> set[str]:
+    """只统计人工标准答案能够客观声明为必需的内容区块。"""
+    sections: set[str] = set()
+    if flatten_text(resume.get("summary", "")).strip():
+        sections.add("summary")
+    for section in ("workExperience", "personalProjects", "education"):
+        rows = resume.get(section)
+        if isinstance(rows, list) and rows:
+            sections.add(section)
+    if _technical_skills(resume):
+        sections.add("additional.technicalSkills")
+    return sections
+
+
+def _missing_skill_provenance(
+    resume: dict[str, Any], provenance: dict[str, Any]
+) -> tuple[str, ...]:
+    """列出没有任何 Evidence 引用的候选技能。"""
+    candidate = _technical_skills(resume)
+    cited: set[str] = set()
+    rows = provenance.get("skills")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict) or not _integer_ids(row.get("evidence_ids")):
+                continue
+            skill = row.get("skill")
+            normalized = normalize_text(skill) if isinstance(skill, str) else ""
+            if normalized in candidate:
+                cited.add(normalized)
+    return tuple(candidate[key] for key in sorted(set(candidate) - cited))
+
+
+def _ungrounded_skill_provenance(
+    resume: dict[str, Any],
+    provenance: dict[str, Any],
+    source_experiences: object,
+) -> tuple[str, ...]:
+    """技能引用必须指向实际包含该技能的来源经历或 Evidence。"""
+    support_by_evidence: dict[int, str] = {}
+    if isinstance(source_experiences, list):
+        for experience in source_experiences:
+            if not isinstance(experience, dict):
+                continue
+            parent = {
+                field: experience.get(field, "")
+                for field in (
+                    "title",
+                    "organization",
+                    "role",
+                    "background",
+                    "technologies",
+                    "tags",
+                )
+            }
+            evidence_rows = experience.get("evidence")
+            if not isinstance(evidence_rows, list):
+                continue
+            for evidence in evidence_rows:
+                if not isinstance(evidence, dict):
+                    continue
+                evidence_id = evidence.get("evidence_id")
+                if not isinstance(evidence_id, int) or isinstance(evidence_id, bool):
+                    continue
+                support_by_evidence[evidence_id] = flatten_text(
+                    {
+                        "experience": parent,
+                        "evidence": {
+                            field: evidence.get(field, "")
+                            for field in ("background", "action", "result")
+                        },
+                    }
+                )
+
+    candidate = _technical_skills(resume)
+    cited_by_skill: dict[str, set[int]] = {}
+    rows = provenance.get("skills")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            skill = row.get("skill")
+            normalized = normalize_text(skill) if isinstance(skill, str) else ""
+            if normalized in candidate:
+                cited_by_skill.setdefault(normalized, set()).update(
+                    _integer_ids(row.get("evidence_ids"))
+                )
+
+    ungrounded: list[str] = []
+    for normalized, display in candidate.items():
+        evidence_ids = cited_by_skill.get(normalized, set())
+        if not evidence_ids:
+            continue
+        if not any(
+            _contains_fragment(support_by_evidence.get(evidence_id, ""), display)
+            for evidence_id in evidence_ids
+        ):
+            ungrounded.append(display)
+    return tuple(sorted(ungrounded, key=normalize_text))
+
+
+def _provenance_evidence_ids(provenance: dict[str, Any]) -> set[int]:
+    """汇总所有 provenance 自报的 Evidence ID，包括无对应声明的坏引用。"""
+    result = _integer_ids(provenance.get("summary_evidence_ids"))
+    for collection in ("bullets", "skills"):
+        rows = provenance.get(collection)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                result.update(_integer_ids(row.get("evidence_ids")))
+    return result
+
+
+def _valid_provenance_evidence_ids(
+    resume: dict[str, Any], provenance: dict[str, Any]
+) -> tuple[set[int], tuple[str, ...]]:
+    """只统计与候选 Summary、Bullet 或 Skill 真实对应的 provenance。"""
+    result: set[int] = set()
+    ghosts: list[str] = []
+
+    summary_ids = _integer_ids(provenance.get("summary_evidence_ids"))
+    if summary_ids:
+        if flatten_text(resume.get("summary", "")).strip():
+            result.update(summary_ids)
+        else:
+            ghosts.append("summary")
+
+    bullet_keys: set[tuple[str, int, int]] = set()
+    for section in ("workExperience", "personalProjects"):
+        rows = resume.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_id = row.get("id")
+            descriptions = row.get("description")
+            if not isinstance(item_id, int) or not isinstance(descriptions, list):
+                continue
+            bullet_keys.update(
+                (section, item_id, index) for index in range(len(descriptions))
+            )
+
+    for index, row in enumerate(provenance.get("bullets", []) or []):
+        if not isinstance(row, dict):
+            ghosts.append(f"bullet:{index}:invalid")
+            continue
+        section = row.get("section")
+        item_id = row.get("item_id")
+        bullet_index = row.get("bullet_index")
+        key = (section, item_id, bullet_index)
+        if key not in bullet_keys:
+            ghosts.append(f"bullet:{section}:{item_id}:{bullet_index}")
+            continue
+        result.update(_integer_ids(row.get("evidence_ids")))
+
+    additional = resume.get("additional")
+    skill_rows = (
+        additional.get("technicalSkills") if isinstance(additional, dict) else []
+    )
+    candidate_skills = {
+        normalize_text(skill)
+        for skill in skill_rows
+        if isinstance(skill, str) and normalize_text(skill)
+    }
+    for index, row in enumerate(provenance.get("skills", []) or []):
+        if not isinstance(row, dict):
+            ghosts.append(f"skill:{index}:invalid")
+            continue
+        skill = row.get("skill")
+        normalized_skill = normalize_text(skill) if isinstance(skill, str) else ""
+        if not normalized_skill or normalized_skill not in candidate_skills:
+            ghosts.append(f"skill:{skill}")
+            continue
+        result.update(_integer_ids(row.get("evidence_ids")))
+
+    return result, tuple(ghosts)
+
+
+def _number_tokens(value: object) -> list[str]:
+    """提取数字声明，并消除数字与单位间无意义的空白差异。"""
+    text = unicodedata.normalize("NFKC", flatten_text(value)).casefold()
+    text = re.sub(
+        r"(?<=\d)\s+(?=(?:分钟|小时|ms|%|万|亿|k|m|s))",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return [match.group(0) for match in _NUMBER_RE.finditer(text)]
+
+
+def _provenance_number_quality(
+    resume: dict[str, Any],
+    provenance: dict[str, Any],
+    source_experiences: object,
+) -> tuple[float, tuple[str, ...], tuple[int, ...], tuple[str, ...], tuple[str, ...]]:
+    """逐条按绑定 Evidence 判断数字真实性与引用归属。"""
+    evidence_by_id: dict[int, dict[str, Any]] = {}
+    evidence_owner: dict[int, tuple[str, int]] = {}
+    if isinstance(source_experiences, list):
+        for experience in source_experiences:
+            if not isinstance(experience, dict):
+                continue
+            experience_id = experience.get("experience_id")
+            kind = experience.get("kind")
+            evidence_rows = experience.get("evidence")
+            if not isinstance(experience_id, int) or not isinstance(
+                evidence_rows, list
+            ):
+                continue
+            if kind in {"work", "internship"}:
+                owner = ("workExperience", experience_id)
+            else:
+                owner = ("personalProjects", experience_id)
+            for evidence in evidence_rows:
+                if not isinstance(evidence, dict):
+                    continue
+                evidence_id = evidence.get("evidence_id")
+                if isinstance(evidence_id, int) and not isinstance(evidence_id, bool):
+                    evidence_by_id[evidence_id] = evidence
+                    evidence_owner[evidence_id] = owner
+
+    cited_ids = _provenance_evidence_ids(provenance)
+    unknown_ids = tuple(sorted(cited_ids - set(evidence_by_id)))
+    bullet_provenance: dict[tuple[str, int, int], set[int]] = {}
+    cross_experience: list[str] = []
+    for row in provenance.get("bullets", []) or []:
+        if not isinstance(row, dict):
+            continue
+        section = row.get("section")
+        item_id = row.get("item_id")
+        bullet_index = row.get("bullet_index")
+        if (
+            section not in {"workExperience", "personalProjects"}
+            or not isinstance(item_id, int)
+            or not isinstance(bullet_index, int)
+        ):
+            continue
+        evidence_ids = _integer_ids(row.get("evidence_ids"))
+        key = (section, item_id, bullet_index)
+        bullet_provenance.setdefault(key, set()).update(evidence_ids)
+        for evidence_id in sorted(evidence_ids):
+            owner = evidence_owner.get(evidence_id)
+            if owner is not None and owner != (section, item_id):
+                cross_experience.append(
+                    f"{section}:{item_id}:{bullet_index}:evidence-{evidence_id}"
+                )
+
+    total_numbers = 0
+    grounded_numbers = 0
+    ungrounded: list[str] = []
+    missing_provenance: list[str] = []
+
+    def score_claim(scope: str, claim: object, evidence_ids: set[int]) -> None:
+        """将单条声明中的每个数字限定在其引用 Evidence 内。"""
+        nonlocal total_numbers, grounded_numbers
+        allowed_numbers = {
+            token
+            for evidence_id in evidence_ids
+            for token in _number_tokens(
+                {
+                    field: evidence_by_id.get(evidence_id, {}).get(field, "")
+                    for field in ("background", "action", "result")
+                }
+            )
+        }
+        for token in _number_tokens(claim):
+            total_numbers += 1
+            if token in allowed_numbers:
+                grounded_numbers += 1
+            else:
+                ungrounded.append(f"{scope}:{token}")
+
+    score_claim(
+        "summary",
+        resume.get("summary", ""),
+        _integer_ids(provenance.get("summary_evidence_ids")),
+    )
+    for section in ("workExperience", "personalProjects"):
+        rows = resume.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_id = row.get("id")
+            descriptions = row.get("description")
+            if not isinstance(item_id, int) or not isinstance(descriptions, list):
+                continue
+            for index, bullet in enumerate(descriptions):
+                scope = f"{section}:{item_id}:{index}"
+                evidence_ids = bullet_provenance.get((section, item_id, index))
+                if evidence_ids is None:
+                    missing_provenance.append(scope)
+                    evidence_ids = set()
+                score_claim(scope, bullet, evidence_ids)
+
+    precision = 1.0 if not total_numbers else grounded_numbers / total_numbers
+    return (
+        precision,
+        tuple(ungrounded),
+        unknown_ids,
+        tuple(cross_experience),
+        tuple(missing_provenance),
+    )
+
+
+def score_generation_reference(
+    resume: dict[str, Any],
+    provenance: dict[str, Any],
+    source_experiences: object,
+    reference_resume: dict[str, Any],
+    reference_provenance: dict[str, Any],
+    *,
+    expected_experience_ids: list[int],
+    expected_evidence_ids: list[int],
+    core_fact_groups: list[list[str]],
+    summary_fact_groups: list[list[str]],
+) -> GenerationReferenceQuality:
+    """衡量候选选择、标准答案事实召回和 provenance 绑定真实性。"""
+    reference_experiences = _resume_experience_selection(reference_resume)
+    reference_experience_ids = {item_id for _, item_id in reference_experiences}
+    reference_evidence, reference_ghosts = _valid_provenance_evidence_ids(
+        reference_resume, reference_provenance
+    )
+    if reference_experience_ids != set(expected_experience_ids):
+        raise ValueError("oracle Experience ID 与 reference_resume 不一致")
+    if reference_evidence != set(expected_evidence_ids):
+        raise ValueError("oracle Evidence ID 与 reference_provenance 不一致")
+    if reference_ghosts:
+        raise ValueError(
+            f"reference_provenance 存在无对应声明的引用: {reference_ghosts}"
+        )
+    reference_text = _resume_quality_text(reference_resume)
+    invalid_fact_groups = [
+        index
+        for index, aliases in enumerate(core_fact_groups)
+        if not aliases
+        or not any(_contains_fragment(reference_text, alias) for alias in aliases)
+    ]
+    if invalid_fact_groups:
+        labels = ", ".join(str(index) for index in invalid_fact_groups)
+        raise ValueError(f"core_fact_group 未出现在 reference_resume: {labels}")
+
+    reference_summary = reference_resume.get("summary", "")
+    invalid_summary_groups = [
+        index
+        for index, aliases in enumerate(summary_fact_groups)
+        if not aliases
+        or not any(_contains_fragment(reference_summary, alias) for alias in aliases)
+    ]
+    if invalid_summary_groups:
+        labels = ", ".join(str(index) for index in invalid_summary_groups)
+        raise ValueError(f"summary_fact_group 未出现在 reference summary: {labels}")
+    reference_missing_skill_provenance = _missing_skill_provenance(
+        reference_resume, reference_provenance
+    )
+    if reference_missing_skill_provenance:
+        raise ValueError(
+            f"reference_provenance 缺少技能引用: {reference_missing_skill_provenance}"
+        )
+    reference_ungrounded_skill_provenance = _ungrounded_skill_provenance(
+        reference_resume,
+        reference_provenance,
+        source_experiences,
+    )
+    if reference_ungrounded_skill_provenance:
+        raise ValueError(
+            "reference_provenance 技能引用与来源不匹配: "
+            f"{reference_ungrounded_skill_provenance}"
+        )
+
+    actual_experiences = _resume_experience_selection(resume)
+    actual_evidence, ghost_provenance = _valid_provenance_evidence_ids(
+        resume, provenance
+    )
+    experience_metrics = _selection_quality(actual_experiences, reference_experiences)
+    evidence_metrics = _selection_quality(actual_evidence, set(expected_evidence_ids))
+
+    reference_skills = _technical_skills(reference_resume)
+    actual_skills = _technical_skills(resume)
+    skill_metrics = _selection_quality(set(actual_skills), set(reference_skills))
+    missing_skills = tuple(
+        reference_skills[key]
+        for key in sorted(set(reference_skills) - set(actual_skills))
+    )
+    unexpected_skills = tuple(
+        actual_skills[key] for key in sorted(set(actual_skills) - set(reference_skills))
+    )
+
+    expected_sections = _present_required_sections(reference_resume)
+    actual_sections = _present_required_sections(resume)
+    missing_sections = tuple(sorted(expected_sections - actual_sections))
+    required_section_recall = (
+        1.0
+        if not expected_sections
+        else (len(expected_sections) - len(missing_sections)) / len(expected_sections)
+    )
+
+    candidate_summary = resume.get("summary", "")
+    missing_summary_groups = tuple(
+        index
+        for index, aliases in enumerate(summary_fact_groups)
+        if not any(_contains_fragment(candidate_summary, alias) for alias in aliases)
+    )
+    summary_fact_recall = (
+        1.0
+        if not summary_fact_groups
+        else (len(summary_fact_groups) - len(missing_summary_groups))
+        / len(summary_fact_groups)
+    )
+
+    resume_text = _resume_quality_text(resume)
+    missing_fact_groups = tuple(
+        index
+        for index, aliases in enumerate(core_fact_groups)
+        if not any(_contains_fragment(resume_text, alias) for alias in aliases)
+    )
+    core_fact_recall = (
+        1.0
+        if not core_fact_groups
+        else (len(core_fact_groups) - len(missing_fact_groups)) / len(core_fact_groups)
+    )
+    (
+        number_precision,
+        ungrounded_numbers,
+        unknown_evidence_ids,
+        cross_experience_evidence,
+        missing_bullet_provenance,
+    ) = _provenance_number_quality(resume, provenance, source_experiences)
+    return GenerationReferenceQuality(
+        experience_precision=experience_metrics[0],
+        experience_recall=experience_metrics[1],
+        experience_f1=experience_metrics[2],
+        evidence_precision=evidence_metrics[0],
+        evidence_recall=evidence_metrics[1],
+        evidence_f1=evidence_metrics[2],
+        technical_skill_precision=skill_metrics[0],
+        technical_skill_recall=skill_metrics[1],
+        technical_skill_f1=skill_metrics[2],
+        summary_fact_recall=summary_fact_recall,
+        required_section_recall=required_section_recall,
+        core_fact_recall=core_fact_recall,
+        provenance_grounded_number_precision=number_precision,
+        missing_technical_skills=missing_skills,
+        unexpected_technical_skills=unexpected_skills,
+        missing_summary_fact_groups=missing_summary_groups,
+        missing_required_sections=missing_sections,
+        missing_core_fact_groups=missing_fact_groups,
+        ungrounded_numbers=ungrounded_numbers,
+        unknown_evidence_ids=unknown_evidence_ids,
+        cross_experience_evidence=cross_experience_evidence,
+        missing_bullet_provenance=missing_bullet_provenance,
+        missing_skill_provenance=_missing_skill_provenance(resume, provenance),
+        ungrounded_skill_provenance=_ungrounded_skill_provenance(
+            resume,
+            provenance,
+            source_experiences,
+        ),
+        ghost_provenance=ghost_provenance,
     )
 
 

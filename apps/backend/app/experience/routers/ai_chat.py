@@ -8,8 +8,10 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from app import database as database_module
-from app.ai_chat.container import get_ai_chat_service
-from app.ai_chat.protocol import ResolveInteractionCommand
+from app.ai_chat.container import (
+    get_conversation_service,
+    get_interaction_coordinator,
+)
 from app.ai_chat.streaming.sse import runtime_sse_response
 from app.config_cache import get_content_language
 from app.experience.schemas import (
@@ -20,6 +22,7 @@ from app.experience.schemas import (
     ProposalResolutionRequest,
 )
 from app.experience.services.experience_field_service import ExperienceFieldService
+from app.workflow_runtime import ResolveInteractionCommand
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/experience-ai-chat", tags=["experience-ai-chat"])
@@ -43,10 +46,10 @@ async def create_conversation(
 ) -> ConversationCreateResponse:
     """验证字段绑定并创建不可恢复的当前会话。"""
     try:
-        service = get_ai_chat_service()
+        service = get_conversation_service()
         scope = request.scope.model_dump(mode="json")
-        conversation_id = await service.create_conversation(
-            adapter_name="ExperienceAdapter",
+        conversation_id = await service.create(
+            workflow_name="ExperienceWorkflow",
             subject={"type": "experience", "id": str(request.experience_id)},
             scope=scope,
             language=get_content_language(),
@@ -75,7 +78,7 @@ async def create_conversation(
 @router.post("/conversations/{conversation_id}/opening")
 async def stream_opening(conversation_id: int) -> StreamingResponse:
     """流式执行字段会话开场白。"""
-    return _sse(get_ai_chat_service().stream_opening(conversation_id))
+    return _sse(get_conversation_service().stream_opening(conversation_id))
 
 
 @router.post("/conversations/{conversation_id}/messages")
@@ -85,7 +88,7 @@ async def stream_message(
 ) -> StreamingResponse:
     """发送一条用户消息并返回本轮 SSE。"""
     return _sse(
-        get_ai_chat_service().stream_message(
+        get_conversation_service().stream_message(
             conversation_id,
             request.content,
             request.client_message_id,
@@ -101,7 +104,7 @@ async def resolve_interaction(
 ) -> StreamingResponse:
     """通过统一 Interaction 命令固化审批并恢复所属 Graph。"""
     return _sse(
-        get_ai_chat_service().resolve_interaction(
+        get_interaction_coordinator().resolve(
             ResolveInteractionCommand(
                 run_id=run_id,
                 interaction_id=interaction_id,
@@ -121,4 +124,4 @@ async def close_conversation(
     conversation_id: int, request: ConversationCloseRequest
 ) -> None:
     """结束当前会话；之后不能恢复或继续。"""
-    await get_ai_chat_service().close_conversation(conversation_id, request.reason)
+    await get_conversation_service().close(conversation_id, request.reason)

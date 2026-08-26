@@ -7,10 +7,6 @@ from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai_chat.graph import GraphDriver, LangGraphDriver
-from app.ai_chat.protocol import GraphOutcome
-from app.ai_chat.run_state import RunStateMachine
-from app.ai_chat.streaming.events import RuntimeEvent
 from app.config import settings
 from app.experience.repositories.evidence_repository import EvidenceRepository
 from app.experience.repositories.experience_repository import ExperienceRepository
@@ -45,6 +41,13 @@ from app.resume_generation.schemas import (
     ResumeValidation,
 )
 from app.schemas.models import ResumeData
+from app.workflow_runtime import (
+    GraphExecutor,
+    GraphOutcome,
+    LangGraphExecutor,
+    RunStateMachine,
+    RuntimeEvent,
+)
 
 
 class ResumeGenerationError(Exception):
@@ -71,7 +74,7 @@ class ResumeGenerationService:
         llm_model: ResumeGenerationModel | None = None,
         deterministic_model: ResumeGenerationModel | None = None,
         retriever: EvidenceRetriever | None = None,
-        graph_driver: GraphDriver | None = None,
+        graph_executor: GraphExecutor | None = None,
     ) -> None:
         self._session = session
         self._runs = ResumeGenerationRepository(session)
@@ -90,7 +93,7 @@ class ResumeGenerationService:
             sparse_model=settings.qdrant_sparse_model,
             timeout_seconds=settings.qdrant_timeout_seconds,
         )
-        self._graph_driver = graph_driver or LangGraphDriver()
+        self._graph_executor = graph_executor or LangGraphExecutor()
 
     async def preview(
         self, request: ResumeGenerationRequest
@@ -116,7 +119,7 @@ class ResumeGenerationService:
         try:
             result: dict | None = None
             outcome: GraphOutcome | None = None
-            async for item in self._graph_driver.stream(
+            async for item in self._graph_executor.stream(
                 graph=graph,
                 graph_input={
                     "run_id": run_id,

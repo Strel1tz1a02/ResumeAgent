@@ -1,5 +1,5 @@
-"""JSON 标量类型。"""
+"""兼容入口；通用 JSON 类型由 workflow_runtime 持有。"""
 
-from typing import TypeAlias
+from app.workflow_runtime.types import JsonScalar
 
-JsonScalar: TypeAlias = str | int | float | bool | None
+__all__ = ["JsonScalar"]
