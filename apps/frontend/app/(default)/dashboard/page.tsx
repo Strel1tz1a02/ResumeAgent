@@ -196,7 +196,7 @@ export default function DashboardPage() {
 
   const handleChooseWizard = () => {
     setIsMasterChoiceDialogOpen(false);
-    router.push('/resume-wizard');
+    router.push('/resume-generation');
   };
 
   const handleInitializeMasterKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {

@@ -70,34 +70,6 @@ from app.services.interview_prep import generate_interview_prep
 from app.prompts import DEFAULT_IMPROVE_PROMPT_ID, IMPROVE_PROMPT_OPTIONS
 
 
-async def _auto_create_tracker_application(
-    *,
-    job_id: str,
-    tailored_resume_id: str,
-    master_resume_id: str,
-    job: dict[str, Any] | None,
-    title: str | None,
-) -> None:
-    """Best-effort: drop an ``applied`` card on the tracker after a tailoring.
-
-    Company/role come from the cached job (zero extra LLM call). Wrapped so a
-    tracker failure can never break the tailoring flow.
-    """
-    try:
-        company = (job or {}).get("company")
-        role = title or (job or {}).get("role")
-        await db.create_application(
-            job_id=job_id,
-            resume_id=tailored_resume_id,
-            master_resume_id=master_resume_id,
-            status="applied",
-            company=company,
-            role=role,
-        )
-    except Exception as e:  # noqa: BLE001 - tracker is non-critical
-        logger.warning("Failed to auto-create tracker application: %s", e)
-
-
 def _get_default_prompt_id() -> str:
     """Get configured default prompt id from config file."""
     config = _load_config()
@@ -1228,14 +1200,6 @@ async def improve_resume_confirm_endpoint(
             improvements=improvements_payload,
         )
 
-        await _auto_create_tracker_application(
-            job_id=request.job_id,
-            tailored_resume_id=tailored_resume["resume_id"],
-            master_resume_id=request.resume_id,
-            job=job,
-            title=title,
-        )
-
         return ImproveResumeResponse(
             request_id=request_id,
             data=ImproveResumeData(
@@ -1469,14 +1433,6 @@ async def improve_resume_endpoint(
             tailored_resume_id=tailored_resume["resume_id"],
             job_id=request.job_id,
             improvements=improvements,
-        )
-
-        await _auto_create_tracker_application(
-            job_id=request.job_id,
-            tailored_resume_id=tailored_resume["resume_id"],
-            master_resume_id=request.resume_id,
-            job=job,
-            title=title,
         )
 
         return ImproveResumeResponse(
@@ -1772,6 +1728,8 @@ async def generate_cover_letter_endpoint(resume_id: str) -> GenerateContentRespo
     - The resume must be a tailored resume (has parent_id)
     - The resume must have an associated job context in the improvements table
     """
+    raise HTTPException(status_code=410, detail="Cover letter generation is retired")
+
     # Get the resume
     resume = await db.get_resume(resume_id)
     if not resume:
@@ -1843,6 +1801,8 @@ async def generate_outreach_endpoint(resume_id: str) -> GenerateContentResponse:
     - The resume must be a tailored resume (has parent_id)
     - The resume must have an associated job context in the improvements table
     """
+    raise HTTPException(status_code=410, detail="Outreach generation is retired")
+
     # Get the resume
     resume = await db.get_resume(resume_id)
     if not resume:
@@ -2027,6 +1987,8 @@ async def download_cover_letter_pdf(
         pageSize: A4 or LETTER
         lang: locale used for print page translations
     """
+    raise HTTPException(status_code=410, detail="Cover letter export is retired")
+
     resume = await db.get_resume(resume_id)
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found")

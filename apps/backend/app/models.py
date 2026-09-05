@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for Resume Matcher.
 
 A single declarative ``Base`` backs all tables (doc tables migrated from
-TinyDB plus the new ``applications`` and ``api_keys`` tables). The facade in
+TinyDB plus the new ``api_keys`` table). The facade in
 ``app/database.py`` converts ORM rows to plain dicts so the rest of the app
 never sees ORM objects — preserving the TinyDB-era contracts.
 """
@@ -16,7 +16,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -103,32 +102,6 @@ class Improvement(Base):
     job_id: Mapped[str] = mapped_column(String)
     improvements: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-
-
-class Application(Base):
-    """A Kanban application-tracker card."""
-
-    __tablename__ = "applications"
-    __table_args__ = (
-        # Concurrency-safe dedupe: a card is unique per (job, applied resume).
-        # The app-level select-then-insert relies on this to collapse races.
-        UniqueConstraint("job_id", "resume_id", name="uq_application_job_resume"),
-    )
-
-    application_id: Mapped[str] = mapped_column(String, primary_key=True)
-    job_id: Mapped[str] = mapped_column(String, index=True)
-    # The applied/tailored resume shown in the modal and opened by "Edit".
-    resume_id: Mapped[str] = mapped_column(String, index=True)
-    # Optional base resume the tailored one descends from (powers "stack" grouping).
-    master_resume_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="applied", index=True)
-    company: Mapped[str | None] = mapped_column(String, nullable=True)
-    role: Mapped[str | None] = mapped_column(String, nullable=True)
-    applied_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    position: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
-    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
 
 
 class ApiKey(Base):

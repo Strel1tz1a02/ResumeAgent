@@ -31,19 +31,6 @@ export {
 } from './resume';
 
 // Resume wizard operations
-export {
-  createInitialResumeWizardState,
-  finalizeResumeWizard,
-  postResumeWizardTurn,
-  type ResumeWizardAction,
-  type ResumeWizardFinalizeResponse,
-  type ResumeWizardSection,
-  type ResumeWizardState,
-  type ResumeWizardStep,
-  type ResumeWizardTurnRequest,
-  type ResumeWizardTurnResponse,
-} from './resume-wizard';
-
 // Config operations
 export {
   fetchLlmConfig,

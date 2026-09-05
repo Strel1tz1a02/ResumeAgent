@@ -5,7 +5,7 @@ This is a behavior-preserving replacement for the original TinyDB wrapper. The
 dicts** (never ORM rows), so the ~50 call sites only needed ``await`` added.
 
 Two engines back one SQLite file:
-- an **async** engine (``aiosqlite``) for the document tables and applications;
+- an **async** engine (``aiosqlite``) for the document tables;
 - a **sync** engine for the encrypted ``api_keys`` table, which is read on the
   synchronous LLM hot path (``get_llm_config`` → ``resolve_api_key``).
 """
@@ -20,31 +20,18 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.db_engine import init_models_sync, make_async_engine, make_sync_engine
-from app.models import ApiKey, Application, Improvement, Job, Resume
+from app.models import ApiKey, Improvement, Job, Resume
 
 logger = logging.getLogger(__name__)
 
 # Columns that are first-class on the jobs table; everything else the pipeline
 # attaches dynamically is stored in ``metadata_json`` (see Job model).
 _JOB_CORE_FIELDS = frozenset({"job_id", "content", "resume_id", "created_at"})
-
-# Application status columns (stable keys, decoupled from i18n labels).
-APPLICATION_STATUSES: tuple[str, ...] = (
-    "saved",
-    "applied",
-    "no_response",
-    "response",
-    "interview",
-    "accepted",
-    "rejected",
-)
-
 
 def _now() -> str:
     """Current UTC time as an ISO-8601 string (TinyDB-era format)."""
@@ -165,23 +152,6 @@ class Database:
             "job_id": row.job_id,
             "improvements": row.improvements,
             "created_at": row.created_at,
-        }
-
-    @staticmethod
-    def _application_to_dict(row: Application) -> dict[str, Any]:
-        return {
-            "application_id": row.application_id,
-            "job_id": row.job_id,
-            "resume_id": row.resume_id,
-            "master_resume_id": row.master_resume_id,
-            "status": row.status,
-            "company": row.company,
-            "role": row.role,
-            "applied_at": row.applied_at,
-            "notes": row.notes,
-            "position": row.position,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
         }
 
     # -- Resume operations --------------------------------------------------
@@ -477,217 +447,6 @@ class Database:
             row = result.scalars().first()
             return self._improvement_to_dict(row) if row else None
 
-    # -- Application (tracker) operations -----------------------------------
-
-    async def _next_position(self, session: AsyncSession, status: str) -> int:
-        result = await session.execute(
-            select(func.count())
-            .select_from(Application)
-            .where(Application.status == status)
-        )
-        return int(result.scalar() or 0)
-
-    async def _renumber(self, session: AsyncSession, status: str) -> None:
-        """Renumber a column's positions to a contiguous 0..n-1 sequence."""
-        result = await session.execute(
-            select(Application)
-            .where(Application.status == status)
-            .order_by(Application.position, Application.created_at)
-        )
-        for index, row in enumerate(result.scalars().all()):
-            if row.position != index:
-                row.position = index
-
-    async def create_application(
-        self,
-        job_id: str,
-        resume_id: str,
-        master_resume_id: str | None = None,
-        status: str = "applied",
-        company: str | None = None,
-        role: str | None = None,
-        applied_at: str | None = None,
-        notes: str | None = None,
-    ) -> dict[str, Any]:
-        """Create a tracker card, deduped on (job_id, resume_id).
-
-        If a card for the same job+resume already exists it is returned as-is
-        (survives double-submit / retried confirms).
-        """
-        async with self._session() as session:
-            existing = await session.execute(
-                select(Application).where(
-                    Application.job_id == job_id, Application.resume_id == resume_id
-                )
-            )
-            found = existing.scalars().first()
-            if found is not None:
-                return self._application_to_dict(found)
-
-            now = _now()
-            if applied_at is None and status != "saved":
-                applied_at = now
-            position = await self._next_position(session, status)
-            row = Application(
-                application_id=str(uuid4()),
-                job_id=job_id,
-                resume_id=resume_id,
-                master_resume_id=master_resume_id,
-                status=status,
-                company=company,
-                role=role,
-                applied_at=applied_at,
-                notes=notes,
-                position=position,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(row)
-            try:
-                await session.commit()
-            except IntegrityError:
-                # A concurrent create won the (job_id, resume_id) unique
-                # constraint — return the existing card instead of duplicating.
-                await session.rollback()
-                dup = await session.execute(
-                    select(Application).where(
-                        Application.job_id == job_id,
-                        Application.resume_id == resume_id,
-                    )
-                )
-                found = dup.scalars().first()
-                if found is not None:
-                    logger.debug(
-                        "Deduped concurrent application create for job=%s resume=%s",
-                        job_id,
-                        resume_id,
-                    )
-                    return self._application_to_dict(found)
-                raise
-            return self._application_to_dict(row)
-
-    async def list_applications(self, status: str | None = None) -> list[dict[str, Any]]:
-        """List applications ordered by (status, position)."""
-        async with self._session() as session:
-            stmt = select(Application)
-            if status is not None:
-                stmt = stmt.where(Application.status == status)
-            stmt = stmt.order_by(Application.status, Application.position)
-            result = await session.execute(stmt)
-            return [self._application_to_dict(row) for row in result.scalars().all()]
-
-    async def get_application(self, application_id: str) -> dict[str, Any] | None:
-        """Get an application by ID."""
-        async with self._session() as session:
-            row = await session.get(Application, application_id)
-            return self._application_to_dict(row) if row else None
-
-    async def update_application(
-        self, application_id: str, updates: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """Update an application; renumber columns when status/position change.
-
-        ``position`` is interpreted as the desired index within the (possibly
-        new) ``status`` column; siblings are renumbered server-side so the
-        column stays a contiguous 0..n-1 sequence.
-        """
-        async with self._session() as session:
-            row = await session.get(Application, application_id)
-            if row is None:
-                return None
-
-            old_status = row.status
-            new_status = updates.get("status", old_status)
-            target_position = updates.get("position", None)
-
-            for key in ("company", "role", "applied_at", "notes"):
-                if key in updates:
-                    setattr(row, key, updates[key])
-
-            moved = "status" in updates or "position" in updates
-            if moved:
-                row.status = new_status
-                # Park it out of the way, renumber both columns, then reinsert.
-                row.position = 10_000_000
-                await session.flush()
-                if old_status != new_status:
-                    await self._renumber(session, old_status)
-                # Renumber the target column excluding this row, then splice in.
-                siblings = await session.execute(
-                    select(Application)
-                    .where(
-                        Application.status == new_status,
-                        Application.application_id != application_id,
-                    )
-                    .order_by(Application.position, Application.created_at)
-                )
-                ordered = list(siblings.scalars().all())
-                if target_position is None or target_position > len(ordered):
-                    target_position = len(ordered)
-                if target_position < 0:
-                    target_position = 0
-                ordered.insert(target_position, row)
-                for index, item in enumerate(ordered):
-                    item.position = index
-
-            row.updated_at = _now()
-            await session.commit()
-            return self._application_to_dict(row)
-
-    async def bulk_update_applications(
-        self, application_ids: list[str], status: str
-    ) -> int:
-        """Move many applications to the end of ``status``. Returns count moved."""
-        moved = 0
-        async with self._session() as session:
-            affected_old: set[str] = set()
-            for application_id in application_ids:
-                row = await session.get(Application, application_id)
-                if row is None:
-                    continue
-                affected_old.add(row.status)
-                row.status = status
-                row.position = 20_000_000 + moved  # provisional, renumbered below
-                row.updated_at = _now()
-                moved += 1
-            await session.flush()
-            for old_status in affected_old - {status}:
-                await self._renumber(session, old_status)
-            await self._renumber(session, status)
-            await session.commit()
-        return moved
-
-    async def delete_application(self, application_id: str) -> bool:
-        """Delete an application; renumber its column."""
-        async with self._session() as session:
-            row = await session.get(Application, application_id)
-            if row is None:
-                return False
-            status = row.status
-            await session.delete(row)
-            await session.flush()
-            await self._renumber(session, status)
-            await session.commit()
-            return True
-
-    async def bulk_delete_applications(self, application_ids: list[str]) -> int:
-        """Delete many applications; renumber affected columns. Returns count."""
-        deleted = 0
-        async with self._session() as session:
-            affected: set[str] = set()
-            for application_id in application_ids:
-                row = await session.get(Application, application_id)
-                if row is None:
-                    continue
-                affected.add(row.status)
-                await session.delete(row)
-                deleted += 1
-            await session.flush()
-            for status in affected:
-                await self._renumber(session, status)
-            await session.commit()
-        return deleted
-
     # -- Encrypted API key store (sync; read on the LLM hot path) -----------
 
     def get_api_key_ciphertexts(self) -> dict[str, str]:
@@ -762,7 +521,7 @@ class Database:
     async def reset_database(self) -> None:
         """Reset by truncating user-document tables and clearing uploads.
 
-        Clears resumes/jobs/improvements, tracker applications, and AI Chat
+        Clears resumes/jobs/improvements and AI Chat
         history. Encrypted
         ``api_keys`` are preserved — matching the pre-existing behavior where a
         reset never wiped the user's stored credentials.
@@ -783,7 +542,6 @@ class Database:
             await session.execute(delete(AiChatMessage))
             await session.execute(delete(AiChatRun))
             await session.execute(delete(AiChatConversation))
-            await session.execute(delete(Application))
             await session.execute(delete(Improvement))
             await session.execute(delete(Job))
             await session.execute(delete(Resume))

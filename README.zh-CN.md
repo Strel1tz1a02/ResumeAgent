@@ -1,3 +1,22 @@
+# Resume Matcher · Evidence Agent
+
+这是基于上游 Resume Matcher 的二次开发版本。产品目标不是复刻原项目，而是构建一个面向个人求职者的、以真实经历证据为中心的 Agent 求职工作台。
+
+产品主线：导入个人资料 → 确认事实 → 导入职位 → 检索匹配证据 → 生成可核验简历 → 人工审核 → 导出与跟踪。
+
+项目当前的产品边界和裁剪规则见：[当前产品范围清单](docs/roadmap/scope-manifest.zh-CN.md)。完整的架构与开发路线见：[产品化重启方案](docs/roadmap/README.md)。
+
+## 当前定位
+
+- 事实和 Evidence 保留来源、版本与用户确认记录，生成内容不能覆盖原始事实。
+- Agent 任务支持工具审批、长程执行、暂停恢复、幂等和失败重试。
+- RAG 先服务证据匹配，再逐步加入 Graph RAG、Agent RAG 和多模态材料处理。
+- 质量以可复现评测和真实用户反馈衡量，不把模型能运行当成质量证明。
+
+原项目的赞助、社区和上游功能说明不再作为本产品文档入口；许可证与上游来源说明继续保留。
+
+<!-- Upstream project material retained below for attribution/history. -->
+
 <div align="center">
 
 [![Resume Matcher](assets/header.png)](https://www.resumematcher.fyi)

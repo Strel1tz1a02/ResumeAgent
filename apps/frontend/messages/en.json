@@ -47,7 +47,7 @@
     "settings": "Settings",
     "backToDashboard": "Back to Dashboard",
     "goToSettings": "Go to Settings",
-    "applicationTracker": "Application Tracker",
+    "resumeGeneration": "Evidence Resume Generation",
     "jdImports": "JD Import"
   },
   "dashboard": {

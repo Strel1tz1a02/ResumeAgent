@@ -134,7 +134,7 @@ export default function ResumeViewerPage() {
   };
 
   const handleInterviewPrep = () => {
-    router.push(`/builder?id=${resumeId}&tab=interview-prep`);
+    router.push(`/builder?id=${resumeId}`);
   };
 
   const handleTitleSave = async () => {

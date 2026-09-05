@@ -60,7 +60,8 @@ type JobContextStatus = 'idle' | 'loading' | 'available' | 'missing';
 
 const STORAGE_KEY = 'resume_builder_draft';
 const SETTINGS_STORAGE_KEY = 'resume_builder_settings';
-const TAB_IDS: TabId[] = ['resume', 'cover-letter', 'outreach', 'interview-prep', 'jd-match'];
+// 产品主线只暴露简历编辑和 JD 匹配；旧内容生成 Tab 暂停开发，保留兼容数据读取。
+const TAB_IDS: TabId[] = ['resume', 'jd-match'];
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
@@ -992,21 +993,6 @@ const ResumeBuilderContent = () => {
               <RetroTabs
                 tabs={[
                   { id: 'resume', label: t('builder.previewTabs.resume') },
-                  {
-                    id: 'cover-letter',
-                    label: t('builder.previewTabs.coverLetter'),
-                    disabled: !coverLetter,
-                  },
-                  {
-                    id: 'outreach',
-                    label: t('builder.previewTabs.outreach'),
-                    disabled: !outreachMessage,
-                  },
-                  {
-                    id: 'interview-prep',
-                    label: t('builder.previewTabs.interviewPrep'),
-                    disabled: !isTailoredResume,
-                  },
                   {
                     id: 'jd-match',
                     label: t('builder.previewTabs.jdMatch'),

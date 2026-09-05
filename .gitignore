@@ -35,6 +35,7 @@ uv.lock
 *.db
 *.db-wal
 *.db-shm
+*.db.pre-cleanup.bak
 
 # Encryption secret for API keys at rest - NEVER COMMIT
 **/data/.secret_key

@@ -29,12 +29,10 @@ from app.jd_import.sources import PlaywrightMCPSourceProvider, UrlPolicy
 from app.pdf import close_pdf_renderer
 from app.resume_generation import router as resume_generation_router
 from app.routers import (
-    applications_router,
     config_router,
     enrichment_router,
     health_router,
     jobs_router,
-    resume_wizard_router,
     resumes_router,
 )
 
@@ -163,8 +161,6 @@ app.include_router(config_router, prefix="/api/v1")
 app.include_router(resumes_router, prefix="/api/v1")
 app.include_router(jobs_router, prefix="/api/v1")
 app.include_router(enrichment_router, prefix="/api/v1")
-app.include_router(applications_router, prefix="/api/v1")
-app.include_router(resume_wizard_router, prefix="/api/v1")
 app.include_router(experiences_router, prefix="/api/v1")
 app.include_router(experience_ai_chat_router, prefix="/api/v1")
 app.include_router(jd_import_router, prefix="/api/v1")

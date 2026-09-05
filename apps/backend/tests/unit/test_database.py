@@ -207,51 +207,6 @@ class TestImprovements:
         assert await db.get_improvement_by_tailored_resume("nope") is None
 
 
-class TestApplications:
-    async def test_create_defaults_and_position(self, db):
-        a = await db.create_application(job_id="j1", resume_id="r1")
-        assert a["status"] == "applied"
-        assert a["position"] == 0
-        assert a["applied_at"] is not None  # applied → stamped
-        b = await db.create_application(job_id="j2", resume_id="r2")
-        assert b["position"] == 1  # appended to the column
-
-    async def test_saved_status_has_no_applied_at(self, db):
-        a = await db.create_application(job_id="j1", resume_id="r1", status="saved")
-        assert a["applied_at"] is None
-
-    async def test_create_dedupes_on_job_and_resume(self, db):
-        a = await db.create_application(job_id="j1", resume_id="r1")
-        again = await db.create_application(job_id="j1", resume_id="r1")
-        assert again["application_id"] == a["application_id"]
-        assert len(await db.list_applications()) == 1
-
-    async def test_move_renumbers_columns(self, db):
-        a = await db.create_application(job_id="j1", resume_id="r1")
-        b = await db.create_application(job_id="j2", resume_id="r2")
-        # Move a to the front of "interview".
-        moved = await db.update_application(a["application_id"], {"status": "interview", "position": 0})
-        assert moved["status"] == "interview"
-        assert moved["position"] == 0
-        # The "applied" column renumbered: b is now position 0.
-        applied = await db.list_applications(status="applied")
-        assert [x["application_id"] for x in applied] == [b["application_id"]]
-        assert applied[0]["position"] == 0
-
-    async def test_bulk_update_and_delete(self, db):
-        a = await db.create_application(job_id="j1", resume_id="r1")
-        b = await db.create_application(job_id="j2", resume_id="r2")
-        moved = await db.bulk_update_applications([a["application_id"], b["application_id"]], "rejected")
-        assert moved == 2
-        rejected = await db.list_applications(status="rejected")
-        assert {x["position"] for x in rejected} == {0, 1}
-        deleted = await db.bulk_delete_applications([a["application_id"]])
-        assert deleted == 1
-        remaining = await db.list_applications(status="rejected")
-        assert len(remaining) == 1
-        assert remaining[0]["position"] == 0  # renumbered after delete
-
-
 class TestApiKeyStore:
     async def test_set_get_delete_ciphertext(self, db):
         db.set_api_key_ciphertext("openai", "ct-openai")
@@ -278,11 +233,8 @@ class TestStatsAndReset:
         monkeypatch.setattr("app.database.settings.data_dir", tmp_path)
         await db.create_resume(content="a")
         await db.create_job(content="jd")
-        await db.create_application(job_id="j1", resume_id="r1")
         await db.reset_database()
         stats = await db.get_stats()
         assert stats["total_resumes"] == 0
         assert stats["total_jobs"] == 0
         assert stats["has_master_resume"] is False
-        # Applications are cleared too (no orphans after a full reset).
-        assert await db.list_applications() == []
