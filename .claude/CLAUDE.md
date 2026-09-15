@@ -41,7 +41,7 @@ Before exploring code, read [docs/agent/README.md](../docs/agent/README.md) for 
 cd apps/backend
 uv sync --extra dev                                  # Install Python deps (incl. test deps)
 uv run uvicorn app.main:app --reload --port 8000     # FastAPI on :8000
-uv run pytest                                        # Run backend tests (~444; LLM evals excluded)
+uv run pytest                                        # Run backend tests (unit, service, integration)
 
 # Frontend (from repo root, in a separate terminal)
 cd apps/frontend
@@ -158,7 +158,7 @@ Both apps have real test suites, and **tests are in scope** (deliberate testing 
 | Backend | pytest + pytest-asyncio + httpx + respx | `cd apps/backend && uv run pytest` |
 | Frontend | vitest + Testing Library (jsdom) | `cd apps/frontend && npm run test` |
 
-- **Backend layers:** `tests/unit` (pure logic), `tests/service` (mocked LLM), `tests/integration` (real routers via httpx ASGI), `tests/evals` (prompt-quality scorers + a gated LLM-judge — excluded by default; run with `uv run pytest -m eval`).
+- **Backend layers:** `tests/unit` (pure logic), `tests/service` (mocked LLM), `tests/integration` (real routers via httpx ASGI).
 - **Local push gate (not CI):** a `pre-push` hook (`.githooks/pre-push`) runs the backend suite + a locale-parity check and **blocks red pushes**. Activate once per clone: `git config core.hooksPath .githooks`. We deliberately avoid a GitHub Actions PR gate (high external-PR volume) — see [`.githooks/README.md`](../.githooks/README.md).
 - Keep tests **deterministic and anti-theater**: a test must fail when its target breaks, and the default suites make no real network/LLM calls.
 

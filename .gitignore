@@ -137,9 +137,13 @@ next-env.d.ts
 config.json
 **/config.json
 
-# Agentic E2E monitor — runtime evidence bundles and the local-only skill
+# Local runtime artifacts
 /artifacts/
-/.claude/skills/monitor-e2e/
+
+# Evaluation runtime artifacts and Python caches
+/evals/artifacts/
+/evals/.pytest_cache/
+/evals/**/__pycache__/
 
 # Superpowers brainstorming visual-companion scratch (local only)
 /.superpowers/

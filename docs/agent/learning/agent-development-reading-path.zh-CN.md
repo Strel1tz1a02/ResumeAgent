@@ -367,17 +367,15 @@ START
 
 产出：至少 10 个“故障—保护机制—剩余风险”三列表。
 
-#### 第 15 课：测试、调试与 Agent Eval
+#### 第 15 课：测试与调试
 
 按顺序阅读：
 
 1. `apps/backend/tests/unit/test_experience_ai_chat.py`；
 2. `apps/backend/tests/unit/test_ai_chat_model.py`；
 3. `apps/frontend/tests/experience-ai-chat.test.ts`；
-4. `apps/backend/tests/evals/README.md`；
-5. `apps/backend/tests/evals/scorers.py`。
 
-核心问题：哪些测试验证确定性机制？哪些测试验证 LLM 质量？Mock 到哪一层才不会变成“测试戏剧”？
+核心问题：哪些测试验证确定性机制？Mock 到哪一层才不会变成“测试戏剧”？
 
 产出：测试金字塔 + 为一个失败场景新增测试草案。
 

@@ -5,7 +5,7 @@
 # the repo gets a high volume of external contributor PRs).
 #
 # Runs BEFORE every `git push` and BLOCKS the push if anything is red:
-#   1. backend test suite        (uv run pytest — LLM/eval tests excluded by default)
+#   1. backend test suite        (uv run pytest)
 #   2. frontend locale parity     (pure-Python check; guards the i18n build break)
 #   3. frontend test suite        (vitest — runs when Node is available, else skipped)
 #
@@ -15,7 +15,7 @@
 #
 # Notes:
 #  - Both checks always run so you see ALL failures, not just the first.
-#  - The backend suite is ~8s and makes NO network/LLM calls (evals are opt-in).
+#  - The backend suite is ~8s and makes NO network/LLM calls.
 #  - The frontend vitest suite runs only when Node is on PATH (git hooks may run
 #    without nvm's node); a full `tsc`/`next build` is intentionally NOT run here.
 

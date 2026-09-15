@@ -12,7 +12,6 @@
 | 简历生成与审核 | 生成岗位版本，逐条查看来源和 diff 后确认 | `resume-generation`、生成 API |
 | 版本与导出 | 保留原始事实，导出确认后的 PDF | resume print 路由 |
 | 可靠任务 | 长任务可暂停、恢复、重试且不重复写入 | `workflow_runtime`、Outbox、ARQ |
-| 质量评估 | 对召回、真实性、覆盖率和禁止事实做可复现评估 | `tests/evals` |
 
 ## 已完成退出
 

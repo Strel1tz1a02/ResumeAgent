@@ -18,7 +18,6 @@ venv/
 *.egg-info/
 dist/
 build/
-tests/evals/results/
 
 # IDE
 .idea/

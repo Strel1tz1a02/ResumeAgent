@@ -7,7 +7,7 @@
 - API 集成测试：HTTPX AsyncClient；Graph 恢复测试使用真实 LangGraph + SQLite checkpoint。
 
 ~~~bash
-# 后端默认全量（排除 eval）
+# 后端默认全量
 cd apps/backend
 uv run pytest
 
@@ -15,8 +15,6 @@ uv run pytest
 uv run pytest tests/unit
 uv run pytest tests/integration
 
-# 显式 LLM eval（需要 provider key，结果可能非确定）
-uv run pytest -m eval
 
 # 前端
 cd apps/frontend
@@ -24,18 +22,15 @@ npm test
 npx tsc --noEmit --incremental false
 npm run lint
 
-# opt-in agentic E2E
-RM_E2E_MONITOR=1 uv run python -m e2e_monitor sweep
 ~~~
 
 coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 
 ## 2) 测试布局
 
-- 后端：apps/backend/tests/unit、integration、evals；pytest 自动发现 test_*.py、Test*、test_*。
+- 后端：apps/backend/tests/unit、service、integration；pytest 自动发现 test_*.py、Test*、test_*。
 - Agent memory 还包含 app/ai_chat/memory/tests；由于 pytest testpaths 仅为 tests，默认全量命令不会自动发现这组内嵌测试。
 - 前端：apps/frontend/tests/*.test.ts(x)，全局 setup 为 apps/frontend/vitest.setup.ts。
-- E2E monitor：apps/backend/e2e_monitor；隔离 DATA_DIR，产物写入 artifacts/e2e-monitor。
 - 本地门禁：.githooks/pre-push；需要手工 git config core.hooksPath .githooks 才生效。
 
 ## 3) Scope matrix
@@ -47,7 +42,6 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 | Graph 协议 | 是 | 真实 interrupt/resume/recover、GraphOutcome | Experience 最完整 |
 | 并发/幂等 | 是 | Tool Call CAS、重复 resolution、取消竞态 | Experience/Tool suite 较强 |
 | 前端组件 | 是 | hooks、workspaces、API/SSE parser | Runtime parser 缺独立测试文件 |
-| E2E | 可选 | 真应用 + LLM + PDF + 证据报告 | 非 CI、非阻断 |
 | 性能/负载 | 否 | [TODO] | 扫描未发现性能测试配置 |
 | 硬崩溃/多进程恢复 | 不完整 | stale running、DB/checkpoint 对账 | 当前最重要缺口 |
 
@@ -57,7 +51,6 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 - Runtime 核心既有纯协议测试，也有真实 SQLite checkpoint 的 Graph 测试。
 - 数据库测试使用临时目录/临时 SQLite，并重置 dependency container。
 - 前端用 Testing Library、vi.mock 与 mocked fetch；SSE 测试构造 fragmented ReadableStream。
-- eval 测试默认 deselect，避免常规测试触网或调用付费模型。
 - 常见风险：fake runner 可证明服务幂等，却不能证明真实 Graph + checkpoint + DB 的跨进程一致性。
 
 ## 5) 本次验证结果（2026-08-17）
@@ -108,6 +101,5 @@ coverage 命令和阈值未在 manifest/CI 中定义，[TODO]。
 - apps/frontend/vitest.config.ts
 - .githooks/pre-push
 - .github/workflows/docker-publish.yml
-- apps/backend/e2e_monitor/README.md
 - apps/backend/tests/unit/test_experience_ai_chat.py
 - apps/frontend/tests/experience-ai-chat.test.ts

@@ -15,7 +15,6 @@
 | `app/ai_chat/checkpoint/factory.py` | 当前使用 SQLite checkpointer | 先保留行为，后迁移持久化适配器 |
 | `app/database.py`，799 行 | 保留 TinyDB 时代字典接口的 SQLite facade；含进程内锁 | 暂作兼容层；按业务逐步替换，明确分布式约束 |
 | `app/routers/resumes.py`，2056 行 | 简历旧路径职责集中 | 拆用例，避免只把大文件切成多个杂物文件 |
-| `tests/evals/README.md` | 已有多能力评估、来源校验、独立 Judge 配置和报告范围声明 | 继续建设；不能把合成回归结果称为招聘质量证明 |
 | `.github/workflows/docker-publish.yml` | 当前看到发布工作流，未见 PR 测试门禁工作流 | 增加 CI，发布前必须引用通过的验证结果 |
 | `docker-compose.yml` | 已有 Worker 和浏览器出口隔离；应用仍共享本地数据卷 | 有部署基础，不等于高可用或租户隔离 |
 | `docs/agent/`、`docs/codebase/`、`docs/superpowers/`、多个启动说明 | 新旧说明并存，阅读路径不清晰 | 一个当前入口，历史文档保留但标明状态 |
@@ -38,7 +37,7 @@
 | 处置 | 功能或设计 | 具体策略 |
 |---|---|---|
 | 保留并做深 | 经历库、Evidence、JD 导入、证据驱动简历生成 | 构成唯一主线；保留事实与版本，不要求保留所有旧实现 |
-| 保留并收敛 | Runtime、审批、Outbox、检索、核心 eval | 裁掉无调用抽象和适配器；历史投入不是保留理由 |
+| 保留并收敛 | Runtime、审批、Outbox、检索 | 裁掉无调用抽象和适配器；历史投入不是保留理由 |
 | 提取复用 | 简历编辑、PDF 渲染、打印路由 | 只提取新流程所需能力，先保留一个稳定模板 |
 | 替换 | 唯一主简历、`is_master` 为中心的业务假设 | 以个人证据库作为事实中心；旧简历仅作为资料来源 |
 | 合并后删除 | `/tailor`、`/resume-wizard` 与 `/resume-generation` 并行流程 | 收敛到证据生成；迁入必要补问交互，删除重复编排 |
@@ -102,10 +101,6 @@ Resume-Matcher/
         contract/
         e2e/
   contracts/                     # HTTP、事件、Workflow 输入输出契约
-  evals/                         # 后续从已有 eval 渐进迁入
-    datasets/
-    scorers/
-    suites/
   training/                      # 到训练阶段才建立；独立依赖环境
     data/
     sft/
@@ -137,7 +132,7 @@ Resume-Matcher/
 |---|---|---|
 | `app/experience/` | `modules/experience/` | 保留证据 ID、修订号、现有审批语义 |
 | `app/jd_import/` | `modules/jobs/imports/` | 保留来源定位、批量提问、信息归属澄清 |
-| `app/resume_generation/` 中生成相关代码 | `modules/resumes/generation/` | 保留事实约束、provenance 与评估口径 |
+| `app/resume_generation/` 中生成相关代码 | `modules/resumes/generation/` | 保留事实约束与 provenance |
 | retriever/indexing/index_worker | `modules/knowledge/` 与 Worker 入口 | 先定义公开接口，再移动；不要复制检索器 |
 | `app/ai_chat/` | `modules/conversations/` | 拆开会话数据与横向持久化适配器；不再把 Runtime 装配藏在聊天模块中 |
 | `app/workflow_runtime/` | 保留 | 延续已有架构边界测试，增量验证依赖方向 |
@@ -146,7 +141,6 @@ Resume-Matcher/
 | `app/background_jobs/` | `infrastructure/queue/` | 保留 Outbox 数据和去重键；消费者业务逻辑回到所属模块 |
 | `app/scripts/migrate_*` | `migrations/` 加历史迁移工具 | 先做已应用版本基线，不能直接重跑所有历史脚本 |
 | frontend 的业务 components/hooks/types | `features/<业务>/` | app 只负责装配；共享 UI 不含业务请求 |
-| 现有 `tests/evals/` | 先保留，P3 再迁 `evals/` | 普通回归和真实付费 eval 继续分离 |
 
 ## 5. 迁移批次
 

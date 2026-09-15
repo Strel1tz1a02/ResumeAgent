@@ -8,6 +8,7 @@
 - [项目整理方案](roadmap/repository-plan.zh-CN.md)：目录、模块职责、删除和迁移规则。
 - [产品与技术路线](roadmap/development-plan.zh-CN.md)：业务闭环、Agent、RAG、训练、部署和验收。
 - [整理进度](roadmap/cleanup-status.md)：已移除内容、兼容保留项和下一批删除条件。
+- [精简 Agent 评估流程](evaluation/design.zh-CN.md)：数据 → Agent 执行 → DeepEval 评分，可选将结果写入 Langfuse。
 
 ## 当前代码事实
 
@@ -23,7 +24,7 @@
 | `apps/backend/app/jd_import` | JD 解析、来源、澄清和持久化 | 来源引用与用户确认优先于猜测 |
 | `apps/backend/app/experience` | 经历、Evidence 和修订 | 事实库是唯一事实归属 |
 | `apps/backend/app/background_jobs` | Outbox 与任务派发 | 业务消费者归属业务模块，投递可重复 |
-| `apps/backend/tests` | 分层回归与质量评估 | mock、真实集成和 eval 必须标明边界 |
+| `apps/backend/tests` | 分层回归测试 | mock 与真实集成必须标明边界 |
 
 ## 修改前检查
 

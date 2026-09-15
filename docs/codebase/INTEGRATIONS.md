@@ -52,7 +52,6 @@
 
 - 外部调用使用 Python logging；后端写 apps/backend/data/logs/backend.log，部署日志由容器 stdout/volume 决定。
 - Run、Tool Call、Outbox 和失败 code 提供业务级审计线索。
-- e2e_monitor 可生成持久证据包，但它是 opt-in report，不是门禁。
 - 没有发现统一 metrics、distributed tracing、SLO 或 alert 配置。
 - 缺口：无法直接观测 stale running、checkpoint/Run 漂移、事件丢失/重放、Interaction 等待时长。
 
@@ -67,5 +66,4 @@
 - apps/backend/app/resume_generation/retriever.py
 - apps/frontend/next.config.ts
 - docker-compose.yml
-- apps/backend/e2e_monitor/README.md
 
